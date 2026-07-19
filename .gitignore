@@ -1,0 +1,25 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Official IPA artifacts are downloaded locally and must not be committed.
+artifacts/*
+!artifacts/.gitkeep
+*.ipa
+*.app
+*.dylib
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+*.der
+*.key
+*.pem
+*.log
+*.xcarchive
+xcuserdata/
+DerivedData/
+
+# Local enhancer build products.
+enhancer/build/
