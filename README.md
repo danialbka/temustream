@@ -26,6 +26,15 @@ or provisioning profile belongs in this repository.
 - `CHECKSUMS.sha256`: hashes for known upstream and locally generated packages;
   the referenced binaries themselves remain ignored.
 
+## Download and install
+
+Download the enhancer from the
+[latest GitHub release](https://github.com/danialbka/stremio-ios-enhanced/releases/latest),
+then follow [INSTALL.md](INSTALL.md). Releases contain only this project's
+enhancer dylib, checksum, and source archives. They do not contain or
+redistribute a Stremio IPA; obtain the compatible IPA from Stremio's official
+CDN and sign it locally with your own sideloading account.
+
 ## Verified release
 
 - Source: <https://dl.strem.io/apple/2.0.3b18/ios/stremio_iOS.ipa>
