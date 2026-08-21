@@ -1,0 +1,40 @@
+name: Minimal app
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "minimal-app/**"
+      - ".github/workflows/minimal-app.yml"
+  push:
+    paths:
+      - "minimal-app/**"
+      - ".github/workflows/minimal-app.yml"
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+      - name: Ensure FFmpeg is available
+        run: command -v ffmpeg >/dev/null || brew install ffmpeg
+      - name: Ensure XcodeGen and Metal toolchain are available
+        run: |
+          command -v xcodegen >/dev/null || brew install xcodegen
+          xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - name: Run full verification workflow
+        run: ./minimal-app/scripts/verify.sh
+      - name: Upload signed ad-hoc builds and E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skeleton-verification
+          path: |
+            minimal-app/build/*.zip
+            minimal-app/build/*.png
+            minimal-app/build/*.log
+            minimal-app/build/*.txt
+            minimal-app/build/ui-states/**

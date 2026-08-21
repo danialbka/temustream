@@ -1,0 +1,11 @@
+{
+  "meta": {
+    "id": "tt1254207",
+    "type": "movie",
+    "name": "Big Buck Bunny",
+    "poster": "http://127.0.0.1:18766/ui-states/poster-portrait.png",
+    "description": "A cheerful open movie used to verify the complete playback workflow.",
+    "releaseInfo": "2008",
+    "genres": ["Animation", "Comedy"]
+  }
+}

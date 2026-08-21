@@ -208,9 +208,43 @@ __attribute__((objc_runtime_name("_TtC7Stremio20PlayerViewController")))
 @interface SPEMockPlayerViewController : UIViewController
 @property(nonatomic, strong) SPEMockVideoControlsView *controls;
 @property(nonatomic, strong) UILabel *resultLabel;
+@property(nonatomic, assign) double layoutBenchmarkNanoseconds;
 @end
 
 @implementation SPEMockPlayerViewController
+
+- (double)benchmarkEnhancerLayout {
+    enum { sampleCount = 9, iterationsPerSample = 5000 };
+    double samples[sampleCount];
+
+    for (NSUInteger sample = 0; sample < sampleCount; sample += 1) {
+        CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
+        @autoreleasepool {
+            for (NSUInteger iteration = 0; iteration < iterationsPerSample; iteration += 1) {
+                [self.controls layoutSubviews];
+            }
+        }
+        CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - started;
+        samples[sample] = elapsed * 1e9 / (double)iterationsPerSample;
+    }
+
+    for (NSUInteger index = 1; index < sampleCount; index += 1) {
+        double value = samples[index];
+        NSUInteger insertion = index;
+        while (insertion > 0 && samples[insertion - 1] > value) {
+            samples[insertion] = samples[insertion - 1];
+            insertion -= 1;
+        }
+        samples[insertion] = value;
+    }
+
+    double median = samples[sampleCount / 2];
+    [NSUserDefaults.standardUserDefaults setDouble:median
+                                             forKey:@"SPELayoutBenchmarkNanoseconds"];
+    NSLog(@"[EnhancerBenchmark] layout median %.1f ns/pass (%lu samples x %lu iterations)",
+          median, (unsigned long)sampleCount, (unsigned long)iterationsPerSample);
+    return median;
+}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -249,6 +283,7 @@ __attribute__((objc_runtime_name("_TtC7Stremio20PlayerViewController")))
     [super viewDidAppear:animated];
     [self.controls setNeedsLayout];
     [self.controls layoutIfNeeded];
+    self.layoutBenchmarkNanoseconds = [self benchmarkEnhancerLayout];
 
     AVPlayerLayer *probeLayer = [AVPlayerLayer playerLayerWithPlayer:nil];
     AVPictureInPictureController *probeController =
@@ -299,6 +334,12 @@ __attribute__((objc_runtime_name("_TtC7Stremio20PlayerViewController")))
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
         BOOL buttonFound = [rotate isKindOfClass:UIButton.class];
         BOOL pipFound = [pip isKindOfClass:UIButton.class];
+        if (pipFound) {
+            pip.hidden = YES;
+            pip.alpha = 0.25;
+            pip.enabled = NO;
+            [self.controls layoutSubviews];
+        }
         BOOL pipVisible = pipFound && !pip.hidden && pip.alpha > 0.0 && pip.enabled;
         BOOL vlcDisabled = ![defaults boolForKey:@"useVLCKit"];
         BOOL avDisabled = ![defaults boolForKey:@"useAVPlayer"];
@@ -355,8 +396,9 @@ __attribute__((objc_runtime_name("_TtC7Stremio20PlayerViewController")))
                     vlcDisabled && avDisabled && ksPipEnabled && allOrientations &&
                     rotationChanged && rotationReturned;
                 self.resultLabel.text = [NSString stringWithFormat:
-                    @"%@\n\nRotate button: %@\nPiP button: %@\nPiP action: %@\nAuto PiP: %@\nNative auto PiP: %@\nKS subclass hook: %@\nKS render handoff: %@\nKS native bridge: %@\nKSPlayer default: %@\nKS PiP enabled: %@\nOrientation hook: %@\nFirst toggle: %@\nSecond toggle: %@",
+                    @"%@\n\nLayout median: %.1f ns/pass\nRotate button: %@\nPiP button: %@\nPiP action: %@\nAuto PiP: %@\nNative auto PiP: %@\nKS subclass hook: %@\nKS render handoff: %@\nKS native bridge: %@\nKSPlayer default: %@\nKS PiP enabled: %@\nOrientation hook: %@\nFirst toggle: %@\nSecond toggle: %@",
                     passed ? @"PASS" : @"FAIL",
+                    self.layoutBenchmarkNanoseconds,
                     buttonFound ? @"FOUND" : @"MISSING",
                     pipVisible ? @"VISIBLE" : @"MISSING",
                     pipAction ? @"FIRED" : @"NOT FIRED",

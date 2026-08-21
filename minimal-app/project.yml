@@ -1,0 +1,50 @@
+name: StremioSkeleton
+options:
+  minimumXcodeGenVersion: 2.42.0
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  KSPlayer:
+    url: https://github.com/kingslay/KSPlayer.git
+    # Post-2.3.4 fix for wide HDR mastering metadata values. Without this,
+    # valid 8K HDR streams can trap in FFmpegDecode before their first frame.
+    revision: 25c923b70d3d7881275e8f3d917e1e9752416e27
+targets:
+  StremioSkeleton:
+    type: application
+    platform: iOS
+    sources:
+      - Sources/StremioSkeletonCore
+      - iOS/App
+    info:
+      path: iOS/Resources/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIBackgroundModes:
+          - audio
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    dependencies:
+      - package: KSPlayer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.stremio.skeleton
+        PRODUCT_NAME: StremioSkeleton
+        SWIFT_VERSION: 6.0
+        SWIFT_OPTIMIZATION_LEVEL: -O
+        SWIFT_COMPILATION_MODE: wholemodule
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+schemes:
+  StremioSkeleton:
+    build:
+      targets:
+        StremioSkeleton: all
+    run:
+      config: Release
+    archive:
+      config: Release

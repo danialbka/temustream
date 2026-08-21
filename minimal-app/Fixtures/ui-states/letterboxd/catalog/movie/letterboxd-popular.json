@@ -1,0 +1,10 @@
+{
+  "metas": [
+    { "id": "tt0110912", "type": "movie", "name": "Pulp Fiction", "poster": "http://127.0.0.1:18766/ui-states/poster-tall.png", "releaseInfo": "1994" },
+    { "id": "tt0068646", "type": "movie", "name": "The Godfather", "poster": "http://127.0.0.1:18766/ui-states/poster-portrait.png", "releaseInfo": "1972" },
+    { "id": "tt0245429", "type": "movie", "name": "Spirited Away", "poster": "http://127.0.0.1:18766/ui-states/poster-wide.png", "releaseInfo": "2001" },
+    { "id": "tt0109830", "type": "movie", "name": "Forrest Gump", "poster": "http://127.0.0.1:18766/ui-states/poster-tall.png", "releaseInfo": "1994" },
+    { "id": "tt0120737", "type": "movie", "name": "The Lord of the Rings", "poster": "http://127.0.0.1:18766/ui-states/poster-portrait.png", "releaseInfo": "2001" },
+    { "id": "tt6751668", "type": "movie", "name": "Parasite", "poster": "http://127.0.0.1:18766/ui-states/poster-wide.png", "releaseInfo": "2019" }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "local.stremio.skeleton.ui.letterboxd",
+  "version": "1.0.0",
+  "name": "Letterboxd Recommendations",
+  "description": "Deterministic Letterboxd-style screenshot fixture.",
+  "resources": ["catalog", "meta"],
+  "types": ["movie"],
+  "catalogs": [
+    { "type": "movie", "id": "letterboxd-popular", "name": "Popular This Week" }
+  ]
+}

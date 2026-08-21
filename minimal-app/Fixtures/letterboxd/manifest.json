@@ -1,0 +1,26 @@
+{
+  "id": "community.stremboxd.fixture",
+  "version": "1.2.3",
+  "name": "Letterboxd Recommendations",
+  "description": "Deterministic Stremboxd-compatible fixture.",
+  "resources": ["catalog", "meta"],
+  "types": ["movie"],
+  "catalogs": [
+    {
+      "type": "movie",
+      "id": "letterboxd-popular",
+      "name": "Popular This Week",
+      "extra": [
+        { "name": "skip", "isRequired": false }
+      ]
+    },
+    {
+      "type": "movie",
+      "id": "letterboxd-search",
+      "name": "Search Letterboxd",
+      "extra": [
+        { "name": "search", "isRequired": true }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "metas": [
+    { "id": "tt1000001", "type": "movie", "name": "Letterboxd Pick One", "releaseInfo": "2026" },
+    { "id": "tt1000002", "type": "movie", "name": "Letterboxd Pick Two", "releaseInfo": "2025" }
+  ]
+}

@@ -766,12 +766,28 @@ static void SPEInstallAutomaticPiP(id controls) {
 }
 
 static void SPEInstallPiPButton(id controls) {
+    UIButton *button = objc_getAssociatedObject(controls, SPEPiPButtonKey);
+    if (button != nil && button.superview != nil) {
+        // layoutSubviews is a hot path while player controls animate. Keep the
+        // state Stremio may toggle, but do not repeat one-time target,
+        // configuration, constraint, and controller setup on every layout.
+        if (button.hidden) {
+            button.hidden = NO;
+        }
+        if (button.alpha != 1.0) {
+            button.alpha = 1.0;
+        }
+        if (!button.enabled) {
+            button.enabled = YES;
+        }
+        return;
+    }
+
     UIStackView *stack = SPEControlsStack(controls);
     if (stack == nil) {
         return;
     }
 
-    UIButton *button = objc_getAssociatedObject(controls, SPEPiPButtonKey);
     if (button == nil) {
         // Stremio 2.0.3 already creates a correctly wired PiP button but hides
         // it whenever the selected player manager reports PiP unavailable.
@@ -830,8 +846,8 @@ static void SPEInstallPiPButton(id controls) {
 }
 
 static void SPEInstallRotationButton(id controls) {
-    if (objc_getAssociatedObject(controls, SPERotationButtonKey) != nil) {
-        UIButton *button = objc_getAssociatedObject(controls, SPERotationButtonKey);
+    UIButton *button = objc_getAssociatedObject(controls, SPERotationButtonKey);
+    if (button != nil) {
         SPEUpdateRotationButton(button, ((UIView *)controls).window.windowScene);
         return;
     }
@@ -841,7 +857,7 @@ static void SPEInstallRotationButton(id controls) {
         return;
     }
 
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.translatesAutoresizingMaskIntoConstraints = NO;
     button.tintColor = UIColor.whiteColor;
     button.accessibilityLabel = @"Rotate video";

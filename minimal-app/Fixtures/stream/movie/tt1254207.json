@@ -1,0 +1,21 @@
+{
+  "streams": [
+    {
+      "name": "Local H.264 test stream",
+      "title": "E2E 720p",
+      "url": "http://127.0.0.1:18765/sample.mp4"
+    },
+    {
+      "name": "Local compatibility test stream",
+      "title": "E2E AV1 FLAC sample.mkv",
+      "url": "http://127.0.0.1:18765/sample-av1-flac.mkv"
+    },
+    {
+      "name": "Fixture torrent",
+      "title": "E2E torrent contract.mkv",
+      "infoHash": "08ada5a7a6183aae1e09d831df6748d566095a10",
+      "fileIdx": 0,
+      "sources": ["tracker:udp://tracker.example.test:80"]
+    }
+  ]
+}

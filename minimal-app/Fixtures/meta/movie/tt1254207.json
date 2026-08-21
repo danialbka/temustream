@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "id": "tt1254207",
+    "type": "movie",
+    "name": "Big Buck Bunny",
+    "description": "A public-domain-style fixture used to verify the complete local workflow.",
+    "releaseInfo": "2008",
+    "genres": ["Animation", "Comedy"]
+  }
+}

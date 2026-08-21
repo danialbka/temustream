@@ -1,0 +1,10 @@
+{
+  "metas": [
+    { "id": "tt1254207", "type": "movie", "name": "Big Buck Bunny", "poster": "http://127.0.0.1:18766/ui-states/poster-portrait.png", "releaseInfo": "2008" },
+    { "id": "tt1798709", "type": "movie", "name": "Her", "poster": "http://127.0.0.1:18766/ui-states/poster-wide.png", "releaseInfo": "2013" },
+    { "id": "tt0111161", "type": "movie", "name": "The Shawshank Redemption", "poster": "http://127.0.0.1:18766/ui-states/poster-tall.png", "releaseInfo": "1994" },
+    { "id": "tt0133093", "type": "movie", "name": "The Matrix", "poster": "http://127.0.0.1:18766/ui-states/poster-portrait.png", "releaseInfo": "1999" },
+    { "id": "tt1375666", "type": "movie", "name": "Inception", "poster": "http://127.0.0.1:18766/ui-states/poster-wide.png", "releaseInfo": "2010" },
+    { "id": "tt0816692", "type": "movie", "name": "Interstellar", "poster": "http://127.0.0.1:18766/ui-states/poster-tall.png", "releaseInfo": "2014" }
+  ]
+}

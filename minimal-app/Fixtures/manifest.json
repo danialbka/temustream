@@ -1,0 +1,19 @@
+{
+  "id": "local.stremio.skeleton.fixture",
+  "version": "1.0.0",
+  "name": "Public Domain E2E",
+  "description": "Deterministic local fixture for the clean-room client.",
+  "resources": ["catalog", "meta", "stream", "subtitles"],
+  "types": ["movie"],
+  "catalogs": [
+    {
+      "type": "movie",
+      "id": "public-domain",
+      "name": "Public Domain",
+      "extra": [
+        { "name": "search", "isRequired": false },
+        { "name": "skip", "isRequired": false }
+      ]
+    }
+  ]
+}
