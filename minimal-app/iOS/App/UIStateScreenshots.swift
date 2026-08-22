@@ -1,4 +1,5 @@
 #if SKELETON_SCREENSHOT_HARNESS
+import Foundation
 import SwiftUI
 
 /// Deterministic, simulator-only entry point used by ui-state-screenshots.sh.
@@ -134,6 +135,9 @@ private struct UIStateScreenshotRoot: View {
         // Let AsyncImage, navigation chrome, and detail resolution settle before capture.
         try? await Task.sleep(for: .milliseconds(state == "details-streams" ? 1_100 : 650))
         let runID = ProcessInfo.processInfo.environment["UI_SCREENSHOT_RUN_ID"] ?? "manual"
+        let readyMarker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ui-state-\(runID).ready")
+        try? Data("READY".utf8).write(to: readyMarker, options: .atomic)
         NSLog("[UIState:%@:%@] READY", runID, state)
     }
 

@@ -18,6 +18,10 @@ plutil -replace CFBundleIdentifier -string local.stremio.skeleton.uistates "$APP
 
 SDK_PATH="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 SIMULATOR_ARCH="${SIMULATOR_ARCH:-$(uname -m)}"
+RUST_SLICE="$ROOT_DIR/build/dependencies/StremioPlaybackCore.xcframework/ios-$SIMULATOR_ARCH-simulator"
+if [ ! -f "$RUST_SLICE/libstremio_playback_core.a" ]; then
+  "$ROOT_DIR/scripts/build-rust-core.sh"
+fi
 SOURCES="$(find "$ROOT_DIR/Sources/StremioSkeletonCore" "$ROOT_DIR/iOS/App" \
   -name '*.swift' ! -name 'StremioSkeletonApp.swift' -print)"
 
@@ -26,6 +30,8 @@ xcrun --sdk iphonesimulator swiftc \
   -target "$SIMULATOR_ARCH-apple-ios16.0-simulator" \
   -sdk "$SDK_PATH" \
   -module-cache-path "$MODULE_CACHE" \
+  -import-objc-header "$ROOT_DIR/iOS/App/StremioSkeleton-Bridging-Header.h" \
+  -I "$RUST_SLICE/Headers" \
   -parse-as-library \
   -D SKELETON_SCREENSHOT_HARNESS \
   -O \
@@ -35,6 +41,7 @@ xcrun --sdk iphonesimulator swiftc \
   -framework Combine \
   -framework Security \
   -framework SwiftUI \
+  "$RUST_SLICE/libstremio_playback_core.a" \
   -o "$APP_DIR/StremioSkeletonUIStates" \
   $SOURCES
 
@@ -80,13 +87,11 @@ fi
 
 xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
 xcrun simctl bootstatus "$DEVICE_ID" -b
+xcrun simctl install "$DEVICE_ID" "$APP_DIR"
 
 ALL_STATES="catalog-loading home-cinemeta home-letterboxd catalog-error details-streams library-empty library-synced addons-offline account-signed-out account-signed-in torrent-starting playback-unavailable player-active"
 STATES="${UI_SCREENSHOT_STATES:-$ALL_STATES}"
 for STATE in $STATES; do
-  xcrun simctl terminate "$DEVICE_ID" local.stremio.skeleton.uistates 2>/dev/null || true
-  xcrun simctl uninstall "$DEVICE_ID" local.stremio.skeleton.uistates 2>/dev/null || true
-  xcrun simctl install "$DEVICE_ID" "$APP_DIR"
   RUN_ID="$(date +%s)-$$-$STATE"
 
   CINEMETA_URL="http://127.0.0.1:$PORT/ui-states/cinemeta/manifest.json"
@@ -94,7 +99,7 @@ for STATE in $STATES; do
     CINEMETA_URL="http://127.0.0.1:$PORT/ui-states/missing/manifest.json"
   fi
 
-  LAUNCH_ARGS=""
+  LAUNCH_ARGS="-selectedCatalogSource cinemeta"
   if [ "$STATE" = "home-letterboxd" ]; then
     LAUNCH_ARGS="-selectedCatalogSource letterboxd"
   fi
@@ -108,19 +113,18 @@ for STATE in $STATES; do
   SIMCTL_CHILD_SKELETON_LETTERBOXD_CATALOG_ID="letterboxd-popular" \
   SIMCTL_CHILD_SKELETON_API_URL="http://127.0.0.1:$PORT" \
   SIMCTL_CHILD_SKELETON_STREAMING_SERVER_URL="http://127.0.0.1:$PORT" \
-  xcrun simctl launch "$DEVICE_ID" local.stremio.skeleton.uistates $LAUNCH_ARGS >/dev/null
+  xcrun simctl launch --terminate-running-process \
+    "$DEVICE_ID" local.stremio.skeleton.uistates $LAUNCH_ARGS >/dev/null
 
+  DATA_CONTAINER="$(xcrun simctl get_app_container \
+    "$DEVICE_ID" local.stremio.skeleton.uistates data)"
+  READY_MARKER="$DATA_CONTAINER/tmp/ui-state-$RUN_ID.ready"
   ATTEMPT=0
-  while [ "$ATTEMPT" -lt 25 ]; do
-    LOGS="$(xcrun simctl spawn "$DEVICE_ID" log show --last 1m --style compact \
-      --predicate "process == \"StremioSkeletonUIStates\" AND eventMessage CONTAINS \"[UIState:$RUN_ID:$STATE]\"" 2>/dev/null || true)"
-    if echo "$LOGS" | grep -q "READY"; then
-      break
-    fi
+  while [ "$ATTEMPT" -lt 50 ] && [ ! -f "$READY_MARKER" ]; do
     ATTEMPT=$((ATTEMPT + 1))
-    sleep 0.4
+    sleep 0.2
   done
-  if [ "$ATTEMPT" -ge 25 ]; then
+  if [ ! -f "$READY_MARKER" ]; then
     echo "Timed out waiting for UI state: $STATE" >&2
     exit 1
   fi
