@@ -5,9 +5,12 @@
 | `catalog-loading.png` | Initial network loading |
 | `home-cinemeta.png` | Loaded Cinemeta catalog and source dropdown |
 | `home-letterboxd.png` | Loaded Letterboxd Recommendations selection |
+| `home-series.png` | TV Series selected from the catalog dropdown |
 | `catalog-error.png` | Catalog network or protocol failure |
 | `details-streams.png` | Metadata, trailer action, and direct/torrent stream choices |
 | `details-resume.png` | Persisted resume and trailer actions below Add to Library |
+| `details-series-episodes.png` | Full-width episode routes, season picker, resume state, and completed tick |
+| `episode-streams.png` | Dedicated episode route with episode context, provider filters, and streams |
 | `library-empty.png` | Empty saved library |
 | `library-synced.png` | Account-synchronized saved title |
 | `addons-offline.png` | Add-on management and offline torrent server |

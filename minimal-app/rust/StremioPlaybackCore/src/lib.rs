@@ -153,9 +153,10 @@ fn policy(url: &str, title: &str, player_kind: u32) -> StremioPlaybackPolicy {
         prefer_compatibility_stream: u8::from(
             player_kind == PLAYER_AVPLAYER && !apple_native && demanding,
         ),
-        use_bounded_renderer: u8::from(
-            decoder_kind == DECODER_VLC_VIDEOTOOLBOX_BRIDGE && demanding,
-        ),
+        // Keep VLC on its native drawable. LibVLC's custom-memory callbacks
+        // add a CPU copy and cannot safely return a missing pixel plane while
+        // the decoder drains during teardown.
+        use_bounded_renderer: 0,
         require_hardware_decode: u8::from(demanding),
         prefer_videotoolbox_chain: u8::from(decoder_kind == DECODER_VLC_VIDEOTOOLBOX_BRIDGE),
     }
@@ -359,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_hevc_to_the_bounded_vlc_bridge() {
+    fn routes_hevc_to_vlc_native_drawable() {
         let result = policy(
             "https://example.test/download",
             "1080p BluRay x265 HEVC MKV",
@@ -367,7 +368,7 @@ mod tests {
         );
         assert_eq!(result.source_kind, SOURCE_DIRECT_CONTAINER);
         assert_eq!(result.decoder_kind, DECODER_VLC_VIDEOTOOLBOX_BRIDGE);
-        assert_eq!(result.use_bounded_renderer, 1);
+        assert_eq!(result.use_bounded_renderer, 0);
         assert_eq!(result.require_hardware_decode, 1);
     }
 
@@ -446,23 +447,23 @@ mod tests {
     }
 
     #[test]
-    fn enables_bounded_vlc_bridge_for_demanding_sources() {
+    fn keeps_native_vlc_drawable_for_demanding_sources() {
         let result = policy("https://example.test/video.mkv", "2160p HEVC", PLAYER_VLC);
         assert_eq!(result.source_kind, SOURCE_HIGH_RESOLUTION);
         assert_eq!(result.decoder_kind, DECODER_VLC_VIDEOTOOLBOX_BRIDGE);
-        assert_eq!(result.use_bounded_renderer, 1);
+        assert_eq!(result.use_bounded_renderer, 0);
         assert_eq!(result.prefer_videotoolbox_chain, 1);
     }
 
     #[test]
-    fn caps_high_resolution_performance_sources_through_vlc_bridge() {
+    fn routes_high_resolution_performance_sources_to_vlc_native_drawable() {
         let result = policy(
             "https://example.test/video.mkv",
             "2160p HEVC",
             PLAYER_PERFORMANCE,
         );
         assert_eq!(result.decoder_kind, DECODER_VLC_VIDEOTOOLBOX_BRIDGE);
-        assert_eq!(result.use_bounded_renderer, 1);
+        assert_eq!(result.use_bounded_renderer, 0);
     }
 
     #[test]

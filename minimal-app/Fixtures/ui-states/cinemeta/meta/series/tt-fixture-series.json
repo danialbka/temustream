@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "id": "tt-fixture-series",
+    "type": "series",
+    "name": "Fixture Show",
+    "poster": "http://127.0.0.1:18766/ui-states/poster-portrait.png",
+    "description": "A deterministic series used to verify seasons, episode progress, and watched state.",
+    "releaseInfo": "2024–",
+    "genres": ["Drama", "Adventure"],
+    "videos": [
+      {
+        "id": "tt-fixture-series:1:1",
+        "title": "First Light",
+        "season": 1,
+        "episode": 1,
+        "thumbnail": "http://127.0.0.1:18766/ui-states/episode-1.png",
+        "released": "2024-01-05T00:00:00.000Z"
+      },
+      {
+        "id": "tt-fixture-series:1:2",
+        "title": "The Crossing",
+        "season": 1,
+        "episode": 2,
+        "thumbnail": "http://127.0.0.1:18766/ui-states/episode-2.png",
+        "released": "2024-01-12T00:00:00.000Z"
+      },
+      {
+        "id": "tt-fixture-series:1:3",
+        "title": "Home Again",
+        "season": 1,
+        "episode": 3,
+        "thumbnail": "http://127.0.0.1:18766/ui-states/episode-3.png",
+        "released": "2024-01-19T00:00:00.000Z"
+      },
+      {
+        "id": "tt-fixture-series:2:1",
+        "title": "A New Chapter",
+        "season": 2,
+        "episode": 1,
+        "thumbnail": "http://127.0.0.1:18766/ui-states/episode-4.png",
+        "released": "2025-02-07T00:00:00.000Z"
+      }
+    ]
+  }
+}

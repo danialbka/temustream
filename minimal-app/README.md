@@ -18,11 +18,12 @@ as the default.
 - torrent/magnet stream resolution through a compatible localhost, LAN, or
   HTTPS streaming server
 - selectable Performance, KSPlayer, VLC, and AVPlayer playback paths
-- SharePlay Watch Together on every player path, coordinating play, pause, and
-  timeline seeks from either participant without sharing private stream URLs
+- Movies and TV Series catalog selection, season-by-season episode listings,
+  provider episode thumbnails with a missing-artwork fallback, per-episode resume
+  state, and persistent watched ticks after completion
 - a dependency-free Rust playback-policy core that routes Apple-native HLS to
   AVFoundation, relabeled/direct transport streams to hardware-backed KSPlayer,
-  and HEVC or unusually large sources to the bounded VLC bridge
+  and HEVC or unusually large sources to VLC's native hardware-backed drawable
 - a payload-signature stream bridge that detects mislabeled MP4/MPEG-TS/MKV/HLS
   responses, repairs bad TorBox file selection, waits for provider preparation,
   and retries transient network failures before opening a decoder
@@ -36,8 +37,8 @@ as the default.
 - automatic server-side HLS remux/transcode before AVPlayer tries unsupported
   MKV/AV1/FLAC media, including
   VideoToolbox profile discovery
-- a bounded LibVLC callback renderer for demanding sources, avoiding the
-  simulator's stuttering OpenGL output without changing the selected player
+- native LibVLC rendering for demanding sources, avoiding the slower custom
+  memory-copy path and its decoder-shutdown race without changing the selected player
 - one same-engine repair retry before cross-player fallback
 - observable playback startup with automatic fallback, timeout, retry, and a
   useful failure state instead of a permanent black player
@@ -64,19 +65,6 @@ KSPlayer is distributed under GPL-3.0. Keep this client and any distributed
 build compliant with that license, or replace the dependency with a separately
 licensed decoder before closed-source distribution.
 
-## Watch Together
-
-Open the same movie or episode, tap the SharePlay button in the player, then
-invite a friend through FaceTime or Messages. Once both devices have joined the
-party, play, pause, skip, and timeline scrubs are coordinated in either
-direction. If an invitation arrives before the matching title is open, the app
-shows which title to open before attaching its player to the shared session.
-
-SharePlay requires signed physical devices and distinct Apple Accounts for a
-real two-person test. Simulator builds can validate the controls, invitation
-flow, player integration, and shared-clock synchronization logic, but cannot
-establish a remote FaceTime SharePlay session.
-
 ## Workflows
 
 ```sh
@@ -96,7 +84,7 @@ establish a remote FaceTime SharePlay session.
 include the comparative player-footprint report; the comparison is skipped
 when a reference build is unavailable, such as on a clean GitHub runner. The
 matching GitHub Actions workflow runs the same unit, build, and simulator E2E
-sequence and uploads the signed ad-hoc packages plus E2E and 13-state UI
+sequence and uploads the signed ad-hoc packages plus E2E and 17-state UI
 screenshots as workflow artifacts. See `UI_STATE_MATRIX.md` for the screenshot
 inventory.
 `build-device.sh` also emits `build/StremioSkeleton-device.ipa` with the
@@ -105,8 +93,9 @@ See `PLAYBACK_BENCHMARKS.md` for the strict real-stream and synthetic playback
 matrix, including the proof boundary between simulator and physical-device QA.
 
 `sideloadly-cli.sh update` is the one-command configured-device update path. It
-builds the device IPA, validates its SharePlay entitlement, reuses the existing
-credential reference and AutoRefresh record stored by Sideloadly, invokes
+builds the device IPA, validates its archive and signing data, reuses the
+existing credential reference and AutoRefresh record stored by Sideloadly,
+invokes
 Sideloadly 0.60's internal silent queue, verifies the installed version with
 `devicectl`, and launches the app. Copy
 `config/sideloadly.snapshot.example.json` to the local snapshot path expected by

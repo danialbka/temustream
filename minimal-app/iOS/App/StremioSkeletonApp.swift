@@ -10,12 +10,6 @@ struct StremioSkeletonApp: App {
             appContent
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .preferredColorScheme(.dark)
-            .overlay(alignment: .top) {
-                WatchTogetherSessionBanner()
-            }
-            .task {
-                WatchTogetherCoordinator.shared.startObservingSessions()
-            }
         }
     }
 

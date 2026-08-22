@@ -10,8 +10,30 @@ import UIKit
 
 typealias PlaybackProgressHandler = @MainActor (
     _ position: TimeInterval,
-    _ duration: TimeInterval
+    _ duration: TimeInterval,
+    _ updateKind: PlaybackProgressUpdateKind
 ) -> Void
+
+/// Mutable playback progress that does not participate in SwiftUI observation.
+/// Checkpoint updates must never recreate the active decoder or its parent view.
+@MainActor
+private final class PlaybackProgressReference {
+    var position: TimeInterval
+    var duration: TimeInterval
+
+    init(position: TimeInterval, duration: TimeInterval = 0) {
+        self.position = max(position, 0)
+        self.duration = max(duration, 0)
+    }
+
+    func update(position: TimeInterval, duration: TimeInterval) {
+        guard position.isFinite, duration.isFinite else { return }
+        if position >= 1 || self.position <= 0 {
+            self.position = max(position, 0)
+        }
+        self.duration = max(duration, 0)
+    }
+}
 
 enum StremioInternalPlayer: String, CaseIterable, Identifiable, Sendable {
     case performance = "performance"
@@ -344,6 +366,25 @@ private enum PlayerPresentation {
         }
     }
 
+    /// Player engines can be replaced without leaving PlayerScreen. Match the
+    /// orientation mask to the geometry already on screen so an outgoing
+    /// engine cannot force the incoming controls through a second, stale
+    /// portrait layout pass.
+    static func synchronizeWithCurrentOrientation() {
+        guard let scene = foregroundScene else { return }
+        let orientation = scene.effectiveGeometry.interfaceOrientation
+        guard orientation != .unknown else { return }
+        AppOrientationDelegate.supportedOrientations = orientation.isLandscape
+            ? .landscape
+            : .portrait
+        scene.keyWindow?.rootViewController?
+            .setNeedsUpdateOfSupportedInterfaceOrientations()
+        NSLog(
+            "PLAYER_LAYOUT synchronized orientation=%@",
+            orientation.isLandscape ? "landscape" : "portrait"
+        )
+    }
+
     static func restorePortrait() {
         AppOrientationDelegate.supportedOrientations = .portrait
         guard let scene = foregroundScene else { return }
@@ -381,7 +422,6 @@ private struct PlayerOrientationButton: View {
 struct KSPlayerScreen: View {
     let title: String
     private let plan: PlaybackPlan
-    private let watchTogetherContent: WatchTogetherContent
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
@@ -393,7 +433,6 @@ struct KSPlayerScreen: View {
     init(
         plan: PlaybackPlan,
         title: String,
-        watchTogetherContent: WatchTogetherContent? = nil,
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
@@ -401,8 +440,6 @@ struct KSPlayerScreen: View {
     ) {
         self.plan = plan
         self.title = title
-        self.watchTogetherContent = watchTogetherContent
-            ?? WatchTogetherContent(title: title)
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
         self.onExhausted = onExhausted
@@ -449,7 +486,6 @@ struct KSPlayerScreen: View {
                     url: candidate.url,
                     engine: candidate.engine,
                     title: title,
-                    watchTogetherContent: watchTogetherContent,
                     minimumVideoDuration: minimumVideoDuration,
                     initialPosition: retryPosition,
                     performancePolicy: playbackPolicy,
@@ -470,7 +506,6 @@ struct KSPlayerScreen: View {
         .onAppear { PlayerPresentation.prepareAudioSession() }
         .onDisappear {
             PlayerPresentation.endAudioSession()
-            PlayerPresentation.restorePortrait()
         }
     }
 
@@ -525,7 +560,6 @@ private struct KSPlaybackAttempt: View {
     let url: URL
     let engine: StremioPlayerConfiguration.Engine
     let title: String
-    let watchTogetherContent: WatchTogetherContent
     let minimumVideoDuration: TimeInterval
     let initialPosition: TimeInterval
     let performancePolicy: PlaybackPerformancePolicy
@@ -543,8 +577,6 @@ private struct KSPlaybackAttempt: View {
     @State private var didRestorePosition = false
     @State private var didAttemptStallRecovery = false
     @State private var didRunParityVerification = false
-    @State private var didAttachWatchTogether = false
-    @State private var watchTogetherAttachmentToken = UUID()
     @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
     private var debugOverlaySetting = false
     @State private var debugSnapshot = PlayerDebugSnapshot.waiting(engine: "KSPlayer")
@@ -555,7 +587,6 @@ private struct KSPlaybackAttempt: View {
         url: URL,
         engine: StremioPlayerConfiguration.Engine,
         title: String,
-        watchTogetherContent: WatchTogetherContent,
         minimumVideoDuration: TimeInterval,
         initialPosition: TimeInterval,
         performancePolicy: PlaybackPerformancePolicy,
@@ -565,7 +596,6 @@ private struct KSPlaybackAttempt: View {
         self.url = url
         self.engine = engine
         self.title = title
-        self.watchTogetherContent = watchTogetherContent
         self.minimumVideoDuration = minimumVideoDuration
         self.initialPosition = initialPosition
         self.performancePolicy = performancePolicy
@@ -574,7 +604,8 @@ private struct KSPlaybackAttempt: View {
 
         self.options = StremioPlayerConfiguration.makeOptions(
             engine: engine,
-            performancePolicy: performancePolicy
+            performancePolicy: performancePolicy,
+            initialPosition: initialPosition
         )
     }
 
@@ -584,9 +615,8 @@ private struct KSPlaybackAttempt: View {
                 .onStateChanged { _, state in
                     playerState = state
                     if state == .paused {
-                        // Native AVPlayer SharePlay commands arrive underneath
-                        // KSPlayer's controls. Mirror the remote intent so the
-                        // local stall watchdog never restarts a group pause.
+                        // Mirror the engine state so the local stall watchdog
+                        // never restarts a user-requested pause.
                         wantsPlayback = false
                     } else if state.isPlaying {
                         wantsPlayback = true
@@ -619,7 +649,7 @@ private struct KSPlaybackAttempt: View {
                         reportFailure(error)
                     } else if let player = coordinator.playerLayer?.player {
                         let duration = player.duration
-                        onProgress?(duration, duration)
+                        onProgress?(duration, duration, .final)
                     }
                 }
                 .ignoresSafeArea()
@@ -639,7 +669,6 @@ private struct KSPlaybackAttempt: View {
             }
 
             PlayerSubtitleOverlay(model: coordinator.subtitleModel)
-                .allowsHitTesting(false)
 
             if isAudioOnly, didProduceMedia {
                 VStack(spacing: 14) {
@@ -682,7 +711,6 @@ private struct KSPlaybackAttempt: View {
                     coordinator: coordinator,
                     state: playerState,
                     title: title,
-                    watchTogetherContent: watchTogetherContent,
                     wantsPlayback: $wantsPlayback,
                     onSeekFailure: { position in
                         reportFailure(PlayerAttemptError.seekRecoveryTimedOut(engine, position))
@@ -708,10 +736,15 @@ private struct KSPlaybackAttempt: View {
             isAudioOnly = false
             wantsPlayback = true
             playerState = .initialized
-            didRestorePosition = initialPosition <= 0
+            didRestorePosition = initialPosition <= 0 || engine == .ffmpeg
+            if engine == .ffmpeg, initialPosition > 0 {
+                NSLog(
+                    "PLAYER_RESUME engine=ffmpeg mode=open target=%.1f",
+                    initialPosition
+                )
+            }
             didAttemptStallRecovery = false
             didRunParityVerification = false
-            didAttachWatchTogether = false
             debugSnapshot = .waiting(engine: debugEngineName)
             coordinator.isScaleAspectFill = false
             coordinator.isMaskShow = true
@@ -736,11 +769,6 @@ private struct KSPlaybackAttempt: View {
             while !Task.isCancelled, !didReportFailure {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard let layer = coordinator.playerLayer else { continue }
-
-                if !didAttachWatchTogether, layer.player.isReadyToPlay {
-                    didAttachWatchTogether = true
-                    attachWatchTogether(to: layer)
-                }
 
                 let player = layer.player
                 let now = ProcessInfo.processInfo.systemUptime
@@ -783,7 +811,7 @@ private struct KSPlaybackAttempt: View {
                 let duration = player.duration
                 if now - lastProgressReportAt >= 5 {
                     lastProgressReportAt = now
-                    onProgress?(currentTime, duration)
+                    onProgress?(currentTime, duration, .checkpoint)
                 }
                 if hasVideo, player.isReadyToPlay,
                    duration.isFinite, duration > 0,
@@ -876,56 +904,14 @@ private struct KSPlaybackAttempt: View {
             startPictureInPictureIfPossible()
         }
         .onDisappear {
-            WatchTogetherCoordinator.shared.detach(token: watchTogetherAttachmentToken)
             if let player = coordinator.playerLayer?.player {
                 let currentTime = (player as? KSMEPlayer)?.displayedVideoTime
                     ?? player.currentPlaybackTime
-                onProgress?(currentTime, player.duration)
+                onProgress?(currentTime, player.duration, .final)
             }
             coordinator.playerLayer?.stop()
             coordinator.resetPlayer()
         }
-    }
-
-    @MainActor
-    private func attachWatchTogether(to layer: KSPlayerLayer) {
-        if let native = layer.player as? KSAVPlayer {
-            WatchTogetherCoordinator.shared.attach(
-                player: native.player,
-                content: watchTogetherContent,
-                token: watchTogetherAttachmentToken
-            )
-            return
-        }
-
-        WatchTogetherCoordinator.shared.attach(
-            adapter: WatchTogetherPlaybackAdapter(
-                content: watchTogetherContent,
-                currentTime: { layer.player.currentPlaybackTime },
-                duration: { layer.player.duration },
-                isPlaying: { layer.player.isPlaying },
-                isReady: { layer.player.isReadyToPlay },
-                play: {
-                    wantsPlayback = true
-                    PlayerSeekRecovery.resume(layer: layer)
-                },
-                pause: {
-                    wantsPlayback = false
-                    PlayerSeekRecovery.pause(layer: layer)
-                },
-                seek: { target in
-                    await withCheckedContinuation { continuation in
-                        PlayerSeekRecovery.seek(
-                            layer: layer,
-                            to: target,
-                            resume: false,
-                            completion: { continuation.resume(returning: $0) }
-                        )
-                    }
-                }
-            ),
-            token: watchTogetherAttachmentToken
-        )
     }
 
     private func startPictureInPictureIfPossible() {
@@ -1182,10 +1168,8 @@ private enum PlayerAttemptError: LocalizedError {
 
 private struct PlayerControlsOverlay: View {
     @ObservedObject var coordinator: KSVideoPlayer.Coordinator
-    @ObservedObject private var watchTogether = WatchTogetherCoordinator.shared
     let state: KSPlayerState
     let title: String
-    let watchTogetherContent: WatchTogetherContent
     @Binding var wantsPlayback: Bool
     let onSeekFailure: (TimeInterval) -> Void
     let close: () -> Void
@@ -1221,7 +1205,6 @@ private struct PlayerControlsOverlay: View {
 
             Spacer(minLength: 8)
 
-            WatchTogetherMenu(content: watchTogetherContent)
             if hasAudioTracks {
                 PlayerAudioMenu(coordinator: coordinator)
             }
@@ -1241,7 +1224,10 @@ private struct PlayerControlsOverlay: View {
                 "rectangle.landscape.rotate",
                 label: "Rotate player",
                 identifier: "player-orientation-toggle",
-                action: PlayerPresentation.toggleOrientation
+                action: {
+                    coordinator.mask(show: false, autoHide: false)
+                    PlayerPresentation.toggleOrientation()
+                }
             )
         }
     }
@@ -1254,17 +1240,13 @@ private struct PlayerControlsOverlay: View {
             controlButton(state.isPlaying ? "pause.fill" : "play.fill", label: state.isPlaying ? "Pause" : "Play", prominent: true) {
                 if state.isPlaying {
                     wantsPlayback = false
-                    if !watchTogether.requestPause(
-                        for: watchTogetherContent.identifier
-                    ), let layer = coordinator.playerLayer {
+                    if let layer = coordinator.playerLayer {
                         PlayerSeekRecovery.pause(layer: layer)
                     }
                     coordinator.mask(show: true, autoHide: false)
                 } else {
                     wantsPlayback = true
-                    if !watchTogether.requestPlay(
-                        for: watchTogetherContent.identifier
-                    ), let layer = coordinator.playerLayer {
+                    if let layer = coordinator.playerLayer {
                         PlayerSeekRecovery.resume(layer: layer)
                     }
                     coordinator.mask(show: true)
@@ -1300,7 +1282,6 @@ private struct PlayerControlsOverlay: View {
             }
             PlayerTimeline(
                 coordinator: coordinator,
-                watchTogetherContent: watchTogetherContent,
                 isReady: !isLoading,
                 isActivelyPlaying: state.isPlaying,
                 onSeekFailure: onSeekFailure
@@ -1328,13 +1309,6 @@ private struct PlayerControlsOverlay: View {
             max(layer.player.currentPlaybackTime + interval, 0),
             max(duration - 1, 0)
         )
-        if watchTogether.requestSeek(
-            to: target,
-            resumeAfterSeek: wantsPlayback,
-            for: watchTogetherContent.identifier
-        ) {
-            return
-        }
         PlayerSeekRecovery.seek(
             layer: layer,
             to: target,
@@ -1379,8 +1353,6 @@ private struct PlayerControlsOverlay: View {
 private struct PlayerTimeline: View {
     @ObservedObject var coordinator: KSVideoPlayer.Coordinator
     @ObservedObject private var model: ControllerTimeModel
-    @ObservedObject private var watchTogether = WatchTogetherCoordinator.shared
-    let watchTogetherContent: WatchTogetherContent
     let isReady: Bool
     let isActivelyPlaying: Bool
     let onSeekFailure: (TimeInterval) -> Void
@@ -1390,14 +1362,12 @@ private struct PlayerTimeline: View {
 
     init(
         coordinator: KSVideoPlayer.Coordinator,
-        watchTogetherContent: WatchTogetherContent,
         isReady: Bool,
         isActivelyPlaying: Bool,
         onSeekFailure: @escaping (TimeInterval) -> Void
     ) {
         self.coordinator = coordinator
         model = coordinator.timemodel
-        self.watchTogetherContent = watchTogetherContent
         self.isReady = isReady
         self.isActivelyPlaying = isActivelyPlaying
         self.onSeekFailure = onSeekFailure
@@ -1425,28 +1395,14 @@ private struct PlayerTimeline: View {
                         // resumes a movie that was playing before the drag.
                         wasPlayingBeforeScrub = isActivelyPlaying
                             || coordinator.playerLayer?.player.isPlaying == true
-                        if wasPlayingBeforeScrub {
-                            if !watchTogether.requestPause(
-                                for: watchTogetherContent.identifier
-                            ), let layer = coordinator.playerLayer {
-                                PlayerSeekRecovery.pause(layer: layer)
-                            }
+                        if wasPlayingBeforeScrub,
+                           let layer = coordinator.playerLayer {
+                            PlayerSeekRecovery.pause(layer: layer)
                         }
                     } else if let layer = coordinator.playerLayer {
                         let target = scrubPosition
                         let shouldResume = wasPlayingBeforeScrub
                         isScrubbing = false
-                        if watchTogether.requestSeek(
-                            to: target,
-                            resumeAfterSeek: shouldResume,
-                            for: watchTogetherContent.identifier
-                        ) {
-                            model.currentTime = Int(target)
-                            if shouldResume {
-                                scheduleSeekFailureCheck(layer: layer, target: target)
-                            }
-                            return
-                        }
                         PlayerSeekRecovery.seek(
                             layer: layer,
                             to: target,
@@ -1560,29 +1516,147 @@ private struct PlayerSubtitleMenu: View {
 
 private struct PlayerSubtitleOverlay: View {
     @ObservedObject var model: SubtitleModel
+    @State private var anchor = SubtitlePlacement.defaultPosition
+    @GestureState private var dragTranslation = CGSize.zero
 
     var body: some View {
-        VStack {
-            Spacer()
-            ForEach(model.parts) { part in
-                if let text = part.text {
-                    Text(AttributedString(text))
-                        .font(.body.weight(.semibold))
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
-                } else if let image = part.image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxHeight: 120)
+        GeometryReader { proxy in
+            let displayedAnchor = constrained(
+                anchor.translated(
+                    x: Double(dragTranslation.width),
+                    y: Double(dragTranslation.height),
+                    viewportWidth: Double(proxy.size.width),
+                    viewportHeight: Double(proxy.size.height)
+                ),
+                in: proxy.size
+            )
+
+            VStack(spacing: 6) {
+                ForEach(model.parts) { part in
+                    if let text = part.text {
+                        Text(AttributedString(text))
+                            .font(.body.weight(.semibold))
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                .black.opacity(0.7),
+                                in: RoundedRectangle(cornerRadius: 6)
+                            )
+                    } else if let image = part.image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxHeight: 120)
+                    }
                 }
             }
+            .frame(maxWidth: max(proxy.size.width - 48, 1))
+            .contentShape(Rectangle())
+            .position(
+                x: proxy.size.width * displayedAnchor.horizontal,
+                y: proxy.size.height * displayedAnchor.vertical
+            )
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .updating($dragTranslation) { value, translation, _ in
+                        translation = value.translation
+                    }
+                    .onEnded { value in
+                        anchor = constrained(
+                            anchor.translated(
+                                x: Double(value.translation.width),
+                                y: Double(value.translation.height),
+                                viewportWidth: Double(proxy.size.width),
+                                viewportHeight: Double(proxy.size.height)
+                            ),
+                            in: proxy.size
+                        )
+                        NSLog(
+                            "PLAYER_SUBTITLE position_x=%.3f position_y=%.3f",
+                            anchor.horizontal,
+                            anchor.vertical
+                        )
+                    }
+            )
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Draggable subtitles")
+            .accessibilityValue(
+                String(
+                    format: "Horizontal %.2f, vertical %.2f",
+                    displayedAnchor.horizontal,
+                    displayedAnchor.vertical
+                )
+            )
+            .accessibilityIdentifier("player-subtitle-overlay")
         }
-        .padding(.horizontal, 24)
-        .padding(.bottom, 86)
+        .allowsHitTesting(!model.parts.isEmpty)
+        .accessibilityHidden(model.parts.isEmpty)
+    }
+
+    private func constrained(
+        _ placement: SubtitlePlacement,
+        in viewport: CGSize
+    ) -> SubtitlePlacement {
+        let contentSize = estimatedContentSize(
+            maximumWidth: max(viewport.width - 48, 1)
+        )
+        return placement.constrained(
+            contentWidth: Double(contentSize.width),
+            contentHeight: Double(contentSize.height),
+            viewportWidth: Double(viewport.width),
+            viewportHeight: Double(viewport.height)
+        )
+    }
+
+    private func estimatedContentSize(maximumWidth: CGFloat) -> CGSize {
+        let font = UIFont.systemFont(
+            ofSize: UIFont.preferredFont(forTextStyle: .body).pointSize,
+            weight: .semibold
+        )
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+        var partCount = 0
+
+        for part in model.parts {
+            let size: CGSize
+            if let text = part.text {
+                let bounds = (text.string as NSString).boundingRect(
+                    with: CGSize(
+                        width: max(maximumWidth - 20, 1),
+                        height: .greatestFiniteMagnitude
+                    ),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: font],
+                    context: nil
+                )
+                size = CGSize(
+                    width: min(ceil(bounds.width) + 20, maximumWidth),
+                    height: ceil(bounds.height) + 10
+                )
+            } else if let image = part.image, image.size.height > 0 {
+                let scale = min(
+                    maximumWidth / max(image.size.width, 1),
+                    120 / image.size.height,
+                    1
+                )
+                size = CGSize(
+                    width: image.size.width * scale,
+                    height: image.size.height * scale
+                )
+            } else {
+                continue
+            }
+            width = max(width, size.width)
+            height += size.height
+            partCount += 1
+        }
+
+        if partCount > 1 {
+            height += CGFloat(partCount - 1) * 6
+        }
+        return CGSize(width: width, height: height)
     }
 }
 
@@ -1714,7 +1788,6 @@ private enum AVPlayerSourceProbe {
 struct AVPlayerScreen: View {
     let title: String
     private let plan: PlaybackPlan
-    private let watchTogetherContent: WatchTogetherContent
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
@@ -1724,17 +1797,15 @@ struct AVPlayerScreen: View {
     @State private var statusMessage = "Preparing video…"
     @State private var failureMessage: String?
     @State private var nominalFPS: Double?
-    @State private var latestPosition: TimeInterval
+    @State private var progressReference: PlaybackProgressReference
     @State private var didRestorePosition = false
     @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
     private var debugOverlaySetting = false
     @State private var debugSnapshot = PlayerDebugSnapshot.waiting(engine: "AVPlayer")
-    @State private var watchTogetherAttachmentToken = UUID()
 
     init(
         plan: PlaybackPlan,
         title: String,
-        watchTogetherContent: WatchTogetherContent? = nil,
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
@@ -1742,12 +1813,12 @@ struct AVPlayerScreen: View {
     ) {
         self.plan = plan
         self.title = title
-        self.watchTogetherContent = watchTogetherContent
-            ?? WatchTogetherContent(title: title)
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
         self.onExhausted = onExhausted
-        _latestPosition = State(initialValue: max(initialPosition, 0))
+        _progressReference = State(
+            initialValue: PlaybackProgressReference(position: initialPosition)
+        )
     }
 
     init(url: URL, title: String) {
@@ -1798,10 +1869,7 @@ struct AVPlayerScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                HStack(spacing: 10) {
-                    WatchTogetherMenu(content: watchTogetherContent)
-                    PlayerOrientationButton()
-                }
+                PlayerOrientationButton()
             }
         }
         .task(id: "\(candidateIndex)-\(attemptRevision)") { await startCurrentCandidate() }
@@ -1825,17 +1893,15 @@ struct AVPlayerScreen: View {
             else { return }
             let duration = item.duration.seconds
             if duration.isFinite, duration > 0 {
-                latestPosition = duration
-                onProgress?(duration, duration)
+                progressReference.update(position: duration, duration: duration)
+                onProgress?(duration, duration, .final)
             }
         }
         .onDisappear {
-            WatchTogetherCoordinator.shared.detach(token: watchTogetherAttachmentToken)
-            reportCurrentProgress()
+            reportCurrentProgress(updateKind: .final)
             player.pause()
             player.replaceCurrentItem(with: nil)
             PlayerPresentation.endAudioSession()
-            PlayerPresentation.restorePortrait()
         }
     }
 
@@ -1872,7 +1938,7 @@ struct AVPlayerScreen: View {
         }
 
         failureMessage = nil
-        didRestorePosition = latestPosition <= 0
+        didRestorePosition = progressReference.position <= 0
         statusMessage = candidateIndex == 0 && plan.fallbackURL != nil
             ? "Optimizing stream…"
             : "Preparing video…"
@@ -1912,11 +1978,6 @@ struct AVPlayerScreen: View {
         let videoOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         item.add(videoOutput)
         player.replaceCurrentItem(with: item)
-        WatchTogetherCoordinator.shared.attach(
-            player: player,
-            content: watchTogetherContent,
-            token: watchTogetherAttachmentToken
-        )
         player.play()
 
         for _ in 0..<160 {
@@ -1949,11 +2010,11 @@ struct AVPlayerScreen: View {
                     }
                     return
                 }
-                if !didRestorePosition, latestPosition > 0 {
+                if !didRestorePosition, progressReference.position > 0 {
                     didRestorePosition = true
                     let target = duration.isFinite && duration > 0
-                        ? min(latestPosition, max(duration - 1, 0))
-                        : latestPosition
+                        ? min(progressReference.position, max(duration - 1, 0))
+                        : progressReference.position
                     await seek(to: target)
                     player.play()
                     continue
@@ -2017,13 +2078,19 @@ struct AVPlayerScreen: View {
     }
 
     @MainActor
-    private func reportCurrentProgress() {
+    private func reportCurrentProgress(
+        updateKind: PlaybackProgressUpdateKind = .checkpoint
+    ) {
         guard let item = player.currentItem else { return }
         let position = item.currentTime().seconds
         let duration = item.duration.seconds
         guard position.isFinite, duration.isFinite else { return }
-        latestPosition = max(position, 0)
-        onProgress?(latestPosition, max(duration, 0))
+        progressReference.update(position: position, duration: duration)
+        onProgress?(
+            progressReference.position,
+            progressReference.duration,
+            updateKind
+        )
     }
 
     @MainActor
@@ -2140,9 +2207,6 @@ struct AVPlayerScreen: View {
 #if canImport(MobileVLCKit)
 private struct VLCRenderView: UIViewRepresentable {
     let player: VLCMediaPlayer
-    let usesBoundedRenderer: Bool
-    let onFirstFrame: @MainActor () -> Void
-    let onFrameMetrics: @MainActor (UInt64, UInt64) -> Void
 
     final class Coordinator {
         let player: VLCMediaPlayer
@@ -2157,15 +2221,6 @@ private struct VLCRenderView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIView {
-        if usesBoundedRenderer {
-            let view = VLCBoundedVideoView(
-                player: player,
-                maximumPixelSize: CGSize(width: 1_920, height: 1_080)
-            )
-            view.onFirstFrame = onFirstFrame
-            view.onFrameMetrics = onFrameMetrics
-            return view
-        }
         let view = UIView()
         view.backgroundColor = .black
         view.clipsToBounds = true
@@ -2174,20 +2229,13 @@ private struct VLCRenderView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UIView, context: Context) {
-        if let boundedView = view as? VLCBoundedVideoView {
-            boundedView.onFirstFrame = onFirstFrame
-            boundedView.onFrameMetrics = onFrameMetrics
-            return
-        }
         if (player.drawable as AnyObject?) !== view {
             player.drawable = view
         }
     }
 
     static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
-        if let boundedView = view as? VLCBoundedVideoView {
-            boundedView.detach()
-        } else if (coordinator.player.drawable as AnyObject?) === view {
+        if (coordinator.player.drawable as AnyObject?) === view {
             coordinator.player.drawable = nil
         }
         view.layer.removeAllAnimations()
@@ -2507,10 +2555,8 @@ private enum VLCPlaybackError: LocalizedError {
 
 private struct VLCPlayerScreen: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var watchTogether = WatchTogetherCoordinator.shared
     let title: String
     private let plan: PlaybackPlan
-    private let watchTogetherContent: WatchTogetherContent
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
@@ -2521,15 +2567,13 @@ private struct VLCPlayerScreen: View {
     @State private var isScrubbing = false
     @State private var scrubPosition: TimeInterval = 0
     @State private var resumeAfterScrub = false
-    @State private var latestPosition: TimeInterval
-    @State private var watchTogetherAttachmentToken = UUID()
+    @State private var progressReference: PlaybackProgressReference
     @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
     private var debugOverlaySetting = false
 
     init(
         plan: PlaybackPlan,
         title: String,
-        watchTogetherContent: WatchTogetherContent? = nil,
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval,
         onProgress: PlaybackProgressHandler? = nil,
@@ -2542,27 +2586,28 @@ private struct VLCPlayerScreen: View {
         )
         self.plan = plan
         self.title = title
-        self.watchTogetherContent = watchTogetherContent
-            ?? WatchTogetherContent(title: title)
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
         self.onExhausted = onExhausted
         playbackPolicy = policy
         _model = StateObject(wrappedValue: VLCPlaybackModel(policy: policy))
-        _latestPosition = State(initialValue: max(initialPosition, 0))
+        _progressReference = State(
+            initialValue: PlaybackProgressReference(position: initialPosition)
+        )
     }
 
     var body: some View {
         ZStack {
-            VLCRenderView(
-                player: model.player,
-                usesBoundedRenderer: usesBoundedRenderer,
-                onFirstFrame: model.markRenderedFrame,
-                onFrameMetrics: model.recordBoundedFrameMetrics
-            )
+            VLCRenderView(player: model.player)
                 .ignoresSafeArea()
+
+            Color.clear
                 .contentShape(Rectangle())
                 .onTapGesture { controlsVisible.toggle() }
+                .accessibilityLabel(
+                    controlsVisible ? "Hide player controls" : "Show player controls"
+                )
+                .accessibilityIdentifier("player-control-toggle-surface")
 
             if !model.isReady, model.failureMessage == nil {
                 VStack(spacing: 12) {
@@ -2598,11 +2643,9 @@ private struct VLCPlayerScreen: View {
             await monitorPlaybackProgress()
         }
         .onDisappear {
-            WatchTogetherCoordinator.shared.detach(token: watchTogetherAttachmentToken)
-            reportCurrentProgress()
+            reportCurrentProgress(updateKind: .final)
             model.stop()
             PlayerPresentation.endAudioSession()
-            PlayerPresentation.restorePortrait()
         }
         .accessibilityIdentifier("stremio-player")
     }
@@ -2610,13 +2653,17 @@ private struct VLCPlayerScreen: View {
     private var controls: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                controlButton("xmark", label: "Close player") { dismiss() }
+                controlButton("xmark", label: "Close player") {
+                    controlsVisible = false
+                    PlayerPresentation.restorePortrait()
+                    dismiss()
+                }
                 Text(title)
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
-                WatchTogetherMenu(content: watchTogetherContent)
                 controlButton("rectangle.landscape.rotate", label: "Rotate player") {
+                    controlsVisible = false
                     PlayerPresentation.toggleOrientation()
                 }
             }
@@ -2639,14 +2686,8 @@ private struct VLCPlayerScreen: View {
                     size: 26
                 ) {
                     if model.isPlaying {
-                        if !watchTogether.requestPause(
-                            for: watchTogetherContent.identifier
-                        ) {
-                            model.pause()
-                        }
-                    } else if !watchTogether.requestPlay(
-                        for: watchTogetherContent.identifier
-                    ) {
+                        model.pause()
+                    } else {
                         model.play()
                     }
                 }
@@ -2670,24 +2711,14 @@ private struct VLCPlayerScreen: View {
                             scrubPosition = model.currentTime
                             resumeAfterScrub = model.player.isPlaying
                             if resumeAfterScrub {
-                                if !watchTogether.requestPause(
-                                    for: watchTogetherContent.identifier
-                                ) {
-                                    model.pause()
-                                }
+                                model.pause()
                             }
                         } else {
                             let target = scrubPosition
                             isScrubbing = false
-                            if !watchTogether.requestSeek(
-                                to: target,
-                                resumeAfterSeek: resumeAfterScrub,
-                                for: watchTogetherContent.identifier
-                            ) {
-                                model.seek(to: target)
-                                if resumeAfterScrub {
-                                    model.play()
-                                }
+                            model.seek(to: target)
+                            if resumeAfterScrub {
+                                model.play()
                             }
                         }
                     }
@@ -2719,13 +2750,7 @@ private struct VLCPlayerScreen: View {
             max(model.currentTime + interval, 0),
             max(model.duration, 0)
         )
-        if !watchTogether.requestSeek(
-            to: target,
-            resumeAfterSeek: model.isPlaying,
-            for: watchTogetherContent.identifier
-        ) {
-            model.seek(to: target)
-        }
+        model.seek(to: target)
     }
 
     private func controlButton(
@@ -2776,11 +2801,10 @@ private struct VLCPlayerScreen: View {
                 minimumVideoDuration: minimumVideoDuration,
                 usesBoundedRenderer: usesBoundedRenderer
             )
-            if latestPosition > 0 {
-                _ = await model.seekAndWait(to: latestPosition)
+            if progressReference.position > 0 {
+                _ = await model.seekAndWait(to: progressReference.position)
                 model.play()
             }
-            attachWatchTogether()
             let elapsed = (ProcessInfo.processInfo.systemUptime - startupStartedAt) * 1_000
             NSLog(
                 "PLAYER_BENCHMARK playing_ms=%.1f engine=vlckit title=%@",
@@ -2800,23 +2824,6 @@ private struct VLCPlayerScreen: View {
                 model.failureMessage = error.localizedDescription
             }
         }
-    }
-
-    @MainActor
-    private func attachWatchTogether() {
-        WatchTogetherCoordinator.shared.attach(
-            adapter: WatchTogetherPlaybackAdapter(
-                content: watchTogetherContent,
-                currentTime: { model.currentTime },
-                duration: { model.duration },
-                isPlaying: { model.player.isPlaying },
-                isReady: { model.isReady },
-                play: { model.play() },
-                pause: { model.pause() },
-                seek: { target in await model.seekAndWait(to: target) }
-            ),
-            token: watchTogetherAttachmentToken
-        )
     }
 
     @MainActor
@@ -2912,11 +2919,11 @@ private struct VLCPlayerScreen: View {
     }
 
     private var usesBoundedRenderer: Bool {
-        let environment = ProcessInfo.processInfo.environment
-        if environment["SKELETON_VLC_BOUNDED_RENDERER"] == "1" {
-            return true
-        }
-        return playbackPolicy.usesBoundedRenderer
+        // LibVLC's native drawable keeps VideoToolbox in its intended output
+        // path. Its custom-memory callback renderer requires a non-null pixel
+        // plane for every in-flight frame and can outlive stop during teardown,
+        // which caused picture_CopyPixels crashes on real devices.
+        false
     }
 
     private var debugOverlayEnabled: Bool {
@@ -2945,22 +2952,30 @@ private struct VLCPlayerScreen: View {
     }
 
     @MainActor
-    private func reportCurrentProgress() {
+    private func reportCurrentProgress(
+        updateKind: PlaybackProgressUpdateKind = .checkpoint
+    ) {
         guard model.currentTime.isFinite, model.duration.isFinite else { return }
-        latestPosition = max(model.currentTime, 0)
-        onProgress?(latestPosition, max(model.duration, 0))
+        progressReference.update(
+            position: model.currentTime,
+            duration: model.duration
+        )
+        onProgress?(
+            progressReference.position,
+            progressReference.duration,
+            updateKind
+        )
     }
 }
 #endif
 
 /// Adaptive player backed by the Rust policy core. It keeps Apple-native
 /// streams on AVFoundation, sends relabeled/direct containers through
-/// KSPlayer's FFmpeg/VideoToolbox path, and uses the bounded VLC bridge for
-/// HEVC and unusually large output surfaces.
+/// KSPlayer's FFmpeg/VideoToolbox path, and uses VLC's native drawable for HEVC
+/// and unusually large output surfaces.
 private struct PerformancePlayerScreen: View {
     let title: String
     private let plan: PlaybackPlan
-    private let watchTogetherContent: WatchTogetherContent
     private let initialPosition: TimeInterval
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
@@ -2970,7 +2985,6 @@ private struct PerformancePlayerScreen: View {
     init(
         plan: PlaybackPlan,
         title: String,
-        watchTogetherContent: WatchTogetherContent,
         initialPosition: TimeInterval,
         minimumVideoDuration: TimeInterval,
         onProgress: PlaybackProgressHandler?,
@@ -2978,7 +2992,6 @@ private struct PerformancePlayerScreen: View {
     ) {
         self.plan = plan
         self.title = title
-        self.watchTogetherContent = watchTogetherContent
         self.initialPosition = max(initialPosition, 0)
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
@@ -2997,7 +3010,6 @@ private struct PerformancePlayerScreen: View {
             AVPlayerScreen(
                 plan: plan,
                 title: title,
-                watchTogetherContent: watchTogetherContent,
                 initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: onProgress,
@@ -3008,7 +3020,6 @@ private struct PerformancePlayerScreen: View {
             VLCPlayerScreen(
                 plan: plan,
                 title: title,
-                watchTogetherContent: watchTogetherContent,
                 initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: onProgress,
@@ -3028,7 +3039,6 @@ private struct PerformancePlayerScreen: View {
         KSPlayerScreen(
             plan: plan,
             title: title,
-            watchTogetherContent: watchTogetherContent,
             initialPosition: initialPosition,
             minimumVideoDuration: minimumVideoDuration,
             onProgress: onProgress,
@@ -3038,7 +3048,6 @@ private struct PerformancePlayerScreen: View {
         AVPlayerScreen(
             plan: plan,
             title: title,
-            watchTogetherContent: watchTogetherContent,
             initialPosition: initialPosition,
             minimumVideoDuration: minimumVideoDuration,
             onProgress: onProgress,
@@ -3082,10 +3091,8 @@ private enum StremioPlayerBridge {
 }
 
 struct PlayerScreen: View {
-    @ObservedObject private var watchTogether = WatchTogetherCoordinator.shared
     let title: String
     private let plan: PlaybackPlan
-    private let watchTogetherContent: WatchTogetherContent
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
@@ -3094,13 +3101,12 @@ struct PlayerScreen: View {
     @State private var bridgeFailureMessage: String?
     @State private var bridgeRevision = 0
     @State private var bridgeNotice: String?
-    @State private var latestPosition: TimeInterval
+    @State private var progressReference: PlaybackProgressReference
+    @State private var didRunSimulatorPlayerSwitch = false
 
     init(
         plan: PlaybackPlan,
         title: String,
-        contentIdentifier: String? = nil,
-        contentTitle: String? = nil,
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
@@ -3108,10 +3114,6 @@ struct PlayerScreen: View {
     ) {
         self.plan = plan
         self.title = title
-        watchTogetherContent = WatchTogetherContent(
-            identifier: contentIdentifier,
-            title: contentTitle ?? title
-        )
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
         self.onExhausted = onExhausted
@@ -3120,7 +3122,9 @@ struct PlayerScreen: View {
             sourceURL: plan.primaryURL,
             title: [title, plan.detectedMIMEType].compactMap { $0 }.joined(separator: " ")
         )
-        _latestPosition = State(initialValue: max(initialPosition, 0))
+        _progressReference = State(
+            initialValue: PlaybackProgressReference(position: initialPosition)
+        )
     }
 
     init(url: URL, title: String) {
@@ -3152,28 +3156,18 @@ struct PlayerScreen: View {
                     .accessibilityIdentifier("player-bridge-status")
             }
 
-            if let action = watchTogether.lastActionText {
-                Text(action)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(.green.opacity(0.84), in: Capsule())
-                    .padding(.top, bridgeNotice == nil ? 12 : 54)
-                    .allowsHitTesting(false)
-                    .accessibilityIdentifier("watch-together-action")
-            }
         }
-        .alert(
-            "Watch Together",
-            isPresented: Binding(
-                get: { watchTogether.errorMessage != nil },
-                set: { if !$0 { watchTogether.errorMessage = nil } }
-            )
-        ) {
-            Button("OK") { watchTogether.errorMessage = nil }
-        } message: {
-            Text(watchTogether.errorMessage ?? "SharePlay is unavailable.")
+        .onAppear {
+            PlayerPresentation.synchronizeWithCurrentOrientation()
+        }
+        .onChange(of: activePlayerIndex) { _ in
+            PlayerPresentation.synchronizeWithCurrentOrientation()
+        }
+        .onDisappear {
+            PlayerPresentation.restorePortrait()
+        }
+        .task {
+            await runSimulatorPlayerSwitchIfRequested()
         }
     }
 
@@ -3193,8 +3187,7 @@ struct PlayerScreen: View {
             PerformancePlayerScreen(
                 plan: plan,
                 title: title,
-                watchTogetherContent: watchTogetherContent,
-                initialPosition: latestPosition,
+                initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
@@ -3204,8 +3197,7 @@ struct PlayerScreen: View {
             KSPlayerScreen(
                 plan: plan,
                 title: title,
-                watchTogetherContent: watchTogetherContent,
-                initialPosition: latestPosition,
+                initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
@@ -3220,8 +3212,7 @@ struct PlayerScreen: View {
             VLCPlayerScreen(
                 plan: plan,
                 title: title,
-                watchTogetherContent: watchTogetherContent,
-                initialPosition: latestPosition,
+                initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
@@ -3235,8 +3226,7 @@ struct PlayerScreen: View {
             AVPlayerScreen(
                 plan: plan,
                 title: title,
-                watchTogetherContent: watchTogetherContent,
-                initialPosition: latestPosition,
+                initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
@@ -3273,12 +3263,18 @@ struct PlayerScreen: View {
     }
 
     @MainActor
-    private func handleProgress(position: TimeInterval, duration: TimeInterval) {
+    private func handleProgress(
+        position: TimeInterval,
+        duration: TimeInterval,
+        updateKind: PlaybackProgressUpdateKind
+    ) {
         guard position.isFinite, duration.isFinite else { return }
-        if position >= 1 || latestPosition <= 0 {
-            latestPosition = max(position, 0)
-        }
-        onProgress?(max(position, 0), max(duration, 0))
+        progressReference.update(position: position, duration: duration)
+        onProgress?(
+            progressReference.position,
+            progressReference.duration,
+            updateKind
+        )
     }
 
     @MainActor
@@ -3325,6 +3321,34 @@ struct PlayerScreen: View {
             .contains(player.rawValue) == true
         #else
         false
+        #endif
+    }
+
+    @MainActor
+    private func runSimulatorPlayerSwitchIfRequested() async {
+        #if targetEnvironment(simulator)
+        guard !didRunSimulatorPlayerSwitch,
+              let rawInterval = ProcessInfo.processInfo.environment[
+                "SKELETON_PLAYER_UI_SWITCH_INTERVAL"
+              ],
+              let interval = Double(rawInterval), interval > 0
+        else { return }
+        didRunSimulatorPlayerSwitch = true
+
+        for nextIndex in playerOrder.indices.dropFirst(activePlayerIndex + 1) {
+            try? await Task.sleep(for: .seconds(interval))
+            guard !Task.isCancelled else { return }
+            let previousPlayer = activePlayer
+            activePlayerIndex = nextIndex
+            bridgeRevision += 1
+            let nextPlayer = activePlayer
+            bridgeNotice = "Testing \(nextPlayer.title) layout"
+            NSLog(
+                "PLAYER_UI_SWITCH from=%@ to=%@ orientation_preserved=yes",
+                previousPlayer.rawValue,
+                nextPlayer.rawValue
+            )
+        }
         #endif
     }
 }
@@ -3412,8 +3436,6 @@ struct ResolvingPlayerScreen: View {
                 PlayerScreen(
                     plan: playbackPlan,
                     title: playbackTitle,
-                    contentIdentifier: activeCandidate.contentIdentifier,
-                    contentTitle: activeCandidate.contentTitle,
                     initialPosition: activeCandidate.initialPosition,
                     minimumVideoDuration: minimumVideoDuration,
                     onProgress: recordProgress,
@@ -3465,14 +3487,19 @@ struct ResolvingPlayerScreen: View {
     }
 
     @MainActor
-    private func recordProgress(position: TimeInterval, duration: TimeInterval) {
+    private func recordProgress(
+        position: TimeInterval,
+        duration: TimeInterval,
+        updateKind: PlaybackProgressUpdateKind
+    ) {
         model.recordPlaybackProgress(
             contentIdentifier: activeCandidate.contentIdentifier,
             contentTitle: activeCandidate.contentTitle,
             stream: activeCandidate.stream,
             providerName: activeCandidate.providerName,
             position: position,
-            duration: duration
+            duration: duration,
+            updateKind: updateKind
         )
     }
 

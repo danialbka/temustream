@@ -15,11 +15,13 @@ targets:
     sources:
       - Sources/StremioSkeletonCore
       - iOS/App
+      - path: iOS/Resources/Assets.xcassets
+        buildPhase: resources
     info:
       path: iOS/Resources/Info.plist
       properties:
         CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "4"
+        CFBundleVersion: "7"
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio
@@ -29,8 +31,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
     entitlements:
       path: iOS/Resources/StremioSkeleton.entitlements
-      properties:
-        com.apple.developer.group-session: true
+      properties: {}
     dependencies:
       - package: KSPlayer
       - framework: build/dependencies/MobileVLCKit.xcframework
@@ -47,6 +48,7 @@ targets:
         SWIFT_COMPILATION_MODE: wholemodule
         SWIFT_OBJC_BRIDGING_HEADER: iOS/App/StremioSkeleton-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/rust/StremioPlaybackCore/include
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
         DEVELOPMENT_TEAM: ""

@@ -28,6 +28,7 @@ struct CatalogSource: Identifiable, Hashable, Sendable {
     let title: String
     let subtitle: String
     let manifestURL: URL
+    let preferredType: String
     let preferredCatalogID: String
 }
 
@@ -67,6 +68,11 @@ private enum StreamProviderLoadError: Error, Sendable {
     case timedOut
 }
 
+enum PlaybackProgressUpdateKind: Sendable {
+    case checkpoint
+    case final
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var manifest: AddonManifest?
@@ -79,6 +85,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeSearchQuery: String?
     @Published private(set) var library: [MetaItem] = []
     @Published private(set) var playbackProgress: [String: PlaybackProgress] = [:]
+    @Published private(set) var completedPlaybackIdentifiers: Set<String> = []
     @Published private(set) var installedAddons: [URL] = []
     @Published private(set) var accountEmail: String?
     @Published private(set) var accountSyncStatus = "Not signed in"
@@ -93,6 +100,7 @@ final class AppModel: ObservableObject {
     private let primaryEndpoint: AddonEndpoint
     private let libraryStore: LibraryStore
     private let playbackProgressStore: PlaybackProgressStore
+    private let playbackCompletionStore: PlaybackCompletionStore
     private let accountClient: StremioAccountClient
     private let sessionStore = SessionStore()
     private var session: StremioSession?
@@ -104,6 +112,11 @@ final class AppModel: ObservableObject {
     private var currentSearch: String?
     private var catalogLoadRevision = 0
     private var searchRevision = 0
+    // Checkpoints are persisted while video is playing, but they deliberately
+    // stay outside the published SwiftUI graph. Publishing every checkpoint
+    // used to rebuild and re-sort the hidden details screen during playback.
+    private var currentPlaybackProgress: [String: PlaybackProgress] = [:]
+    private var currentCompletedPlaybackIdentifiers = Set<String>()
     private var playbackProgressUpdateDates: [String: Date] = [:]
     private var started = false
 
@@ -126,6 +139,7 @@ final class AppModel: ObservableObject {
                 title: "Cinemeta",
                 subtitle: "Popular movies",
                 manifestURL: primaryEndpoint.manifestURL,
+                preferredType: "movie",
                 preferredCatalogID: environment["SKELETON_CINEMETA_CATALOG_ID"] ?? "top"
             ),
             CatalogSource(
@@ -133,8 +147,17 @@ final class AppModel: ObservableObject {
                 title: "Letterboxd Recommendations",
                 subtitle: "Popular this week via Stremboxd",
                 manifestURL: letterboxdEndpoint.manifestURL,
+                preferredType: "movie",
                 preferredCatalogID: environment["SKELETON_LETTERBOXD_CATALOG_ID"]
                     ?? "letterboxd-popular"
+            ),
+            CatalogSource(
+                id: "cinemeta-series",
+                title: "TV Series",
+                subtitle: "Popular series",
+                manifestURL: primaryEndpoint.manifestURL,
+                preferredType: "series",
+                preferredCatalogID: environment["SKELETON_CINEMETA_SERIES_CATALOG_ID"] ?? "top"
             ),
         ]
         catalogSources = configuredCatalogSources
@@ -157,6 +180,9 @@ final class AppModel: ObservableObject {
         playbackProgressStore = PlaybackProgressStore(
             fileURL: support.appendingPathComponent("playback-progress.json")
         )
+        playbackCompletionStore = PlaybackCompletionStore(
+            fileURL: support.appendingPathComponent("playback-completions.json")
+        )
         session = SessionStore().load()
         accountEmail = session?.user.email
     }
@@ -173,11 +199,21 @@ final class AppModel: ObservableObject {
             library = try await libraryStore.items()
             do {
                 for progress in try await playbackProgressStore.items() {
+                    currentPlaybackProgress[progress.contentIdentifier] = progress
                     playbackProgress[progress.contentIdentifier] = progress
                     playbackProgressUpdateDates[progress.contentIdentifier] = progress.updatedAt
                 }
             } catch {
                 NSLog("PLAYBACK_PROGRESS load_failed=%@", error.localizedDescription)
+            }
+            do {
+                let completed = Set(
+                    try await playbackCompletionStore.items().map(\.contentIdentifier)
+                )
+                currentCompletedPlaybackIdentifiers = completed
+                completedPlaybackIdentifiers = completed
+            } catch {
+                NSLog("PLAYBACK_COMPLETION load_failed=%@", error.localizedDescription)
             }
             if ProcessInfo.processInfo.environment["SKELETON_E2E"] == "1" {
                 await runE2E()
@@ -274,6 +310,7 @@ final class AppModel: ObservableObject {
         searchCatalogs = []
         isSearching = true
         errorMessage = nil
+        let requestedType = selectedCatalogSource?.preferredType ?? "movie"
 
         var urls: [URL] = []
         var seenURLs = Set<URL>()
@@ -305,7 +342,7 @@ final class AppModel: ObservableObject {
 
                     let searchable = manifest.catalogs.filter { descriptor in
                         descriptor.supportsExtra("search")
-                            && (descriptor.type == "movie" || descriptor.type == "series")
+                            && descriptor.type == requestedType
                     }
                     let results = await withTaskGroup(
                         of: (Int, SearchCatalogGroup?).self
@@ -557,7 +594,28 @@ final class AppModel: ObservableObject {
     }
 
     func resumeProgress(for item: MetaItem) -> PlaybackProgress? {
-        playbackProgress["\(item.type):\(item.id)"]
+        currentPlaybackProgress["\(item.type):\(item.id)"]
+    }
+
+    func episodeContentIdentifier(_ video: Video, in series: MetaItem) -> String {
+        EpisodePlaybackIdentity.contentIdentifier(
+            seriesID: series.id,
+            videoID: video.id
+        )
+    }
+
+    func episodeContentTitle(_ video: Video, in series: MetaItem) -> String {
+        EpisodePlaybackIdentity.contentTitle(seriesTitle: series.name, video: video)
+    }
+
+    func episodeProgress(_ video: Video, in series: MetaItem) -> PlaybackProgress? {
+        playbackProgress[episodeContentIdentifier(video, in: series)]
+    }
+
+    func isEpisodeCompleted(_ video: Video, in series: MetaItem) -> Bool {
+        completedPlaybackIdentifiers.contains(
+            episodeContentIdentifier(video, in: series)
+        )
     }
 
     func recordPlaybackProgress(
@@ -566,7 +624,8 @@ final class AppModel: ObservableObject {
         stream: Stream,
         providerName: String?,
         position: TimeInterval,
-        duration: TimeInterval
+        duration: TimeInterval,
+        updateKind: PlaybackProgressUpdateKind = .final
     ) {
         guard let contentIdentifier, !contentIdentifier.isEmpty,
               let contentTitle, !contentTitle.isEmpty,
@@ -582,11 +641,23 @@ final class AppModel: ObservableObject {
             position: position,
             duration: duration
         )
+        let isCompleted = PlaybackProgress.isCompleted(
+            position: position,
+            duration: duration
+        )
         playbackProgressUpdateDates[contentIdentifier] = progress.updatedAt
         if PlaybackProgress.shouldSave(position: position, duration: duration) {
-            playbackProgress[contentIdentifier] = progress
-        } else if PlaybackProgress.isCompleted(position: position, duration: duration) {
-            playbackProgress.removeValue(forKey: contentIdentifier)
+            currentPlaybackProgress[contentIdentifier] = progress
+            if updateKind == .final {
+                playbackProgress[contentIdentifier] = progress
+            }
+        } else if isCompleted {
+            currentPlaybackProgress.removeValue(forKey: contentIdentifier)
+            currentCompletedPlaybackIdentifiers.insert(contentIdentifier)
+            if updateKind == .final {
+                playbackProgress.removeValue(forKey: contentIdentifier)
+                completedPlaybackIdentifiers.insert(contentIdentifier)
+            }
         } else {
             return
         }
@@ -600,9 +671,30 @@ final class AppModel: ObservableObject {
                 if let saved = persisted.first(where: {
                     $0.contentIdentifier == contentIdentifier
                 }) {
-                    playbackProgress[contentIdentifier] = saved
+                    currentPlaybackProgress[contentIdentifier] = saved
+                    if updateKind == .final,
+                       playbackProgress[contentIdentifier] != saved {
+                        playbackProgress[contentIdentifier] = saved
+                    }
                 } else {
-                    playbackProgress.removeValue(forKey: contentIdentifier)
+                    currentPlaybackProgress.removeValue(forKey: contentIdentifier)
+                    if updateKind == .final,
+                       playbackProgress[contentIdentifier] != nil {
+                        playbackProgress.removeValue(forKey: contentIdentifier)
+                    }
+                }
+                if isCompleted {
+                    do {
+                        _ = try await playbackCompletionStore.markCompleted(
+                            contentIdentifier: contentIdentifier,
+                            completedAt: progress.updatedAt
+                        )
+                    } catch {
+                        NSLog(
+                            "PLAYBACK_COMPLETION save_failed=%@",
+                            error.localizedDescription
+                        )
+                    }
                 }
             } catch {
                 NSLog("PLAYBACK_PROGRESS save_failed=%@", error.localizedDescription)
@@ -937,13 +1029,15 @@ final class AppModel: ObservableObject {
         source: CatalogSource,
         search: String?
     ) -> AddonCatalog? {
-        let movieCatalogs = manifest.catalogs.filter { $0.type == "movie" }
+        let matchingCatalogs = manifest.catalogs.filter {
+            $0.type == source.preferredType
+        }
         if search != nil,
-           let searchable = movieCatalogs.first(where: { $0.supportsExtra("search") }) {
+           let searchable = matchingCatalogs.first(where: { $0.supportsExtra("search") }) {
             return searchable
         }
-        return movieCatalogs.first(where: { $0.id == source.preferredCatalogID })
-            ?? movieCatalogs.first
+        return matchingCatalogs.first(where: { $0.id == source.preferredCatalogID })
+            ?? matchingCatalogs.first
             ?? manifest.catalogs.first
     }
 

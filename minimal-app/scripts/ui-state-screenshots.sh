@@ -64,6 +64,18 @@ ffmpeg -hide_banner -loglevel error -y \
 ffmpeg -hide_banner -loglevel error -y \
   -f lavfi -i "color=c=0x408D72:size=500x1000" -frames:v 1 \
   "$SERVER_DIR/ui-states/poster-tall.png"
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc2=size=640x360:rate=1" -vf "hue=h=12" -frames:v 1 \
+  "$SERVER_DIR/ui-states/episode-1.png"
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc2=size=640x360:rate=1" -vf "hue=h=82" -frames:v 1 \
+  "$SERVER_DIR/ui-states/episode-2.png"
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc2=size=640x360:rate=1" -vf "hue=h=156" -frames:v 1 \
+  "$SERVER_DIR/ui-states/episode-3.png"
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc2=size=640x360:rate=1" -vf "hue=h=238" -frames:v 1 \
+  "$SERVER_DIR/ui-states/episode-4.png"
 
 python3 "$ROOT_DIR/scripts/range_server.py" "$PORT" "$SERVER_DIR" \
   >"$ROOT_DIR/build/ui-state-server.log" 2>&1 &
@@ -91,7 +103,7 @@ xcrun simctl bootstatus "$DEVICE_ID" -b
 xcrun simctl uninstall "$DEVICE_ID" local.stremio.skeleton.uistates 2>/dev/null || true
 xcrun simctl install "$DEVICE_ID" "$APP_DIR"
 
-ALL_STATES="catalog-loading home-cinemeta home-letterboxd catalog-error details-streams details-resume library-empty library-synced addons-offline account-signed-out account-signed-in torrent-starting playback-unavailable player-active"
+ALL_STATES="catalog-loading home-cinemeta home-letterboxd home-series catalog-error details-streams details-resume details-series-episodes episode-streams library-empty library-synced addons-offline account-signed-out account-signed-in torrent-starting playback-unavailable player-active"
 STATES="${UI_SCREENSHOT_STATES:-$ALL_STATES}"
 for STATE in $STATES; do
   RUN_ID="$(date +%s)-$$-$STATE"
@@ -104,6 +116,8 @@ for STATE in $STATES; do
   LAUNCH_ARGS="-selectedCatalogSource cinemeta"
   if [ "$STATE" = "home-letterboxd" ]; then
     LAUNCH_ARGS="-selectedCatalogSource letterboxd"
+  elif [ "$STATE" = "home-series" ]; then
+    LAUNCH_ARGS="-selectedCatalogSource cinemeta-series"
   fi
 
   # shellcheck disable=SC2086
@@ -145,14 +159,17 @@ sips -g pixelWidth -g pixelHeight "$OUTPUT_DIR"/*.png >"$OUTPUT_DIR/dimensions.t
 cp "$ROOT_DIR/UI_STATE_MATRIX.md" "$OUTPUT_DIR/README.md"
 
 if [ "$STATES" = "$ALL_STATES" ]; then
-  test "$COUNT" -eq 14
+  test "$COUNT" -eq 17
   ffmpeg -hide_banner -loglevel error -y \
   -i "$OUTPUT_DIR/catalog-loading.png" \
   -i "$OUTPUT_DIR/home-cinemeta.png" \
   -i "$OUTPUT_DIR/home-letterboxd.png" \
+  -i "$OUTPUT_DIR/home-series.png" \
   -i "$OUTPUT_DIR/catalog-error.png" \
   -i "$OUTPUT_DIR/details-streams.png" \
   -i "$OUTPUT_DIR/details-resume.png" \
+  -i "$OUTPUT_DIR/details-series-episodes.png" \
+  -i "$OUTPUT_DIR/episode-streams.png" \
   -i "$OUTPUT_DIR/library-empty.png" \
   -i "$OUTPUT_DIR/library-synced.png" \
   -i "$OUTPUT_DIR/addons-offline.png" \
@@ -161,7 +178,7 @@ if [ "$STATES" = "$ALL_STATES" ]; then
   -i "$OUTPUT_DIR/torrent-starting.png" \
   -i "$OUTPUT_DIR/playback-unavailable.png" \
   -i "$OUTPUT_DIR/player-active.png" \
-  -filter_complex '[0:v]scale=201:437[s0];[1:v]scale=201:437[s1];[2:v]scale=201:437[s2];[3:v]scale=201:437[s3];[4:v]scale=201:437[s4];[5:v]scale=201:437[s5];[6:v]scale=201:437[s6];[7:v]scale=201:437[s7];[8:v]scale=201:437[s8];[9:v]scale=201:437[s9];[10:v]scale=201:437[s10];[11:v]scale=201:437[s11];[12:v]scale=201:437[s12];[13:v]scale=201:437[s13];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11][s12][s13]xstack=inputs=14:layout=0_0|201_0|402_0|603_0|0_437|201_437|402_437|603_437|0_874|201_874|402_874|603_874|0_1311|201_1311:fill=black[out]' \
+  -filter_complex '[0:v]scale=201:437[s0];[1:v]scale=201:437[s1];[2:v]scale=201:437[s2];[3:v]scale=201:437[s3];[4:v]scale=201:437[s4];[5:v]scale=201:437[s5];[6:v]scale=201:437[s6];[7:v]scale=201:437[s7];[8:v]scale=201:437[s8];[9:v]scale=201:437[s9];[10:v]scale=201:437[s10];[11:v]scale=201:437[s11];[12:v]scale=201:437[s12];[13:v]scale=201:437[s13];[14:v]scale=201:437[s14];[15:v]scale=201:437[s15];[16:v]scale=201:437[s16];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11][s12][s13][s14][s15][s16]xstack=inputs=17:layout=0_0|201_0|402_0|603_0|0_437|201_437|402_437|603_437|0_874|201_874|402_874|603_874|0_1311|201_1311|402_1311|603_1311|0_1748:fill=black[out]' \
     -map '[out]' -frames:v 1 "$OUTPUT_DIR/all-states-contact-sheet.png"
   test -s "$OUTPUT_DIR/all-states-contact-sheet.png"
   echo "UI STATE SCREENSHOTS PASS: $COUNT state PNGs + contact sheet in $OUTPUT_DIR"

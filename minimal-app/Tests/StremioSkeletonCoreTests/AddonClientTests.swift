@@ -88,4 +88,26 @@ final class AddonClientTests: XCTestCase {
             "https://www.youtube.com/watch?v=abc_123-XYZ"
         )
     }
+
+    func testDecodesEpisodeThumbnailFromSeriesMetadata() throws {
+        let json = #"""
+        {
+            "id":"tt9288030:1:1",
+            "title":"Welcome to Margrave",
+            "season":1,
+            "episode":1,
+            "thumbnail":"https://episodes.metahub.space/tt9288030/1/1/w780.jpg",
+            "released":"2022-02-04T00:00:00.000Z"
+        }
+        """#
+
+        let video = try JSONDecoder().decode(Video.self, from: Data(json.utf8))
+
+        XCTAssertEqual(video.season, 1)
+        XCTAssertEqual(video.episode, 1)
+        XCTAssertEqual(
+            video.thumbnail?.absoluteString,
+            "https://episodes.metahub.space/tt9288030/1/1/w780.jpg"
+        )
+    }
 }

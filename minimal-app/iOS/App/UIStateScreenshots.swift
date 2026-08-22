@@ -37,8 +37,9 @@ private struct UIStateScreenshotRoot: View {
 
     private var needsPreparation: Bool {
         [
-            "home-cinemeta", "home-letterboxd", "catalog-error", "details-streams",
-            "details-resume", "details-trailer-active", "library-synced", "account-signed-in",
+            "home-cinemeta", "home-letterboxd", "home-series", "catalog-error",
+            "details-streams", "details-resume", "details-series-episodes", "episode-streams",
+            "details-trailer-active", "library-synced", "account-signed-in",
         ].contains(state)
     }
 
@@ -47,7 +48,7 @@ private struct UIStateScreenshotRoot: View {
         switch state {
         case "catalog-loading":
             loadingCatalog
-        case "catalog-error", "home-cinemeta", "home-letterboxd":
+        case "catalog-error", "home-cinemeta", "home-letterboxd", "home-series":
             screenTab(label: "Home", systemImage: "rectangle.grid.2x2") {
                 NavigationStack { HomeView() }
             }
@@ -62,6 +63,14 @@ private struct UIStateScreenshotRoot: View {
         case "details-trailer-active":
             NavigationStack {
                 DetailsView(seed: fixtureItem)
+            }
+        case "details-series-episodes":
+            NavigationStack {
+                DetailsView(seed: fixtureSeriesItem)
+            }
+        case "episode-streams":
+            NavigationStack {
+                EpisodeStreamsView(series: fixtureSeriesItem, episode: fixtureEpisodeTwo)
             }
         case "library-empty":
             screenTab(label: "Library", systemImage: "bookmark") {
@@ -133,8 +142,8 @@ private struct UIStateScreenshotRoot: View {
 
     private func prepare() async {
         switch state {
-        case "home-cinemeta", "home-letterboxd", "catalog-error", "details-streams",
-             "details-trailer-active":
+        case "home-cinemeta", "home-letterboxd", "home-series", "catalog-error",
+             "details-streams", "details-trailer-active":
             await model.start()
             prepared = true
         case "details-resume":
@@ -148,12 +157,44 @@ private struct UIStateScreenshotRoot: View {
                 duration: 3_600
             )
             prepared = true
+        case "details-series-episodes", "episode-streams":
+            await model.start()
+            model.recordPlaybackProgress(
+                contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
+                    seriesID: fixtureSeriesItem.id,
+                    videoID: fixtureEpisodeOne.id
+                ),
+                contentTitle: EpisodePlaybackIdentity.contentTitle(
+                    seriesTitle: fixtureSeriesItem.name,
+                    video: fixtureEpisodeOne
+                ),
+                stream: fixtureStream,
+                providerName: "Cinemeta Fixture",
+                position: 3_590,
+                duration: 3_600
+            )
+            model.recordPlaybackProgress(
+                contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
+                    seriesID: fixtureSeriesItem.id,
+                    videoID: fixtureEpisodeTwo.id
+                ),
+                contentTitle: EpisodePlaybackIdentity.contentTitle(
+                    seriesTitle: fixtureSeriesItem.name,
+                    video: fixtureEpisodeTwo
+                ),
+                stream: fixtureStream,
+                providerName: "Cinemeta Fixture",
+                position: 1_200,
+                duration: 3_600
+            )
+            prepared = true
         default:
             prepared = true
         }
 
         // Let AsyncImage, navigation chrome, and detail resolution settle before capture.
         let detailDelay = state == "details-streams" || state == "details-resume"
+            || state == "details-series-episodes" || state == "episode-streams"
             || state == "details-trailer-active"
         try? await Task.sleep(for: .milliseconds(detailDelay ? 1_500 : 650))
         let runID = ProcessInfo.processInfo.environment["UI_SCREENSHOT_RUN_ID"] ?? "manual"
@@ -177,6 +218,39 @@ private struct UIStateScreenshotRoot: View {
 
     private var fixtureVideoURL: URL {
         URL(string: "http://127.0.0.1:18766/sample.mp4")!
+    }
+
+    private var fixtureSeriesItem: MetaItem {
+        MetaItem(
+            id: "tt-fixture-series",
+            type: "series",
+            name: "Fixture Show",
+            poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-portrait.png"),
+            description: "A deterministic series used to verify episode playback state.",
+            releaseInfo: "2024–",
+            genres: ["Drama", "Adventure"]
+        )
+    }
+
+    private var fixtureEpisodeOne: Video {
+        Video(
+            id: "tt-fixture-series:1:1",
+            title: "First Light",
+            season: 1,
+            episode: 1,
+            released: "2024-01-05T00:00:00.000Z"
+        )
+    }
+
+    private var fixtureEpisodeTwo: Video {
+        Video(
+            id: "tt-fixture-series:1:2",
+            title: "The Crossing",
+            season: 1,
+            episode: 2,
+            thumbnail: URL(string: "http://127.0.0.1:18766/ui-states/episode-2.png"),
+            released: "2024-01-12T00:00:00.000Z"
+        )
     }
 
     private var fixtureStream: Stream {

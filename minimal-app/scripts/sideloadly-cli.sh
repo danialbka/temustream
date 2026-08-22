@@ -226,10 +226,12 @@ inspect_ipa() {
 
   codesign --display --entitlements :- "$ipa_app_dir" \
     > "$cli_tmp_dir/entitlements.plist" 2>/dev/null
-  entitlement_value="$(plutil -convert json -o - "$cli_tmp_dir/entitlements.plist" 2>/dev/null \
-    | jq -r --arg key "$required_entitlement" '.[$key] // false')"
-  [[ "$entitlement_value" == "true" || "$entitlement_value" == "1" ]] || fail \
-    "IPA does not request the required $required_entitlement entitlement"
+  if [[ -n "$required_entitlement" ]]; then
+    entitlement_value="$(plutil -convert json -o - "$cli_tmp_dir/entitlements.plist" 2>/dev/null \
+      | jq -r --arg key "$required_entitlement" '.[$key] // false')"
+    [[ "$entitlement_value" == "true" || "$entitlement_value" == "1" ]] || fail \
+      "IPA does not request the required $required_entitlement entitlement"
+  fi
 
   ipa_md5="$(md5 -q "$ipa_path" | tr '[:upper:]' '[:lower:]')"
   ipa_size="$(stat -f '%z' "$ipa_path")"

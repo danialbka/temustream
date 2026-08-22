@@ -1,3 +1,4 @@
+import Foundation
 import SafariServices
 import SwiftUI
 
@@ -282,7 +283,9 @@ struct DetailsView: View {
     @State private var item: MetaItem
     @State private var streamProviders: [StreamProviderGroup] = []
     @State private var selectedProviderID = Self.allProvidersID
+    @State private var selectedSeason: Int?
     @State private var visibleStreamLimit = Self.streamBatchSize
+    @State private var streamLoadRevision = 0
     @State private var isLoading = true
     @State private var isUpdatingLibrary = false
     @State private var activeTrailer: TrailerDestination?
@@ -342,7 +345,8 @@ struct DetailsView: View {
                         .disabled(isUpdatingLibrary)
                         .accessibilityIdentifier("library-toggle")
 
-                        if let progress = model.resumeProgress(for: item) {
+                        if item.type != "series",
+                           let progress = model.resumeProgress(for: item) {
                             NavigationLink {
                                 ResolvingPlayerScreen(
                                     candidate: resumeCandidate(for: progress),
@@ -420,8 +424,13 @@ struct DetailsView: View {
                 if let description = item.description { Text(description) }
             }
 
-            Section("Streams") {
-                if isLoading {
+            if item.type == "series" {
+                episodeSection
+            }
+
+            if item.type != "series" {
+                Section {
+                    if isLoading {
                     HStack(spacing: 12) {
                         ProgressView()
                             .controlSize(.regular)
@@ -517,19 +526,23 @@ struct DetailsView: View {
                         }
                     }
                 }
+                } header: {
+                    Text("Streams")
+                }
+                .id("streams-section")
             }
-            .id("streams-section")
             }
             .navigationTitle(item.name)
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(false)
             .task {
                 item = await model.details(for: seed)
-                streamProviders = await model.streamProviders(for: item)
-                if !streamProviders.contains(where: { $0.id == selectedProviderID }) {
-                    selectedProviderID = Self.allProvidersID
+                if item.type == "series" {
+                    configureInitialSeason()
+                    isLoading = false
+                } else {
+                    await loadStreams()
                 }
-                isLoading = false
                 #if SKELETON_SCREENSHOT_HARNESS
                 if ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"] == "details-streams" {
                     try? await Task.sleep(for: .milliseconds(100))
@@ -545,6 +558,294 @@ struct DetailsView: View {
             TrailerBrowser(url: destination.url)
                 .ignoresSafeArea()
         }
+    }
+
+    @ViewBuilder
+    private var episodeSection: some View {
+        Section {
+            if allEpisodes.isEmpty {
+                Label(
+                    "No episode metadata is available",
+                    systemImage: "list.number"
+                )
+                .foregroundStyle(.secondary)
+            } else {
+                ForEach(selectedSeasonEpisodes) { episode in
+                    NavigationLink {
+                        EpisodeStreamsView(series: item, episode: episode)
+                    } label: {
+                        episodeRow(episode)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("episode-\(episode.id)")
+                    .accessibilityHint("Shows available streams for this episode")
+                }
+            }
+        } header: {
+            HStack {
+                Text("Episodes")
+                Spacer()
+                if let selectedSeason {
+                    Menu {
+                        ForEach(availableSeasons, id: \.self) { season in
+                            Button {
+                                selectSeason(season)
+                            } label: {
+                                if season == selectedSeason {
+                                    Label(seasonLabel(season), systemImage: "checkmark")
+                                } else {
+                                    Text(seasonLabel(season))
+                                }
+                            }
+                        }
+                    } label: {
+                        Label(seasonLabel(selectedSeason), systemImage: "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    }
+                    .textCase(nil)
+                    .accessibilityIdentifier("season-selector")
+                }
+            }
+        }
+    }
+
+    private var allEpisodes: [Video] {
+        var seen = Set<String>()
+        return (item.videos ?? [])
+            .filter { !$0.id.isEmpty && seen.insert($0.id).inserted }
+            .sorted { lhs, rhs in
+                let lhsSeason = lhs.season ?? 0
+                let rhsSeason = rhs.season ?? 0
+                if lhsSeason != rhsSeason { return lhsSeason < rhsSeason }
+                let lhsEpisode = lhs.episode ?? Int.max
+                let rhsEpisode = rhs.episode ?? Int.max
+                if lhsEpisode != rhsEpisode { return lhsEpisode < rhsEpisode }
+                if lhs.released != rhs.released {
+                    return (lhs.released ?? "") < (rhs.released ?? "")
+                }
+                return lhs.id < rhs.id
+            }
+    }
+
+    private var availableSeasons: [Int] {
+        Array(Set(allEpisodes.map { $0.season ?? 0 })).sorted()
+    }
+
+    private var selectedSeasonEpisodes: [Video] {
+        guard let selectedSeason else { return [] }
+        return allEpisodes.filter { ($0.season ?? 0) == selectedSeason }
+    }
+
+    private func episodeRow(_ episode: Video) -> some View {
+        let isCompleted = model.isEpisodeCompleted(episode, in: item)
+        let progress = model.episodeProgress(episode, in: item)
+
+        return HStack(alignment: .top, spacing: 12) {
+            episodeArtwork(
+                episode,
+                isCompleted: isCompleted
+            )
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Text(episodeLocation(episode))
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(episodeDisplayTitle(episode))
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                }
+
+                if isCompleted {
+                    Text("Watched")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                } else if let progress {
+                    Text("Resume at \(formatPlaybackTime(progress.position))")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                    if progress.duration > 0 {
+                        ProgressView(
+                            value: min(progress.position, progress.duration),
+                            total: progress.duration
+                        )
+                        .tint(.orange)
+                    }
+                } else if let released = episode.released, !released.isEmpty {
+                    Text(String(released.prefix(10)))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(episodeLocation(episode)), \(episodeDisplayTitle(episode)), "
+                + (isCompleted
+                    ? "watched"
+                    : progress.map {
+                        "resume at \(formatPlaybackTime($0.position))"
+                    } ?? "not watched")
+        )
+    }
+
+    @ViewBuilder
+    private func episodeArtwork(
+        _ episode: Video,
+        isCompleted: Bool
+    ) -> some View {
+        if let thumbnail = episode.thumbnail {
+            ZStack(alignment: .bottomTrailing) {
+                AsyncImage(url: thumbnail, transaction: Transaction(animation: nil)) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    case .empty:
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.12))
+                            .overlay {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                    case .failure:
+                        episodeThumbnailPlaceholder
+                    @unknown default:
+                        episodeThumbnailPlaceholder
+                    }
+                }
+                .frame(width: 104, height: 58)
+                .clipped()
+
+                if isCompleted {
+                    Image(systemName: "checkmark")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .frame(width: 22, height: 22)
+                        .background(Color.green, in: Circle())
+                        .overlay {
+                            Circle().stroke(.white.opacity(0.9), lineWidth: 1.5)
+                        }
+                        .padding(5)
+                }
+            }
+            .frame(width: 104, height: 58)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(
+                        Color.secondary.opacity(0.18),
+                        lineWidth: 1
+                    )
+            }
+            .accessibilityHidden(true)
+        } else {
+            episodeArtworkFallback(
+                isCompleted: isCompleted
+            )
+            .frame(width: 34, height: 34)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private var episodeThumbnailPlaceholder: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.12))
+            Image(systemName: "photo")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func episodeArtworkFallback(
+        isCompleted: Bool
+    ) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(
+                    isCompleted
+                        ? Color.green.opacity(0.18)
+                        : Color.orange.opacity(0.10)
+                )
+            Image(
+                systemName: isCompleted
+                    ? "checkmark"
+                    : "play"
+            )
+            .font(.caption.bold())
+            .foregroundStyle(isCompleted ? .green : .orange)
+        }
+    }
+
+    private func configureInitialSeason() {
+        guard let episode = preferredEpisode(from: allEpisodes) else {
+            selectedSeason = nil
+            return
+        }
+        selectedSeason = episode.season ?? 0
+    }
+
+    private func preferredEpisode(from episodes: [Video]) -> Video? {
+        let resumable = episodes.compactMap { episode -> (Video, PlaybackProgress)? in
+            guard let progress = model.episodeProgress(episode, in: item) else {
+                return nil
+            }
+            return (episode, progress)
+        }
+        .max { $0.1.updatedAt < $1.1.updatedAt }?.0
+        return resumable
+            ?? episodes.first { !model.isEpisodeCompleted($0, in: item) }
+            ?? episodes.first
+    }
+
+    private func selectSeason(_ season: Int) {
+        guard selectedSeason != season else { return }
+        selectedSeason = season
+    }
+
+    @MainActor
+    private func loadStreams() async {
+        streamLoadRevision += 1
+        let revision = streamLoadRevision
+        isLoading = true
+        streamProviders = []
+        selectedProviderID = Self.allProvidersID
+        visibleStreamLimit = Self.streamBatchSize
+
+        let loaded = await model.streamProviders(for: item)
+        guard revision == streamLoadRevision, !Task.isCancelled else { return }
+        streamProviders = loaded
+        isLoading = false
+    }
+
+    private func seasonLabel(_ season: Int) -> String {
+        season == 0 ? "Specials" : "Season \(season)"
+    }
+
+    private func episodeLocation(_ episode: Video) -> String {
+        if let season = episode.season, let number = episode.episode {
+            return "S\(season) E\(number)"
+        }
+        if let number = episode.episode { return "E\(number)" }
+        return "Episode"
+    }
+
+    private func episodeDisplayTitle(_ episode: Video) -> String {
+        guard let title = episode.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty
+        else { return episodeLocation(episode) }
+        return title
     }
 
     private var visibleStreams: [PresentedStream] {
@@ -676,6 +977,362 @@ struct DetailsView: View {
     }
 }
 
+struct EpisodeStreamsView: View {
+    private static let allProvidersID = "all-providers"
+    private static let streamBatchSize = 60
+
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.openURL) private var openURL
+    let series: MetaItem
+    let episode: Video
+    @State private var streamProviders: [StreamProviderGroup] = []
+    @State private var selectedProviderID = Self.allProvidersID
+    @State private var visibleStreamLimit = Self.streamBatchSize
+    @State private var isLoading = true
+
+    var body: some View {
+        List {
+            Section {
+                HStack(alignment: .top, spacing: 14) {
+                    episodeThumbnail
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(episodeDisplayTitle)
+                            .font(.headline)
+                            .lineLimit(2)
+                        Text(series.name)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+
+                        if isCompleted {
+                            Label("Watched", systemImage: "checkmark.circle.fill")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.green)
+                        } else if let progress {
+                            Label(
+                                "Resume at \(formatPlaybackTime(progress.position))",
+                                systemImage: "play.circle.fill"
+                            )
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.orange)
+                            if progress.duration > 0 {
+                                ProgressView(
+                                    value: min(progress.position, progress.duration),
+                                    total: progress.duration
+                                )
+                                .tint(.orange)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.vertical, 4)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("episode-streams-header")
+            } header: {
+                Text(episodeLocation)
+            }
+
+            Section {
+                if isLoading {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.regular)
+                            .tint(.orange)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Resolving add-ons…")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Checking installed providers for episode streams")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Resolving episode streams")
+                    .accessibilityIdentifier("stream-resolution-status")
+                } else if streamProviders.isEmpty {
+                    EmptyStateView(
+                        title: "No streams",
+                        systemImage: "play.slash",
+                        message: "No installed add-on returned a stream for this episode."
+                    )
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            providerButton(
+                                id: Self.allProvidersID,
+                                title: "All",
+                                count: streamProviders.reduce(0) { $0 + $1.streams.count }
+                            )
+                            ForEach(streamProviders) { provider in
+                                providerButton(
+                                    id: provider.id,
+                                    title: provider.name,
+                                    count: provider.streams.count
+                                )
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .accessibilityIdentifier("stream-provider-selector")
+
+                    if visibleStreams.isEmpty {
+                        Label(
+                            "No streams from \(selectedProviderName)",
+                            systemImage: "play.slash"
+                        )
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(visibleStreams.prefix(visibleStreamLimit))) { presented in
+                            let stream = presented.stream
+                            if stream.isDirectlyPlayable || stream.isTorrent {
+                                NavigationLink {
+                                    ResolvingPlayerScreen(
+                                        candidate: StreamPlaybackCandidate(
+                                            stream: stream,
+                                            providerName: presented.providerName,
+                                            contentIdentifier: contentIdentifier,
+                                            contentTitle: contentTitle,
+                                            initialPosition: progress?.position ?? 0
+                                        ),
+                                        minimumVideoDuration: 5 * 60
+                                    )
+                                } label: {
+                                    streamRow(presented)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                            } else if let external = stream.externalUrl {
+                                Button { openURL(external) } label: {
+                                    streamRow(presented)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                            } else {
+                                streamRow(presented, systemImage: "exclamationmark.triangle")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        if visibleStreamLimit < visibleStreams.count {
+                            Button {
+                                visibleStreamLimit = min(
+                                    visibleStreamLimit + Self.streamBatchSize,
+                                    visibleStreams.count
+                                )
+                            } label: {
+                                Label(
+                                    "Show more streams (\(visibleStreams.count - visibleStreamLimit) remaining)",
+                                    systemImage: "arrow.down.circle"
+                                )
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.orange)
+                            .accessibilityIdentifier("show-more-streams")
+                        }
+                    }
+                }
+            } header: {
+                Text("Streams")
+            }
+        }
+        .accessibilityIdentifier("episode-streams-route")
+        .navigationTitle("\(episodeLocation) Streams")
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: episode.id) {
+            isLoading = true
+            streamProviders = []
+            selectedProviderID = Self.allProvidersID
+            visibleStreamLimit = Self.streamBatchSize
+            let loaded = await model.streamProviders(for: series, videoID: episode.id)
+            guard !Task.isCancelled else { return }
+            streamProviders = loaded
+            isLoading = false
+        }
+    }
+
+    @ViewBuilder
+    private var episodeThumbnail: some View {
+        if let thumbnail = episode.thumbnail {
+            AsyncImage(url: thumbnail, transaction: Transaction(animation: nil)) { phase in
+                switch phase {
+                case let .success(image):
+                    image.resizable().scaledToFill()
+                case .empty:
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.12))
+                        .overlay { ProgressView().controlSize(.small) }
+                case .failure:
+                    thumbnailPlaceholder
+                @unknown default:
+                    thumbnailPlaceholder
+                }
+            }
+            .frame(width: 136, height: 76)
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+            }
+            .accessibilityHidden(true)
+        } else {
+            thumbnailPlaceholder
+                .frame(width: 84, height: 76)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var thumbnailPlaceholder: some View {
+        ZStack {
+            Rectangle().fill(Color.secondary.opacity(0.12))
+            Image(systemName: "photo")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var progress: PlaybackProgress? {
+        model.episodeProgress(episode, in: series)
+    }
+
+    private var isCompleted: Bool {
+        model.isEpisodeCompleted(episode, in: series)
+    }
+
+    private var contentIdentifier: String {
+        model.episodeContentIdentifier(episode, in: series)
+    }
+
+    private var contentTitle: String {
+        model.episodeContentTitle(episode, in: series)
+    }
+
+    private var episodeLocation: String {
+        if let season = episode.season, let number = episode.episode {
+            return "S\(season) E\(number)"
+        }
+        if let number = episode.episode { return "E\(number)" }
+        return "Episode"
+    }
+
+    private var episodeDisplayTitle: String {
+        guard let title = episode.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty
+        else { return episodeLocation }
+        return title
+    }
+
+    private var visibleStreams: [PresentedStream] {
+        let providers = selectedProviderID == Self.allProvidersID
+            ? streamProviders
+            : streamProviders.filter { $0.id == selectedProviderID }
+        return providers.flatMap { provider in
+            provider.streams.enumerated().map { index, stream in
+                PresentedStream(
+                    id: "\(provider.id)#\(index)#\(stream.id)",
+                    providerName: provider.name,
+                    stream: stream
+                )
+            }
+        }
+        .sorted {
+            if $0.playbackPriority != $1.playbackPriority {
+                return $0.playbackPriority < $1.playbackPriority
+            }
+            return $0.id < $1.id
+        }
+    }
+
+    private var selectedProviderName: String {
+        guard selectedProviderID != Self.allProvidersID else { return "installed providers" }
+        return streamProviders.first { $0.id == selectedProviderID }?.name ?? "this provider"
+    }
+
+    private func providerButton(id: String, title: String, count: Int) -> some View {
+        let isSelected = selectedProviderID == id
+        return Button {
+            selectedProviderID = id
+            visibleStreamLimit = Self.streamBatchSize
+        } label: {
+            HStack(spacing: 6) {
+                Text(title).lineLimit(1)
+                Text("\(count)")
+                    .font(.caption2.monospacedDigit())
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(isSelected ? Color.black.opacity(0.18) : Color.orange.opacity(0.12))
+                    .clipShape(Capsule())
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(isSelected ? Color.black : Color.orange)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(isSelected ? Color.orange : Color.orange.opacity(0.10))
+            .overlay {
+                Capsule().stroke(Color.orange.opacity(isSelected ? 0 : 0.45), lineWidth: 1)
+            }
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title), \(count) streams")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func streamRow(
+        _ presented: PresentedStream,
+        systemImage: String? = nil
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(
+                systemName: systemImage
+                    ?? (presented.stream.isTorrent ? "arrow.down.circle" : "play.circle")
+            )
+            .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(presented.stream.displayName)
+                    .font(.subheadline)
+                    .lineLimit(3)
+                if presented.qualityBadge != nil || presented.fileSizeBadge != nil {
+                    HStack(spacing: 6) {
+                        if let quality = presented.qualityBadge {
+                            StreamMetadataBadge(text: quality, systemImage: "tv")
+                        }
+                        if let fileSize = presented.fileSizeBadge {
+                            StreamMetadataBadge(text: fileSize, systemImage: "externaldrive")
+                        }
+                    }
+                    .accessibilityHidden(true)
+                }
+                Text(presented.providerName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                if let description = presented.stream.description, !description.isEmpty {
+                    Text(description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private func formatPlaybackTime(_ value: TimeInterval) -> String {
+        guard value.isFinite, value >= 0 else { return "0:00" }
+        let total = Int(value.rounded(.down))
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, seconds) }
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
 private struct TrailerDestination: Identifiable {
     let url: URL
     var id: String { url.absoluteString }
@@ -704,13 +1361,49 @@ private struct PresentedStream: Identifiable {
     let id: String
     let providerName: String
     let stream: Stream
+    let playbackPriority: Int
+    let fileSizeBadge: String?
+    let qualityBadge: String?
+
+    private static let sizeExpression = try! NSRegularExpression(
+        pattern: #"(?<![A-Z0-9])(\d+(?:\.\d+)?)\s*(TB|GB|MB)(?![A-Z0-9])"#,
+        options: [.caseInsensitive]
+    )
+    private static let qualityExpression = try! NSRegularExpression(
+        pattern: #"(?:4320P|8K|2160P|4K|1080P|720P|480P)"#,
+        options: [.caseInsensitive]
+    )
 
     /// Put cached, phone-decodable releases ahead of extreme AI upscales and
     /// huge remuxes. Every provider result remains available; this only keeps
     /// an unsafe 8K entry from looking like the default choice on an iPhone.
-    var playbackPriority: Int {
-        let uppercased = metadataText.uppercased()
-        var score = metadataText.contains("⚡") ? -1_000 : 0
+    init(id: String, providerName: String, stream: Stream) {
+        self.id = id
+        self.providerName = providerName
+        self.stream = stream
+
+        let metadata = [stream.title, stream.name, stream.description]
+            .compactMap { $0 }
+            .joined(separator: " ")
+        let uppercased = metadata.uppercased()
+        let sizeMatch = Self.firstMatch(Self.sizeExpression, in: metadata)
+        let sizeInGB = Self.sizeInGB(from: sizeMatch)
+
+        fileSizeBadge = sizeMatch?
+            .uppercased()
+            .replacingOccurrences(of: " ", with: " ")
+
+        if let quality = Self.firstMatch(Self.qualityExpression, in: metadata) {
+            qualityBadge = switch quality.uppercased() {
+            case "4320P", "8K": "8K"
+            case "2160P", "4K": "4K"
+            default: quality.uppercased()
+            }
+        } else {
+            qualityBadge = nil
+        }
+
+        var score = metadata.contains("⚡") ? -1_000 : 0
         if uppercased.contains("4320P") || uppercased.contains("8K") {
             score += 1_000
         } else if uppercased.contains("1080P") {
@@ -726,38 +1419,11 @@ private struct PresentedStream: Identifiable {
         } else if let sizeInGB, sizeInGB > 25 {
             score += 25
         }
-        return score
+        playbackPriority = score
     }
 
-    var fileSizeBadge: String? {
-        metadataMatch(#"(?i)(?<![A-Z0-9])\d+(?:\.\d+)?\s*(?:TB|GB|MB)(?![A-Z0-9])"#)?
-            .uppercased()
-            .replacingOccurrences(of: " ", with: " ")
-    }
-
-    var qualityBadge: String? {
-        guard let match = metadataMatch(#"(?i)(?:4320P|8K|2160P|4K|1080P|720P|480P)"#) else {
-            return nil
-        }
-        switch match.uppercased() {
-        case "4320P", "8K": return "8K"
-        case "2160P", "4K": return "4K"
-        default: return match.uppercased()
-        }
-    }
-
-    private var metadataText: String {
-        [stream.title, stream.name, stream.description]
-            .compactMap { $0 }
-            .joined(separator: " ")
-    }
-
-    private var sizeInGB: Double? {
-        guard let range = metadataText.range(
-            of: #"(?i)(?<![A-Z0-9])(\d+(?:\.\d+)?)\s*(TB|GB|MB)(?![A-Z0-9])"#,
-            options: .regularExpression
-        ) else { return nil }
-        let value = String(metadataText[range])
+    private static func sizeInGB(from value: String?) -> Double? {
+        guard let value else { return nil }
         let scanner = Scanner(string: value)
         guard let amount = scanner.scanDouble() else { return nil }
         let unit = value.uppercased()
@@ -766,11 +1432,17 @@ private struct PresentedStream: Identifiable {
         return amount
     }
 
-    private func metadataMatch(_ pattern: String) -> String? {
-        guard let range = metadataText.range(of: pattern, options: .regularExpression) else {
-            return nil
-        }
-        return String(metadataText[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+    private static func firstMatch(
+        _ expression: NSRegularExpression,
+        in text: String
+    ) -> String? {
+        let searchRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = expression.firstMatch(
+            in: text,
+            options: [],
+            range: searchRange
+        ), let range = Range(match.range, in: text) else { return nil }
+        return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

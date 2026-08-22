@@ -1,0 +1,11 @@
+{
+  "metas": [
+    {
+      "id": "tt-fixture-series",
+      "type": "series",
+      "name": "Fixture Show",
+      "poster": "http://127.0.0.1:18766/ui-states/poster-portrait.png",
+      "releaseInfo": "2024–"
+    }
+  ]
+}

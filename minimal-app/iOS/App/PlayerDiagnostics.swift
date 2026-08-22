@@ -41,7 +41,8 @@ enum StremioPlayerConfiguration {
     static func makeOptions(
         engine: Engine = .ffmpeg,
         audioOutput: AudioOutput = .engine,
-        performancePolicy: PlaybackPerformancePolicy? = nil
+        performancePolicy: PlaybackPerformancePolicy? = nil,
+        initialPosition: TimeInterval = 0
     ) -> KSOptions {
         configureEngine(engine)
         KSOptions.audioPlayerType = switch audioOutput {
@@ -50,6 +51,12 @@ enum StremioPlayerConfiguration {
         }
         let options = KSOptions()
         options.hardwareDecode = true
+        // KSMEPlayer can open the demuxer at the resume timestamp. Doing this
+        // before decoding avoids a visible play-from-zero/pause/seek cycle and
+        // does not depend on KSPlayer's replaceable seek callback.
+        if engine == .ffmpeg, initialPosition.isFinite, initialPosition > 0 {
+            options.startPlayTime = initialPosition
+        }
         #if targetEnvironment(simulator)
         if ProcessInfo.processInfo.environment["SKELETON_KS_ASYNC_DECOMPRESSION"] == "1" {
             options.asynchronousDecompression = true
@@ -556,6 +563,24 @@ enum PlayerStressBenchmark {
 /// transitional state. Keeping seek and resume distinct gives each backend a
 /// bounded opportunity to reassert playback after a completed scrub.
 @MainActor
+private final class PlayerSeekCompletionGate {
+    private var didResolve = false
+    private let completion: @MainActor @Sendable (Bool) -> Void
+
+    init(completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        self.completion = completion
+    }
+
+    @discardableResult
+    func resolve(_ finished: Bool) -> Bool {
+        guard !didResolve else { return false }
+        didResolve = true
+        completion(finished)
+        return true
+    }
+}
+
+@MainActor
 enum PlayerSeekRecovery {
     private static var generations = [ObjectIdentifier: Int]()
 
@@ -625,6 +650,18 @@ enum PlayerSeekRecovery {
         resume: Bool,
         completion: @escaping @MainActor @Sendable (Bool) -> Void = { _ in }
     ) {
+        let completionGate = PlayerSeekCompletionGate(completion: completion)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(12))
+            guard !Task.isCancelled else { return }
+            if completionGate.resolve(false) {
+                NSLog(
+                    "PLAYER_REPAIR seek=completion-timeout target=%.1f",
+                    target
+                )
+            }
+        }
+
         if let nativePlayer = layer.player as? KSAVPlayer {
             Self.pause(layer: layer)
             let time = CMTime(seconds: max(target, 0), preferredTimescale: 600)
@@ -636,7 +673,7 @@ enum PlayerSeekRecovery {
             ) { finished in
                 Task { @MainActor in
                     if finished, resume { Self.resume(layer: layer) }
-                    completion(finished)
+                    completionGate.resolve(finished)
                 }
             }
             return
@@ -650,7 +687,7 @@ enum PlayerSeekRecovery {
             resume: resume,
             generation: generation,
             attempt: 0,
-            completion: completion
+            completion: { completionGate.resolve($0) }
         )
     }
 

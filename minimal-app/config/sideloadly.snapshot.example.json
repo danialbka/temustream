@@ -41,7 +41,7 @@
     "sourceBundleID": "local.stremio.skeleton",
     "installedBundleID": "YOUR_SIDELOADED_BUNDLE_IDENTIFIER",
     "autoRefreshRecordIDAtCapture": 0,
-    "requiredEntitlement": "com.apple.developer.group-session",
+    "requiredEntitlement": "",
     "defaultIPA": "build/StremioSkeleton-device.ipa"
   }
 }

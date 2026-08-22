@@ -4,8 +4,9 @@
   "name": "Cinemeta",
   "description": "Deterministic Cinemeta-style screenshot fixture.",
   "resources": ["catalog", "meta", "stream"],
-  "types": ["movie"],
+  "types": ["movie", "series"],
   "catalogs": [
-    { "type": "movie", "id": "top", "name": "Popular Movies" }
+    { "type": "movie", "id": "top", "name": "Popular Movies" },
+    { "type": "series", "id": "top", "name": "Popular Series" }
   ]
 }

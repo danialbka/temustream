@@ -218,7 +218,24 @@ public struct Video: Codable, Equatable, Identifiable, Hashable, Sendable {
     public let title: String?
     public let season: Int?
     public let episode: Int?
+    public let thumbnail: URL?
     public let released: String?
+
+    public init(
+        id: String,
+        title: String? = nil,
+        season: Int? = nil,
+        episode: Int? = nil,
+        thumbnail: URL? = nil,
+        released: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.season = season
+        self.episode = episode
+        self.thumbnail = thumbnail
+        self.released = released
+    }
 }
 
 public struct Stream: Codable, Equatable, Identifiable, Hashable, Sendable {
