@@ -1,3 +1,4 @@
+import SafariServices
 import SwiftUI
 
 private let grid = [GridItem(.adaptive(minimum: 132), spacing: 16)]
@@ -284,6 +285,7 @@ struct DetailsView: View {
     @State private var visibleStreamLimit = Self.streamBatchSize
     @State private var isLoading = true
     @State private var isUpdatingLibrary = false
+    @State private var activeTrailer: TrailerDestination?
 
     init(seed: MetaItem) {
         self.seed = seed
@@ -384,6 +386,34 @@ struct DetailsView: View {
                                 "Resume \(item.name) from \(formatPlaybackTime(progress.position))"
                             )
                             .accessibilityIdentifier("resume-playback")
+                        }
+
+                        if item.type == "movie", let trailerURL = item.preferredTrailerURL {
+                            Button {
+                                activeTrailer = TrailerDestination(url: trailerURL)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "play.rectangle.fill")
+                                    Text("Watch Trailer")
+                                    Spacer(minLength: 0)
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.caption.weight(.bold))
+                                }
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .foregroundStyle(.orange)
+                                .background(Color.orange.opacity(0.12))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(Color.orange.opacity(0.45), lineWidth: 1)
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityHint("Opens the official trailer")
+                            .accessibilityIdentifier("watch-trailer")
                         }
                     }
                 }
@@ -504,9 +534,16 @@ struct DetailsView: View {
                 if ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"] == "details-streams" {
                     try? await Task.sleep(for: .milliseconds(100))
                     proxy.scrollTo("streams-section", anchor: .top)
+                } else if ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"]
+                    == "details-trailer-active", let trailerURL = item.preferredTrailerURL {
+                    activeTrailer = TrailerDestination(url: trailerURL)
                 }
                 #endif
             }
+        }
+        .fullScreenCover(item: $activeTrailer) { destination in
+            TrailerBrowser(url: destination.url)
+                .ignoresSafeArea()
         }
     }
 
@@ -637,6 +674,30 @@ struct DetailsView: View {
             }
         }
     }
+}
+
+private struct TrailerDestination: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
+}
+
+private struct TrailerBrowser: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let configuration = SFSafariViewController.Configuration()
+        configuration.entersReaderIfAvailable = false
+        configuration.barCollapsingEnabled = true
+        let controller = SFSafariViewController(url: url, configuration: configuration)
+        controller.dismissButtonStyle = .close
+        controller.preferredControlTintColor = .systemOrange
+        return controller
+    }
+
+    func updateUIViewController(
+        _ controller: SFSafariViewController,
+        context: Context
+    ) {}
 }
 
 private struct PresentedStream: Identifiable {

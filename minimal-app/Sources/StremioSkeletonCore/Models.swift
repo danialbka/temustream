@@ -103,6 +103,8 @@ public struct MetaItem: Codable, Equatable, Identifiable, Hashable, Sendable {
     public let releaseInfo: String?
     public let genres: [String]?
     public let videos: [Video]?
+    public let trailerStreams: [TrailerStream]?
+    public let trailers: [TrailerReference]?
 
     public init(
         id: String,
@@ -113,7 +115,9 @@ public struct MetaItem: Codable, Equatable, Identifiable, Hashable, Sendable {
         description: String? = nil,
         releaseInfo: String? = nil,
         genres: [String]? = nil,
-        videos: [Video]? = nil
+        videos: [Video]? = nil,
+        trailerStreams: [TrailerStream]? = nil,
+        trailers: [TrailerReference]? = nil
     ) {
         self.id = id
         self.type = type
@@ -124,6 +128,88 @@ public struct MetaItem: Codable, Equatable, Identifiable, Hashable, Sendable {
         self.releaseInfo = releaseInfo
         self.genres = genres
         self.videos = videos
+        self.trailerStreams = trailerStreams
+        self.trailers = trailers
+    }
+
+    public var preferredTrailerURL: URL? {
+        trailerStreams?.compactMap(\.playbackURL).first
+            ?? trailers?.first(where: { trailer in
+                trailer.type?.localizedCaseInsensitiveContains("trailer") != false
+            })?.playbackURL
+            ?? trailers?.compactMap(\.playbackURL).first
+    }
+
+    public func fillingTrailerMetadata(from fallback: MetaItem) -> MetaItem {
+        guard preferredTrailerURL == nil, fallback.preferredTrailerURL != nil else {
+            return self
+        }
+        return MetaItem(
+            id: id,
+            type: type,
+            name: name,
+            poster: poster,
+            background: background,
+            description: description,
+            releaseInfo: releaseInfo,
+            genres: genres,
+            videos: videos,
+            trailerStreams: fallback.trailerStreams,
+            trailers: fallback.trailers
+        )
+    }
+}
+
+public struct TrailerStream: Codable, Equatable, Hashable, Sendable {
+    public let title: String?
+    public let youtubeID: String?
+    public let url: URL?
+
+    enum CodingKeys: String, CodingKey {
+        case title
+        case youtubeID = "ytId"
+        case url
+    }
+
+    public init(title: String? = nil, youtubeID: String? = nil, url: URL? = nil) {
+        self.title = title
+        self.youtubeID = youtubeID
+        self.url = url
+    }
+
+    public var playbackURL: URL? {
+        url ?? Self.youtubeURL(for: youtubeID)
+    }
+
+    fileprivate static func youtubeURL(for identifier: String?) -> URL? {
+        guard let identifier = identifier?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ), !identifier.isEmpty else { return nil }
+        var components = URLComponents(string: "https://www.youtube.com/watch")
+        components?.queryItems = [URLQueryItem(name: "v", value: identifier)]
+        return components?.url
+    }
+}
+
+public struct TrailerReference: Codable, Equatable, Hashable, Sendable {
+    public let source: String?
+    public let type: String?
+
+    public init(source: String? = nil, type: String? = nil) {
+        self.source = source
+        self.type = type
+    }
+
+    public var playbackURL: URL? {
+        guard let source = source?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !source.isEmpty
+        else { return nil }
+        if let url = URL(string: source),
+           let scheme = url.scheme?.lowercased(),
+           scheme == "https" || scheme == "http" {
+            return url
+        }
+        return TrailerStream.youtubeURL(for: source)
     }
 }
 

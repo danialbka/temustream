@@ -6,8 +6,8 @@
 | `home-cinemeta.png` | Loaded Cinemeta catalog and source dropdown |
 | `home-letterboxd.png` | Loaded Letterboxd Recommendations selection |
 | `catalog-error.png` | Catalog network or protocol failure |
-| `details-streams.png` | Metadata plus direct and torrent stream choices |
-| `details-resume.png` | Persisted resume action directly below Add to Library |
+| `details-streams.png` | Metadata, trailer action, and direct/torrent stream choices |
+| `details-resume.png` | Persisted resume and trailer actions below Add to Library |
 | `library-empty.png` | Empty saved library |
 | `library-synced.png` | Account-synchronized saved title |
 | `addons-offline.png` | Add-on management and offline torrent server |

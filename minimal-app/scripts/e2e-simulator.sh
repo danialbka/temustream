@@ -48,12 +48,13 @@ ffmpeg -hide_banner -loglevel error -y \
   -hls_segment_filename "$SERVER_DIR/sample-%d.m4s" \
   "$SERVER_DIR/sample.m3u8"
 
-ffmpeg -hide_banner -loglevel error -y \
-  -f lavfi -i "testsrc2=size=160x96:rate=12" \
-  -f lavfi -i "sine=frequency=660:sample_rate=16000" \
-  -t 1 -c:v libsvtav1 -preset 13 -crf 48 -g 12 \
-  -svtav1-params "lp=1:pin=0" -pix_fmt yuv420p \
-  -c:a flac "$SERVER_DIR/sample-av1-flac.mkv"
+# Keep the compatibility-path vector deterministic; live SVT-AV1 encoding can
+# deadlock on GitHub's macOS runners before the simulator even launches.
+if ! base64 -D < "$SERVER_DIR/sample-av1-flac.mkv.b64" \
+  > "$SERVER_DIR/sample-av1-flac.mkv" 2>/dev/null; then
+  base64 --decode < "$SERVER_DIR/sample-av1-flac.mkv.b64" \
+    > "$SERVER_DIR/sample-av1-flac.mkv"
+fi
 
 python3 "$ROOT_DIR/scripts/range_server.py" "$PORT" "$SERVER_DIR" \
   >"$ROOT_DIR/build/e2e-server.log" 2>&1 &

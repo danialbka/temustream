@@ -39,6 +39,7 @@ xcrun --sdk iphonesimulator swiftc \
   -framework AVFoundation \
   -framework AVKit \
   -framework Combine \
+  -framework SafariServices \
   -framework Security \
   -framework SwiftUI \
   "$RUST_SLICE/libstremio_playback_core.a" \

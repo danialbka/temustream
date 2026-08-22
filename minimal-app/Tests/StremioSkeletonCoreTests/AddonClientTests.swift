@@ -30,7 +30,7 @@ final class AddonClientTests: XCTestCase {
             "/manifest.json": #"{"id":"org.test","version":"1.0.0","name":"Test","resources":["catalog","meta","stream"],"types":["movie"],"catalogs":[{"type":"movie","id":"public","name":"Public"}]}"#,
             "/catalog/movie/public.json": #"{"metas":[{"id":"tt1254207","type":"movie","name":"Big Buck Bunny"}]}"#,
             "/catalog/movie/public/skip=1.json": #"{"metas":[{"id":"tt0000002","type":"movie","name":"Second Page"}]}"#,
-            "/meta/movie/tt1254207.json": #"{"meta":{"id":"tt1254207","type":"movie","name":"Big Buck Bunny","description":"Open movie"}}"#,
+            "/meta/movie/tt1254207.json": #"{"meta":{"id":"tt1254207","type":"movie","name":"Big Buck Bunny","description":"Open movie","trailerStreams":[{"title":"Official trailer","ytId":"yUQM7H4Swgw"}]}}"#,
             "/stream/movie/tt1254207.json": #"{"streams":[{"name":"Local MP4","url":"http://127.0.0.1:8765/sample.mp4"}]}"#,
         ])
         let endpoint = try AddonEndpoint(manifestInput: "https://example.com/manifest.json")
@@ -45,6 +45,10 @@ final class AddonClientTests: XCTestCase {
         XCTAssertEqual(manifest.name, "Test")
         XCTAssertEqual(catalog.map(\.name), ["Big Buck Bunny"])
         XCTAssertEqual(meta.description, "Open movie")
+        XCTAssertEqual(
+            meta.preferredTrailerURL?.absoluteString,
+            "https://www.youtube.com/watch?v=yUQM7H4Swgw"
+        )
         XCTAssertEqual(streams.first?.displayName, "Local MP4")
         XCTAssertTrue(streams.first?.isDirectlyPlayable == true)
         XCTAssertEqual(secondPage.map(\.name), ["Second Page"])
@@ -64,5 +68,24 @@ final class AddonClientTests: XCTestCase {
         XCTAssertFalse(manifest.supports(resource: "stream", type: "series"))
         XCTAssertTrue(manifest.supports(resource: "subtitles", type: "series"))
         XCTAssertFalse(manifest.supports(resource: "catalog", type: "movie"))
+    }
+
+    func testLegacyTrailerAndMetadataFallbackResolveToPlayableURLs() throws {
+        let legacyJSON = #"{"id":"tt1","type":"movie","name":"Movie","trailers":[{"source":"abc_123-XYZ","type":"Trailer"}]}"#
+        let fallback = try JSONDecoder().decode(MetaItem.self, from: Data(legacyJSON.utf8))
+        let providerDetail = MetaItem(
+            id: "tt1",
+            type: "movie",
+            name: "Movie",
+            description: "Provider description"
+        )
+
+        let enriched = providerDetail.fillingTrailerMetadata(from: fallback)
+
+        XCTAssertEqual(enriched.description, "Provider description")
+        XCTAssertEqual(
+            enriched.preferredTrailerURL?.absoluteString,
+            "https://www.youtube.com/watch?v=abc_123-XYZ"
+        )
     }
 }

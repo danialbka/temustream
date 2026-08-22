@@ -406,16 +406,24 @@ final class AppModel: ObservableObject {
         var endpoints = [activeCatalogEndpoint, primaryEndpoint].compactMap { $0 }
         var seen = Set<URL>()
         endpoints = endpoints.filter { seen.insert($0.manifestURL).inserted }
+        var resolvedDetail: MetaItem?
         for endpoint in endpoints {
             if let detail = try? await AddonClient(endpoint: endpoint)
                 .meta(type: item.type, id: item.id) {
-                NSLog(
-                    "DETAIL_BENCHMARK elapsed_ms=%.1f endpoints=%ld result=remote",
-                    (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
-                    endpoints.count
-                )
-                return detail
+                resolvedDetail = resolvedDetail?.fillingTrailerMetadata(from: detail)
+                    ?? detail
+                if item.type != "movie" || resolvedDetail?.preferredTrailerURL != nil {
+                    break
+                }
             }
+        }
+        if let resolvedDetail {
+            NSLog(
+                "DETAIL_BENCHMARK elapsed_ms=%.1f endpoints=%ld result=remote",
+                (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
+                endpoints.count
+            )
+            return resolvedDetail
         }
         NSLog(
             "DETAIL_BENCHMARK elapsed_ms=%.1f endpoints=%ld result=seed",

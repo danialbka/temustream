@@ -38,7 +38,7 @@ private struct UIStateScreenshotRoot: View {
     private var needsPreparation: Bool {
         [
             "home-cinemeta", "home-letterboxd", "catalog-error", "details-streams",
-            "details-resume", "library-synced", "account-signed-in",
+            "details-resume", "details-trailer-active", "library-synced", "account-signed-in",
         ].contains(state)
     }
 
@@ -56,6 +56,10 @@ private struct UIStateScreenshotRoot: View {
                 DetailsView(seed: fixtureItem)
             }
         case "details-resume":
+            NavigationStack {
+                DetailsView(seed: fixtureItem)
+            }
+        case "details-trailer-active":
             NavigationStack {
                 DetailsView(seed: fixtureItem)
             }
@@ -129,7 +133,8 @@ private struct UIStateScreenshotRoot: View {
 
     private func prepare() async {
         switch state {
-        case "home-cinemeta", "home-letterboxd", "catalog-error", "details-streams":
+        case "home-cinemeta", "home-letterboxd", "catalog-error", "details-streams",
+             "details-trailer-active":
             await model.start()
             prepared = true
         case "details-resume":
@@ -149,7 +154,8 @@ private struct UIStateScreenshotRoot: View {
 
         // Let AsyncImage, navigation chrome, and detail resolution settle before capture.
         let detailDelay = state == "details-streams" || state == "details-resume"
-        try? await Task.sleep(for: .milliseconds(detailDelay ? 1_100 : 650))
+            || state == "details-trailer-active"
+        try? await Task.sleep(for: .milliseconds(detailDelay ? 1_500 : 650))
         let runID = ProcessInfo.processInfo.environment["UI_SCREENSHOT_RUN_ID"] ?? "manual"
         let readyMarker = FileManager.default.temporaryDirectory
             .appendingPathComponent("ui-state-\(runID).ready")

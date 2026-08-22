@@ -6,6 +6,9 @@
     "poster": "http://127.0.0.1:18766/ui-states/poster-portrait.png",
     "description": "A cheerful open movie used to verify the complete playback workflow.",
     "releaseInfo": "2008",
-    "genres": ["Animation", "Comedy"]
+    "genres": ["Animation", "Comedy"],
+    "trailerStreams": [
+      { "title": "Official trailer", "ytId": "yUQM7H4Swgw" }
+    ]
   }
 }
