@@ -1,6 +1,6 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 @preconcurrency import Combine
-import GroupActivities
+@preconcurrency import GroupActivities
 import SwiftUI
 import UIKit
 #if canImport(_GroupActivities_UIKit)

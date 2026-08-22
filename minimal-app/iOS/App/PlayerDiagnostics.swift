@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 import SwiftUI
 import UIKit
@@ -623,7 +623,7 @@ enum PlayerSeekRecovery {
         layer: KSPlayerLayer,
         to target: TimeInterval,
         resume: Bool,
-        completion: @escaping (Bool) -> Void = { _ in }
+        completion: @escaping @MainActor @Sendable (Bool) -> Void = { _ in }
     ) {
         if let nativePlayer = layer.player as? KSAVPlayer {
             Self.pause(layer: layer)
@@ -634,8 +634,10 @@ enum PlayerSeekRecovery {
                 toleranceBefore: tolerance,
                 toleranceAfter: tolerance
             ) { finished in
-                if finished, resume { Self.resume(layer: layer) }
-                completion(finished)
+                Task { @MainActor in
+                    if finished, resume { Self.resume(layer: layer) }
+                    completion(finished)
+                }
             }
             return
         }
@@ -658,7 +660,7 @@ enum PlayerSeekRecovery {
         resume: Bool,
         generation: Int,
         attempt: Int,
-        completion: @escaping (Bool) -> Void
+        completion: @escaping @MainActor @Sendable (Bool) -> Void
     ) {
         layer.seek(time: target, autoPlay: false) { finished in
             Task { @MainActor in

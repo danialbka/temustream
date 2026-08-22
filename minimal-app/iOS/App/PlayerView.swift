@@ -1,4 +1,4 @@
-import AVKit
+@preconcurrency import AVKit
 import SwiftUI
 import UIKit
 #if canImport(KSPlayer)
