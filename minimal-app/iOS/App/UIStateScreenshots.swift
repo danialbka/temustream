@@ -38,7 +38,7 @@ private struct UIStateScreenshotRoot: View {
     private var needsPreparation: Bool {
         [
             "home-cinemeta", "home-letterboxd", "catalog-error", "details-streams",
-            "library-synced", "account-signed-in",
+            "details-resume", "library-synced", "account-signed-in",
         ].contains(state)
     }
 
@@ -52,6 +52,10 @@ private struct UIStateScreenshotRoot: View {
                 NavigationStack { HomeView() }
             }
         case "details-streams":
+            NavigationStack {
+                DetailsView(seed: fixtureItem)
+            }
+        case "details-resume":
             NavigationStack {
                 DetailsView(seed: fixtureItem)
             }
@@ -128,12 +132,24 @@ private struct UIStateScreenshotRoot: View {
         case "home-cinemeta", "home-letterboxd", "catalog-error", "details-streams":
             await model.start()
             prepared = true
+        case "details-resume":
+            await model.start()
+            model.recordPlaybackProgress(
+                contentIdentifier: "movie:\(fixtureItem.id)",
+                contentTitle: fixtureItem.name,
+                stream: fixtureStream,
+                providerName: "Cinemeta Fixture",
+                position: 1_572,
+                duration: 3_600
+            )
+            prepared = true
         default:
             prepared = true
         }
 
         // Let AsyncImage, navigation chrome, and detail resolution settle before capture.
-        try? await Task.sleep(for: .milliseconds(state == "details-streams" ? 1_100 : 650))
+        let detailDelay = state == "details-streams" || state == "details-resume"
+        try? await Task.sleep(for: .milliseconds(detailDelay ? 1_100 : 650))
         let runID = ProcessInfo.processInfo.environment["UI_SCREENSHOT_RUN_ID"] ?? "manual"
         let readyMarker = FileManager.default.temporaryDirectory
             .appendingPathComponent("ui-state-\(runID).ready")
@@ -155,6 +171,19 @@ private struct UIStateScreenshotRoot: View {
 
     private var fixtureVideoURL: URL {
         URL(string: "http://127.0.0.1:18766/sample.mp4")!
+    }
+
+    private var fixtureStream: Stream {
+        Stream(
+            url: fixtureVideoURL,
+            externalUrl: nil,
+            name: "Local H.264 stream",
+            title: "1080p · Direct",
+            description: nil,
+            infoHash: nil,
+            fileIdx: nil,
+            sources: nil
+        )
     }
 
     private var invalidStream: Stream {

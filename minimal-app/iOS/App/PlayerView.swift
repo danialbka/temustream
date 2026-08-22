@@ -8,6 +8,11 @@ import UIKit
 @preconcurrency import MobileVLCKit
 #endif
 
+typealias PlaybackProgressHandler = @MainActor (
+    _ position: TimeInterval,
+    _ duration: TimeInterval
+) -> Void
+
 enum StremioInternalPlayer: String, CaseIterable, Identifiable, Sendable {
     case performance = "performance"
     case ksPlayer = "ksplayer"
@@ -378,6 +383,7 @@ struct KSPlayerScreen: View {
     private let plan: PlaybackPlan
     private let watchTogetherContent: WatchTogetherContent
     private let minimumVideoDuration: TimeInterval
+    private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     @State private var attemptRevision = 0
     @State private var failureMessage: String?
@@ -388,7 +394,9 @@ struct KSPlayerScreen: View {
         plan: PlaybackPlan,
         title: String,
         watchTogetherContent: WatchTogetherContent? = nil,
+        initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
+        onProgress: PlaybackProgressHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)? = nil
     ) {
         self.plan = plan
@@ -396,7 +404,9 @@ struct KSPlayerScreen: View {
         self.watchTogetherContent = watchTogetherContent
             ?? WatchTogetherContent(title: title)
         self.minimumVideoDuration = minimumVideoDuration
+        self.onProgress = onProgress
         self.onExhausted = onExhausted
+        _retryPosition = State(initialValue: max(initialPosition, 0))
     }
 
     init(url: URL, title: String) {
@@ -443,6 +453,7 @@ struct KSPlayerScreen: View {
                     minimumVideoDuration: minimumVideoDuration,
                     initialPosition: retryPosition,
                     performancePolicy: playbackPolicy,
+                    onProgress: onProgress,
                     onFailure: advanceOrFail
                 )
                 .id("\(candidate.engine.rawValue)-\(attemptRevision)")
@@ -518,6 +529,7 @@ private struct KSPlaybackAttempt: View {
     let minimumVideoDuration: TimeInterval
     let initialPosition: TimeInterval
     let performancePolicy: PlaybackPerformancePolicy
+    let onProgress: PlaybackProgressHandler?
     let onFailure: @MainActor (Error) -> Void
     @StateObject private var coordinator = KSVideoPlayer.Coordinator()
     @State private var startupStartedAt = ProcessInfo.processInfo.systemUptime
@@ -547,6 +559,7 @@ private struct KSPlaybackAttempt: View {
         minimumVideoDuration: TimeInterval,
         initialPosition: TimeInterval,
         performancePolicy: PlaybackPerformancePolicy,
+        onProgress: PlaybackProgressHandler?,
         onFailure: @escaping @MainActor (Error) -> Void
     ) {
         self.url = url
@@ -556,6 +569,7 @@ private struct KSPlaybackAttempt: View {
         self.minimumVideoDuration = minimumVideoDuration
         self.initialPosition = initialPosition
         self.performancePolicy = performancePolicy
+        self.onProgress = onProgress
         self.onFailure = onFailure
 
         self.options = StremioPlayerConfiguration.makeOptions(
@@ -603,6 +617,9 @@ private struct KSPlaybackAttempt: View {
                 .onFinish { _, error in
                     if let error {
                         reportFailure(error)
+                    } else if let player = coordinator.playerLayer?.player {
+                        let duration = player.duration
+                        onProgress?(duration, duration)
                     }
                 }
                 .ignoresSafeArea()
@@ -714,6 +731,7 @@ private struct KSPlaybackAttempt: View {
             var wasDebugBuffering = false
             var lastDebugSampleAt = 0.0
             let startedAt = ProcessInfo.processInfo.systemUptime
+            var lastProgressReportAt = startedAt
 
             while !Task.isCancelled, !didReportFailure {
                 try? await Task.sleep(for: .milliseconds(250))
@@ -763,6 +781,10 @@ private struct KSPlaybackAttempt: View {
                 }
 
                 let duration = player.duration
+                if now - lastProgressReportAt >= 5 {
+                    lastProgressReportAt = now
+                    onProgress?(currentTime, duration)
+                }
                 if hasVideo, player.isReadyToPlay,
                    duration.isFinite, duration > 0,
                    duration < minimumVideoDuration {
@@ -855,6 +877,11 @@ private struct KSPlaybackAttempt: View {
         }
         .onDisappear {
             WatchTogetherCoordinator.shared.detach(token: watchTogetherAttachmentToken)
+            if let player = coordinator.playerLayer?.player {
+                let currentTime = (player as? KSMEPlayer)?.displayedVideoTime
+                    ?? player.currentPlaybackTime
+                onProgress?(currentTime, player.duration)
+            }
             coordinator.playerLayer?.stop()
             coordinator.resetPlayer()
         }
@@ -1689,6 +1716,7 @@ struct AVPlayerScreen: View {
     private let plan: PlaybackPlan
     private let watchTogetherContent: WatchTogetherContent
     private let minimumVideoDuration: TimeInterval
+    private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     @State private var player = AVPlayer()
     @State private var candidateIndex = 0
@@ -1696,6 +1724,8 @@ struct AVPlayerScreen: View {
     @State private var statusMessage = "Preparing video…"
     @State private var failureMessage: String?
     @State private var nominalFPS: Double?
+    @State private var latestPosition: TimeInterval
+    @State private var didRestorePosition = false
     @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
     private var debugOverlaySetting = false
     @State private var debugSnapshot = PlayerDebugSnapshot.waiting(engine: "AVPlayer")
@@ -1705,7 +1735,9 @@ struct AVPlayerScreen: View {
         plan: PlaybackPlan,
         title: String,
         watchTogetherContent: WatchTogetherContent? = nil,
+        initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
+        onProgress: PlaybackProgressHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)? = nil
     ) {
         self.plan = plan
@@ -1713,7 +1745,9 @@ struct AVPlayerScreen: View {
         self.watchTogetherContent = watchTogetherContent
             ?? WatchTogetherContent(title: title)
         self.minimumVideoDuration = minimumVideoDuration
+        self.onProgress = onProgress
         self.onExhausted = onExhausted
+        _latestPosition = State(initialValue: max(initialPosition, 0))
     }
 
     init(url: URL, title: String) {
@@ -1774,14 +1808,30 @@ struct AVPlayerScreen: View {
         .task(id: "debug-\(candidateIndex)-\(attemptRevision)-\(debugOverlayEnabled)") {
             await monitorPlayerDebug()
         }
+        .task(id: "progress-\(candidateIndex)-\(attemptRevision)") {
+            await monitorPlaybackProgress()
+        }
         .onReceive(
             NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime)
         ) { notification in
             guard notification.object as? AVPlayerItem === player.currentItem else { return }
             advanceOrFail()
         }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)
+        ) { notification in
+            guard let item = notification.object as? AVPlayerItem,
+                  item === player.currentItem
+            else { return }
+            let duration = item.duration.seconds
+            if duration.isFinite, duration > 0 {
+                latestPosition = duration
+                onProgress?(duration, duration)
+            }
+        }
         .onDisappear {
             WatchTogetherCoordinator.shared.detach(token: watchTogetherAttachmentToken)
+            reportCurrentProgress()
             player.pause()
             player.replaceCurrentItem(with: nil)
             PlayerPresentation.endAudioSession()
@@ -1822,6 +1872,7 @@ struct AVPlayerScreen: View {
         }
 
         failureMessage = nil
+        didRestorePosition = latestPosition <= 0
         statusMessage = candidateIndex == 0 && plan.fallbackURL != nil
             ? "Optimizing stream…"
             : "Preparing video…"
@@ -1898,6 +1949,15 @@ struct AVPlayerScreen: View {
                     }
                     return
                 }
+                if !didRestorePosition, latestPosition > 0 {
+                    didRestorePosition = true
+                    let target = duration.isFinite && duration > 0
+                        ? min(latestPosition, max(duration - 1, 0))
+                        : latestPosition
+                    await seek(to: target)
+                    player.play()
+                    continue
+                }
                 if expectsVideo {
                     var renderedFrame = false
                     for _ in 0..<60 {
@@ -1944,6 +2004,36 @@ struct AVPlayerScreen: View {
             debugSnapshot = sample
             NSLog("PLAYER_DEBUG %@", sample.logDescription)
             try? await Task.sleep(for: .seconds(1))
+        }
+    }
+
+    @MainActor
+    private func monitorPlaybackProgress() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            reportCurrentProgress()
+        }
+    }
+
+    @MainActor
+    private func reportCurrentProgress() {
+        guard let item = player.currentItem else { return }
+        let position = item.currentTime().seconds
+        let duration = item.duration.seconds
+        guard position.isFinite, duration.isFinite else { return }
+        latestPosition = max(position, 0)
+        onProgress?(latestPosition, max(duration, 0))
+    }
+
+    @MainActor
+    private func seek(to position: TimeInterval) async {
+        await withCheckedContinuation { continuation in
+            player.seek(
+                to: CMTime(seconds: max(position, 0), preferredTimescale: 600),
+                toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 600),
+                toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 600)
+            ) { _ in continuation.resume() }
         }
     }
 
@@ -2025,6 +2115,7 @@ struct AVPlayerScreen: View {
 
     @MainActor
     private func advanceOrFail() {
+        reportCurrentProgress()
         player.pause()
         failPlayback()
     }
@@ -2249,7 +2340,9 @@ private final class VLCPlaybackModel: NSObject, ObservableObject, VLCMediaPlayer
 
     func seekAndWait(to seconds: TimeInterval) async -> Bool {
         guard player.isSeekable else { return false }
-        let target = min(max(seconds, 0), max(duration, 0))
+        let target = duration > 0
+            ? min(max(seconds, 0), duration)
+            : max(seconds, 0)
         player.time = VLCTime(int: Int32(target * 1_000))
         for _ in 0..<40 {
             updatePublishedState()
@@ -2419,6 +2512,7 @@ private struct VLCPlayerScreen: View {
     private let plan: PlaybackPlan
     private let watchTogetherContent: WatchTogetherContent
     private let minimumVideoDuration: TimeInterval
+    private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     private let playbackPolicy: PlaybackPerformancePolicy
     @StateObject private var model: VLCPlaybackModel
@@ -2427,6 +2521,7 @@ private struct VLCPlayerScreen: View {
     @State private var isScrubbing = false
     @State private var scrubPosition: TimeInterval = 0
     @State private var resumeAfterScrub = false
+    @State private var latestPosition: TimeInterval
     @State private var watchTogetherAttachmentToken = UUID()
     @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
     private var debugOverlaySetting = false
@@ -2435,7 +2530,9 @@ private struct VLCPlayerScreen: View {
         plan: PlaybackPlan,
         title: String,
         watchTogetherContent: WatchTogetherContent? = nil,
+        initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval,
+        onProgress: PlaybackProgressHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)?
     ) {
         let policy = PlaybackPerformanceCore.policy(
@@ -2448,9 +2545,11 @@ private struct VLCPlayerScreen: View {
         self.watchTogetherContent = watchTogetherContent
             ?? WatchTogetherContent(title: title)
         self.minimumVideoDuration = minimumVideoDuration
+        self.onProgress = onProgress
         self.onExhausted = onExhausted
         playbackPolicy = policy
         _model = StateObject(wrappedValue: VLCPlaybackModel(policy: policy))
+        _latestPosition = State(initialValue: max(initialPosition, 0))
     }
 
     var body: some View {
@@ -2495,8 +2594,12 @@ private struct VLCPlayerScreen: View {
         .task(id: "debug-\(debugOverlayEnabled)-\(attemptRevision)") {
             await logPlayerDebug()
         }
+        .task(id: "progress-\(attemptRevision)") {
+            await monitorPlaybackProgress()
+        }
         .onDisappear {
             WatchTogetherCoordinator.shared.detach(token: watchTogetherAttachmentToken)
+            reportCurrentProgress()
             model.stop()
             PlayerPresentation.endAudioSession()
             PlayerPresentation.restorePortrait()
@@ -2673,6 +2776,10 @@ private struct VLCPlayerScreen: View {
                 minimumVideoDuration: minimumVideoDuration,
                 usesBoundedRenderer: usesBoundedRenderer
             )
+            if latestPosition > 0 {
+                _ = await model.seekAndWait(to: latestPosition)
+                model.play()
+            }
             attachWatchTogether()
             let elapsed = (ProcessInfo.processInfo.systemUptime - startupStartedAt) * 1_000
             NSLog(
@@ -2685,6 +2792,7 @@ private struct VLCPlayerScreen: View {
             }
             await runVerificationIfRequested()
         } catch {
+            reportCurrentProgress()
             model.stop()
             if let onExhausted {
                 onExhausted(error)
@@ -2826,6 +2934,22 @@ private struct VLCPlayerScreen: View {
             try? await Task.sleep(for: .seconds(1))
         }
     }
+
+    @MainActor
+    private func monitorPlaybackProgress() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            reportCurrentProgress()
+        }
+    }
+
+    @MainActor
+    private func reportCurrentProgress() {
+        guard model.currentTime.isFinite, model.duration.isFinite else { return }
+        latestPosition = max(model.currentTime, 0)
+        onProgress?(latestPosition, max(model.duration, 0))
+    }
 }
 #endif
 
@@ -2837,7 +2961,9 @@ private struct PerformancePlayerScreen: View {
     let title: String
     private let plan: PlaybackPlan
     private let watchTogetherContent: WatchTogetherContent
+    private let initialPosition: TimeInterval
     private let minimumVideoDuration: TimeInterval
+    private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     private let policy: PlaybackPerformancePolicy
 
@@ -2845,13 +2971,17 @@ private struct PerformancePlayerScreen: View {
         plan: PlaybackPlan,
         title: String,
         watchTogetherContent: WatchTogetherContent,
+        initialPosition: TimeInterval,
         minimumVideoDuration: TimeInterval,
+        onProgress: PlaybackProgressHandler?,
         onExhausted: (@MainActor (Error) -> Void)?
     ) {
         self.plan = plan
         self.title = title
         self.watchTogetherContent = watchTogetherContent
+        self.initialPosition = max(initialPosition, 0)
         self.minimumVideoDuration = minimumVideoDuration
+        self.onProgress = onProgress
         self.onExhausted = onExhausted
         policy = PlaybackPerformanceCore.policy(
             url: plan.primaryURL,
@@ -2868,7 +2998,9 @@ private struct PerformancePlayerScreen: View {
                 plan: plan,
                 title: title,
                 watchTogetherContent: watchTogetherContent,
+                initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
+                onProgress: onProgress,
                 onExhausted: onExhausted
             )
         case .vlcVideoToolboxBridge:
@@ -2877,7 +3009,9 @@ private struct PerformancePlayerScreen: View {
                 plan: plan,
                 title: title,
                 watchTogetherContent: watchTogetherContent,
+                initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
+                onProgress: onProgress,
                 onExhausted: onExhausted
             )
             #else
@@ -2895,7 +3029,9 @@ private struct PerformancePlayerScreen: View {
             plan: plan,
             title: title,
             watchTogetherContent: watchTogetherContent,
+            initialPosition: initialPosition,
             minimumVideoDuration: minimumVideoDuration,
+            onProgress: onProgress,
             onExhausted: onExhausted
         )
         #else
@@ -2903,7 +3039,9 @@ private struct PerformancePlayerScreen: View {
             plan: plan,
             title: title,
             watchTogetherContent: watchTogetherContent,
+            initialPosition: initialPosition,
             minimumVideoDuration: minimumVideoDuration,
+            onProgress: onProgress,
             onExhausted: onExhausted
         )
         #endif
@@ -2949,19 +3087,23 @@ struct PlayerScreen: View {
     private let plan: PlaybackPlan
     private let watchTogetherContent: WatchTogetherContent
     private let minimumVideoDuration: TimeInterval
+    private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     private let playerOrder: [StremioInternalPlayer]
     @State private var activePlayerIndex = 0
     @State private var bridgeFailureMessage: String?
     @State private var bridgeRevision = 0
     @State private var bridgeNotice: String?
+    @State private var latestPosition: TimeInterval
 
     init(
         plan: PlaybackPlan,
         title: String,
         contentIdentifier: String? = nil,
         contentTitle: String? = nil,
+        initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
+        onProgress: PlaybackProgressHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)? = nil
     ) {
         self.plan = plan
@@ -2971,12 +3113,14 @@ struct PlayerScreen: View {
             title: contentTitle ?? title
         )
         self.minimumVideoDuration = minimumVideoDuration
+        self.onProgress = onProgress
         self.onExhausted = onExhausted
         playerOrder = StremioPlayerBridge.order(
             preferred: StremioInternalPlayer.selected,
             sourceURL: plan.primaryURL,
             title: [title, plan.detectedMIMEType].compactMap { $0 }.joined(separator: " ")
         )
+        _latestPosition = State(initialValue: max(initialPosition, 0))
     }
 
     init(url: URL, title: String) {
@@ -3050,7 +3194,9 @@ struct PlayerScreen: View {
                 plan: plan,
                 title: title,
                 watchTogetherContent: watchTogetherContent,
+                initialPosition: latestPosition,
                 minimumVideoDuration: minimumVideoDuration,
+                onProgress: handleProgress,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
             )
         case .ksPlayer:
@@ -3059,7 +3205,9 @@ struct PlayerScreen: View {
                 plan: plan,
                 title: title,
                 watchTogetherContent: watchTogetherContent,
+                initialPosition: latestPosition,
                 minimumVideoDuration: minimumVideoDuration,
+                onProgress: handleProgress,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
             )
             #else
@@ -3073,7 +3221,9 @@ struct PlayerScreen: View {
                 plan: plan,
                 title: title,
                 watchTogetherContent: watchTogetherContent,
+                initialPosition: latestPosition,
                 minimumVideoDuration: minimumVideoDuration,
+                onProgress: handleProgress,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
             )
             #else
@@ -3086,7 +3236,9 @@ struct PlayerScreen: View {
                 plan: plan,
                 title: title,
                 watchTogetherContent: watchTogetherContent,
+                initialPosition: latestPosition,
                 minimumVideoDuration: minimumVideoDuration,
+                onProgress: handleProgress,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
             )
             }
@@ -3118,6 +3270,15 @@ struct PlayerScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
         .accessibilityIdentifier("player-bridge-error")
+    }
+
+    @MainActor
+    private func handleProgress(position: TimeInterval, duration: TimeInterval) {
+        guard position.isFinite, duration.isFinite else { return }
+        if position >= 1 || latestPosition <= 0 {
+            latestPosition = max(position, 0)
+        }
+        onProgress?(max(position, 0), max(duration, 0))
     }
 
     @MainActor
@@ -3200,17 +3361,20 @@ struct StreamPlaybackCandidate: Identifiable {
     let providerName: String?
     let contentIdentifier: String?
     let contentTitle: String?
+    let initialPosition: TimeInterval
 
     init(
         stream: Stream,
         providerName: String?,
         contentIdentifier: String? = nil,
-        contentTitle: String? = nil
+        contentTitle: String? = nil,
+        initialPosition: TimeInterval = 0
     ) {
         self.stream = stream
         self.providerName = providerName
         self.contentIdentifier = contentIdentifier
         self.contentTitle = contentTitle
+        self.initialPosition = max(initialPosition, 0)
     }
 
     var id: String { stream.id }
@@ -3250,7 +3414,9 @@ struct ResolvingPlayerScreen: View {
                     title: playbackTitle,
                     contentIdentifier: activeCandidate.contentIdentifier,
                     contentTitle: activeCandidate.contentTitle,
+                    initialPosition: activeCandidate.initialPosition,
                     minimumVideoDuration: minimumVideoDuration,
+                    onProgress: recordProgress,
                     onExhausted: advanceToNextSource
                 )
             } else if let error {
@@ -3296,6 +3462,18 @@ struct ResolvingPlayerScreen: View {
 
     private var progressMessage: String {
         activeStream.isTorrent ? "Starting torrent…" : "Preparing stream…"
+    }
+
+    @MainActor
+    private func recordProgress(position: TimeInterval, duration: TimeInterval) {
+        model.recordPlaybackProgress(
+            contentIdentifier: activeCandidate.contentIdentifier,
+            contentTitle: activeCandidate.contentTitle,
+            stream: activeCandidate.stream,
+            providerName: activeCandidate.providerName,
+            position: position,
+            duration: duration
+        )
     }
 
     @MainActor

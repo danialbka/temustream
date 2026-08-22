@@ -28,6 +28,7 @@
 		A3E389B58EB73059865D5150 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B27A3BF40F89EDE5C96D671 /* SessionStore.swift */; };
 		A53E10B82D0F85640AD42534 /* WatchTogether.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0E219FD5EF3EED1DD2F06EC /* WatchTogether.swift */; };
 		A9890D53A34F0439AE8942E2 /* StremioSkeletonApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62DB074CBE862325B4337472 /* StremioSkeletonApp.swift */; };
+		AA298044E82ED14FFB4CA264 /* PlaybackProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F41290FB3D04E854F302B17E /* PlaybackProgressStore.swift */; };
 		B0D9439C0F01597F3E33BD3A /* PlayerDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F159C8CD01833BCBB337842 /* PlayerDiagnostics.swift */; };
 		BB81810366F95923ECD1BE2A /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80A2FE21D2D44501F475EC70 /* Models.swift */; };
 		BDECE20EEEE3B43AD7A63BF3 /* StreamTransportBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF4419C84972F1AEE3CFEF98 /* StreamTransportBridge.swift */; };
@@ -76,6 +77,7 @@
 		E0E219FD5EF3EED1DD2F06EC /* WatchTogether.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogether.swift; sourceTree = "<group>"; };
 		EA3DDC8105E3ACC202BC100A /* PlaybackPerformanceCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPerformanceCore.swift; sourceTree = "<group>"; };
 		F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorBoxStreamSelection.swift; sourceTree = "<group>"; };
+		F41290FB3D04E854F302B17E /* PlaybackProgressStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackProgressStore.swift; sourceTree = "<group>"; };
 		F80BD475FE77AB54F9BCCC6A /* AddonEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddonEndpoint.swift; sourceTree = "<group>"; };
 		FF877DAB24AD41D59FA71549 /* VLCBoundedVideoView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VLCBoundedVideoView.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -139,6 +141,7 @@
 				87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */,
 				6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */,
 				80A2FE21D2D44501F475EC70 /* Models.swift */,
+				F41290FB3D04E854F302B17E /* PlaybackProgressStore.swift */,
 				76BC44034EB5CB12127AC2DB /* StremioAccountClient.swift */,
 				F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */,
 				AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */,
@@ -243,6 +246,7 @@
 				15AAD0E732450B4D3F3EC0A9 /* MediaContainerSniffer.swift in Sources */,
 				BB81810366F95923ECD1BE2A /* Models.swift in Sources */,
 				2828583DACBC80473C094A07 /* PlaybackPerformanceCore.swift in Sources */,
+				AA298044E82ED14FFB4CA264 /* PlaybackProgressStore.swift in Sources */,
 				B0D9439C0F01597F3E33BD3A /* PlayerDiagnostics.swift in Sources */,
 				14C99D949BC218C407119A03 /* PlayerView.swift in Sources */,
 				A3E389B58EB73059865D5150 /* SessionStore.swift in Sources */,

@@ -7,6 +7,7 @@
 | `home-letterboxd.png` | Loaded Letterboxd Recommendations selection |
 | `catalog-error.png` | Catalog network or protocol failure |
 | `details-streams.png` | Metadata plus direct and torrent stream choices |
+| `details-resume.png` | Persisted resume action directly below Add to Library |
 | `library-empty.png` | Empty saved library |
 | `library-synced.png` | Account-synchronized saved title |
 | `addons-offline.png` | Add-on management and offline torrent server |

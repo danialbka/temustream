@@ -339,6 +339,52 @@ struct DetailsView: View {
                         .buttonStyle(.plain)
                         .disabled(isUpdatingLibrary)
                         .accessibilityIdentifier("library-toggle")
+
+                        if let progress = model.resumeProgress(for: item) {
+                            NavigationLink {
+                                ResolvingPlayerScreen(
+                                    candidate: resumeCandidate(for: progress),
+                                    minimumVideoDuration: minimumVideoDuration
+                                )
+                            } label: {
+                                VStack(alignment: .leading, spacing: 7) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "play.fill")
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text("Resume")
+                                            Text("From \(formatPlaybackTime(progress.position))")
+                                                .font(.caption.weight(.medium))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .font(.subheadline.weight(.semibold))
+
+                                    if progress.duration > 0 {
+                                        ProgressView(
+                                            value: min(progress.position, progress.duration),
+                                            total: progress.duration
+                                        )
+                                        .tint(.orange)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .foregroundStyle(.orange)
+                                .background(Color.orange.opacity(0.12))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(Color.orange.opacity(0.45), lineWidth: 1)
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(
+                                "Resume \(item.name) from \(formatPlaybackTime(progress.position))"
+                            )
+                            .accessibilityIdentifier("resume-playback")
+                        }
                     }
                 }
                 if let description = item.description { Text(description) }
@@ -407,11 +453,10 @@ struct DetailsView: View {
                                             stream: stream,
                                             providerName: presented.providerName,
                                             contentIdentifier: "\(item.type):\(item.id)",
-                                            contentTitle: item.name
+                                            contentTitle: item.name,
+                                            initialPosition: 0
                                         ),
-                                        minimumVideoDuration: item.type == "movie"
-                                            ? 20 * 60
-                                            : 5 * 60
+                                        minimumVideoDuration: minimumVideoDuration
                                     )
                                 } label: {
                                     streamRow(presented)
@@ -489,6 +534,43 @@ struct DetailsView: View {
     private var selectedProviderName: String {
         guard selectedProviderID != Self.allProvidersID else { return "installed providers" }
         return streamProviders.first { $0.id == selectedProviderID }?.name ?? "this provider"
+    }
+
+    private var minimumVideoDuration: TimeInterval {
+        item.type == "movie" ? 20 * 60 : 5 * 60
+    }
+
+    private func resumeCandidate(for progress: PlaybackProgress) -> StreamPlaybackCandidate {
+        let refreshed = streamProviders.lazy.compactMap { provider -> (Stream, String)? in
+            guard let stream = provider.streams.first(where: {
+                $0.id == progress.stream.id
+                    || ($0.infoHash != nil
+                        && $0.infoHash == progress.stream.infoHash
+                        && $0.fileIdx == progress.stream.fileIdx)
+                    || (provider.name == progress.providerName
+                        && $0.name == progress.stream.name
+                        && $0.title == progress.stream.title)
+            }) else { return nil }
+            return (stream, provider.name)
+        }.first
+
+        return StreamPlaybackCandidate(
+            stream: refreshed?.0 ?? progress.stream,
+            providerName: refreshed?.1 ?? progress.providerName,
+            contentIdentifier: progress.contentIdentifier,
+            contentTitle: progress.contentTitle,
+            initialPosition: progress.position
+        )
+    }
+
+    private func formatPlaybackTime(_ value: TimeInterval) -> String {
+        guard value.isFinite, value >= 0 else { return "0:00" }
+        let total = Int(value.rounded(.down))
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, seconds) }
+        return String(format: "%d:%02d", minutes, seconds)
     }
 
     private func providerButton(id: String, title: String, count: Int) -> some View {

@@ -87,9 +87,10 @@ fi
 
 xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
 xcrun simctl bootstatus "$DEVICE_ID" -b
+xcrun simctl uninstall "$DEVICE_ID" local.stremio.skeleton.uistates 2>/dev/null || true
 xcrun simctl install "$DEVICE_ID" "$APP_DIR"
 
-ALL_STATES="catalog-loading home-cinemeta home-letterboxd catalog-error details-streams library-empty library-synced addons-offline account-signed-out account-signed-in torrent-starting playback-unavailable player-active"
+ALL_STATES="catalog-loading home-cinemeta home-letterboxd catalog-error details-streams details-resume library-empty library-synced addons-offline account-signed-out account-signed-in torrent-starting playback-unavailable player-active"
 STATES="${UI_SCREENSHOT_STATES:-$ALL_STATES}"
 for STATE in $STATES; do
   RUN_ID="$(date +%s)-$$-$STATE"
@@ -143,13 +144,14 @@ sips -g pixelWidth -g pixelHeight "$OUTPUT_DIR"/*.png >"$OUTPUT_DIR/dimensions.t
 cp "$ROOT_DIR/UI_STATE_MATRIX.md" "$OUTPUT_DIR/README.md"
 
 if [ "$STATES" = "$ALL_STATES" ]; then
-  test "$COUNT" -eq 13
+  test "$COUNT" -eq 14
   ffmpeg -hide_banner -loglevel error -y \
   -i "$OUTPUT_DIR/catalog-loading.png" \
   -i "$OUTPUT_DIR/home-cinemeta.png" \
   -i "$OUTPUT_DIR/home-letterboxd.png" \
   -i "$OUTPUT_DIR/catalog-error.png" \
   -i "$OUTPUT_DIR/details-streams.png" \
+  -i "$OUTPUT_DIR/details-resume.png" \
   -i "$OUTPUT_DIR/library-empty.png" \
   -i "$OUTPUT_DIR/library-synced.png" \
   -i "$OUTPUT_DIR/addons-offline.png" \
@@ -158,7 +160,7 @@ if [ "$STATES" = "$ALL_STATES" ]; then
   -i "$OUTPUT_DIR/torrent-starting.png" \
   -i "$OUTPUT_DIR/playback-unavailable.png" \
   -i "$OUTPUT_DIR/player-active.png" \
-  -filter_complex '[0:v]scale=201:437[s0];[1:v]scale=201:437[s1];[2:v]scale=201:437[s2];[3:v]scale=201:437[s3];[4:v]scale=201:437[s4];[5:v]scale=201:437[s5];[6:v]scale=201:437[s6];[7:v]scale=201:437[s7];[8:v]scale=201:437[s8];[9:v]scale=201:437[s9];[10:v]scale=201:437[s10];[11:v]scale=201:437[s11];[12:v]scale=201:437[s12];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11][s12]xstack=inputs=13:layout=0_0|201_0|402_0|603_0|0_437|201_437|402_437|603_437|0_874|201_874|402_874|603_874|0_1311:fill=black[out]' \
+  -filter_complex '[0:v]scale=201:437[s0];[1:v]scale=201:437[s1];[2:v]scale=201:437[s2];[3:v]scale=201:437[s3];[4:v]scale=201:437[s4];[5:v]scale=201:437[s5];[6:v]scale=201:437[s6];[7:v]scale=201:437[s7];[8:v]scale=201:437[s8];[9:v]scale=201:437[s9];[10:v]scale=201:437[s10];[11:v]scale=201:437[s11];[12:v]scale=201:437[s12];[13:v]scale=201:437[s13];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11][s12][s13]xstack=inputs=14:layout=0_0|201_0|402_0|603_0|0_437|201_437|402_437|603_437|0_874|201_874|402_874|603_874|0_1311|201_1311:fill=black[out]' \
     -map '[out]' -frames:v 1 "$OUTPUT_DIR/all-states-contact-sheet.png"
   test -s "$OUTPUT_DIR/all-states-contact-sheet.png"
   echo "UI STATE SCREENSHOTS PASS: $COUNT state PNGs + contact sheet in $OUTPUT_DIR"

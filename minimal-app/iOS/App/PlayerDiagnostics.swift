@@ -850,15 +850,16 @@ struct ProviderPlayerAuditScreen: View {
                     PlayerScreen(
                         plan: plan,
                         title: title,
-                        minimumVideoDuration: 20 * 60
-                    ) { error in
-                        failureMessage = error.localizedDescription
-                        NSLog(
-                            "PROVIDER_PLAYER_AUDIT FAIL player=%@ error=%@",
-                            StremioInternalPlayer.selected.rawValue,
-                            error.localizedDescription
-                        )
-                    }
+                        minimumVideoDuration: 20 * 60,
+                        onExhausted: { error in
+                            failureMessage = error.localizedDescription
+                            NSLog(
+                                "PROVIDER_PLAYER_AUDIT FAIL player=%@ error=%@",
+                                StremioInternalPlayer.selected.rawValue,
+                                error.localizedDescription
+                            )
+                        }
+                    )
                 }
             } else if let failureMessage {
                 VStack(spacing: 12) {

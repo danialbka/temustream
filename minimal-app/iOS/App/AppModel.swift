@@ -78,6 +78,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isSearching = false
     @Published private(set) var activeSearchQuery: String?
     @Published private(set) var library: [MetaItem] = []
+    @Published private(set) var playbackProgress: [String: PlaybackProgress] = [:]
     @Published private(set) var installedAddons: [URL] = []
     @Published private(set) var accountEmail: String?
     @Published private(set) var accountSyncStatus = "Not signed in"
@@ -91,6 +92,7 @@ final class AppModel: ObservableObject {
 
     private let primaryEndpoint: AddonEndpoint
     private let libraryStore: LibraryStore
+    private let playbackProgressStore: PlaybackProgressStore
     private let accountClient: StremioAccountClient
     private let sessionStore = SessionStore()
     private var session: StremioSession?
@@ -102,6 +104,7 @@ final class AppModel: ObservableObject {
     private var currentSearch: String?
     private var catalogLoadRevision = 0
     private var searchRevision = 0
+    private var playbackProgressUpdateDates: [String: Date] = [:]
     private var started = false
 
     var selectedCatalogSource: CatalogSource? {
@@ -151,6 +154,9 @@ final class AppModel: ObservableObject {
             in: .userDomainMask
         ).first!
         libraryStore = LibraryStore(fileURL: support.appendingPathComponent("library.json"))
+        playbackProgressStore = PlaybackProgressStore(
+            fileURL: support.appendingPathComponent("playback-progress.json")
+        )
         session = SessionStore().load()
         accountEmail = session?.user.email
     }
@@ -165,6 +171,14 @@ final class AppModel: ObservableObject {
 
         do {
             library = try await libraryStore.items()
+            do {
+                for progress in try await playbackProgressStore.items() {
+                    playbackProgress[progress.contentIdentifier] = progress
+                    playbackProgressUpdateDates[progress.contentIdentifier] = progress.updatedAt
+                }
+            } catch {
+                NSLog("PLAYBACK_PROGRESS load_failed=%@", error.localizedDescription)
+            }
             if ProcessInfo.processInfo.environment["SKELETON_E2E"] == "1" {
                 await runE2E()
             } else {
@@ -532,6 +546,60 @@ final class AppModel: ObservableObject {
 
     func isInLibrary(_ item: MetaItem) -> Bool {
         library.contains { $0.id == item.id && $0.type == item.type }
+    }
+
+    func resumeProgress(for item: MetaItem) -> PlaybackProgress? {
+        playbackProgress["\(item.type):\(item.id)"]
+    }
+
+    func recordPlaybackProgress(
+        contentIdentifier: String?,
+        contentTitle: String?,
+        stream: Stream,
+        providerName: String?,
+        position: TimeInterval,
+        duration: TimeInterval
+    ) {
+        guard let contentIdentifier, !contentIdentifier.isEmpty,
+              let contentTitle, !contentTitle.isEmpty,
+              position.isFinite, duration.isFinite,
+              position >= PlaybackProgress.minimumResumePosition
+        else { return }
+
+        let progress = PlaybackProgress(
+            contentIdentifier: contentIdentifier,
+            contentTitle: contentTitle,
+            stream: stream,
+            providerName: providerName,
+            position: position,
+            duration: duration
+        )
+        playbackProgressUpdateDates[contentIdentifier] = progress.updatedAt
+        if PlaybackProgress.shouldSave(position: position, duration: duration) {
+            playbackProgress[contentIdentifier] = progress
+        } else if PlaybackProgress.isCompleted(position: position, duration: duration) {
+            playbackProgress.removeValue(forKey: contentIdentifier)
+        } else {
+            return
+        }
+
+        Task {
+            do {
+                let persisted = try await playbackProgressStore.record(progress)
+                guard playbackProgressUpdateDates[contentIdentifier] == progress.updatedAt else {
+                    return
+                }
+                if let saved = persisted.first(where: {
+                    $0.contentIdentifier == contentIdentifier
+                }) {
+                    playbackProgress[contentIdentifier] = saved
+                } else {
+                    playbackProgress.removeValue(forKey: contentIdentifier)
+                }
+            } catch {
+                NSLog("PLAYBACK_PROGRESS save_failed=%@", error.localizedDescription)
+            }
+        }
     }
 
     func installAddon(_ input: String) async throws {

@@ -49,9 +49,10 @@ ffmpeg -hide_banner -loglevel error -y \
   "$SERVER_DIR/sample.m3u8"
 
 ffmpeg -hide_banner -loglevel error -y \
-  -f lavfi -i "testsrc2=size=640x360:rate=24" \
-  -f lavfi -i "sine=frequency=660:sample_rate=48000" \
-  -t 2 -c:v libsvtav1 -preset 12 -crf 40 -pix_fmt yuv420p \
+  -f lavfi -i "testsrc2=size=160x96:rate=12" \
+  -f lavfi -i "sine=frequency=660:sample_rate=16000" \
+  -t 1 -c:v libsvtav1 -preset 13 -crf 48 -g 12 \
+  -svtav1-params "lp=1:pin=0" -pix_fmt yuv420p \
   -c:a flac "$SERVER_DIR/sample-av1-flac.mkv"
 
 python3 "$ROOT_DIR/scripts/range_server.py" "$PORT" "$SERVER_DIR" \
