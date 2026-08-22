@@ -11,10 +11,14 @@ on:
       - "minimal-app/**"
       - ".github/workflows/minimal-app.yml"
 
+concurrency:
+  group: minimal-app-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode
@@ -25,8 +29,35 @@ jobs:
         run: |
           command -v xcodegen >/dev/null || brew install xcodegen
           xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
-      - name: Run full verification workflow
-        run: ./minimal-app/scripts/verify.sh
+      - name: Run unit tests
+        timeout-minutes: 5
+        run: ./minimal-app/scripts/test.sh
+      - name: Build simulator package
+        timeout-minutes: 10
+        run: ./minimal-app/scripts/build-simulator.sh
+      - name: Build device package
+        timeout-minutes: 10
+        run: ./minimal-app/scripts/build-device.sh
+      - name: Report comparative player footprint
+        timeout-minutes: 2
+        run: |
+          reference_ipa="${SKELETON_REFERENCE_IPA:-artifacts/stremio_iOS-2.0.3-18.ipa}"
+          if [[ -f "$reference_ipa" ]]; then
+            ./minimal-app/scripts/benchmark-player-footprint.sh "$reference_ipa"
+          else
+            echo "Player footprint comparison SKIP (set SKELETON_REFERENCE_IPA to a reference IPA)"
+          fi
+      - name: Run catalog paging benchmark
+        timeout-minutes: 3
+        run: ./minimal-app/scripts/benchmark-catalog-paging.sh
+      - name: Run simulator E2E
+        timeout-minutes: 8
+        env:
+          SKELETON_SKIP_SIMULATOR_BUILD: "1"
+        run: ./minimal-app/scripts/e2e-simulator.sh
+      - name: Capture UI state screenshots
+        timeout-minutes: 8
+        run: ./minimal-app/scripts/ui-state-screenshots.sh
       - name: Upload signed ad-hoc builds and E2E evidence
         if: always()
         uses: actions/upload-artifact@v4

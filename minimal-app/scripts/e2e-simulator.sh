@@ -10,7 +10,13 @@ BUNDLE_ID="local.stremio.skeleton.e2e"
 PORT=18765
 TORRENT_SERVER_URL="${SKELETON_E2E_TORRENT_SERVER_URL:-http://127.0.0.1:$PORT}"
 
-"$ROOT_DIR/scripts/build-simulator.sh"
+if [ "${SKELETON_SKIP_SIMULATOR_BUILD:-0}" != "1" ]; then
+  "$ROOT_DIR/scripts/build-simulator.sh"
+fi
+if [ ! -d "$BASE_APP_DIR" ]; then
+  echo "Simulator app is missing at $BASE_APP_DIR" >&2
+  exit 1
+fi
 
 BACKGROUND_MODE="$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$BASE_APP_DIR/Info.plist")"
 ORIENTATIONS="$(/usr/libexec/PlistBuddy -c 'Print :UISupportedInterfaceOrientations' "$BASE_APP_DIR/Info.plist")"
