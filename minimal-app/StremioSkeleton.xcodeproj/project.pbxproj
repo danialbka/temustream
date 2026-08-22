@@ -9,39 +9,75 @@
 /* Begin PBXBuildFile section */
 		07F292F566B3B17FE316AAAB /* AddonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C66DC93D56D584B637C0F01F /* AddonClient.swift */; };
 		14C99D949BC218C407119A03 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D845BAABF69E61C0D51B653 /* PlayerView.swift */; };
+		15AAD0E732450B4D3F3EC0A9 /* MediaContainerSniffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */; };
 		24310D9E15C770621577B87F /* UIStateScreenshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA1179280522C1057C8BA39E /* UIStateScreenshots.swift */; };
+		2828583DACBC80473C094A07 /* PlaybackPerformanceCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3DDC8105E3ACC202BC100A /* PlaybackPerformanceCore.swift */; };
 		30C5028A6D2EE15041EA9310 /* AddonEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80BD475FE77AB54F9BCCC6A /* AddonEndpoint.swift */; };
 		38245866A82E0464B4719346 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = CF821B7ADD29BE7D7C8930AC /* KSPlayer */; };
 		3E006AA43C2FEB3FBE9E46B0 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAD90D9901EB74BA61FFE593 /* Views.swift */; };
+		4F71D3171D4CA484D422DAD2 /* WatchTogetherSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F84A5B9B58C73676B524832 /* WatchTogetherSync.swift */; };
 		50769A5D4E22B6480AFDE5D2 /* TorrentStreamingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */; };
+		57781119C19F36F58CE33852 /* MobileVLCKit.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		58E6FDEFC1F6D94530F36242 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92DDACDA7F728CAAF6D6CF77 /* AppModel.swift */; };
 		677807F725A111C9AB600D4D /* CatalogPaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 524A29523E9B036217F6D8B4 /* CatalogPaging.swift */; };
 		68FB9CF30638ECE62FAEC739 /* StremioAccountClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76BC44034EB5CB12127AC2DB /* StremioAccountClient.swift */; };
+		7093365DD7D27F80CE45F97B /* StremioPlaybackCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 546F368855314461B504B462 /* StremioPlaybackCore.xcframework */; };
+		71FE0B2E4A216184270888EF /* VLCBoundedVideoView.m in Sources */ = {isa = PBXBuildFile; fileRef = C313C30F9B95926CD57F2DA4 /* VLCBoundedVideoView.m */; };
 		9B2A9768EC7A1B4CD6DDAD36 /* TorBoxPlaybackResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */; };
+		9CC2C3A1910D8AF547959D16 /* MobileVLCKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */; };
 		A3E389B58EB73059865D5150 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B27A3BF40F89EDE5C96D671 /* SessionStore.swift */; };
+		A53E10B82D0F85640AD42534 /* WatchTogether.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0E219FD5EF3EED1DD2F06EC /* WatchTogether.swift */; };
 		A9890D53A34F0439AE8942E2 /* StremioSkeletonApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62DB074CBE862325B4337472 /* StremioSkeletonApp.swift */; };
 		B0D9439C0F01597F3E33BD3A /* PlayerDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F159C8CD01833BCBB337842 /* PlayerDiagnostics.swift */; };
 		BB81810366F95923ECD1BE2A /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80A2FE21D2D44501F475EC70 /* Models.swift */; };
+		BDECE20EEEE3B43AD7A63BF3 /* StreamTransportBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF4419C84972F1AEE3CFEF98 /* StreamTransportBridge.swift */; };
+		C2A10ADB9140E2015DBFB710 /* TorBoxStreamSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */; };
 		D9A23E6C603D85C066AFB531 /* LibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		562A2126E967616896FDB8BA /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				57781119C19F36F58CE33852 /* MobileVLCKit.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		0D845BAABF69E61C0D51B653 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
+		2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MobileVLCKit.xcframework; path = build/dependencies/MobileVLCKit.xcframework; sourceTree = "<group>"; };
 		3CAED137EB68745CF1797482 /* StremioSkeleton.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = StremioSkeleton.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorBoxPlaybackResolver.swift; sourceTree = "<group>"; };
+		4F84A5B9B58C73676B524832 /* WatchTogetherSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogetherSync.swift; sourceTree = "<group>"; };
 		524A29523E9B036217F6D8B4 /* CatalogPaging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogPaging.swift; sourceTree = "<group>"; };
+		546F368855314461B504B462 /* StremioPlaybackCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = StremioPlaybackCore.xcframework; path = build/dependencies/StremioPlaybackCore.xcframework; sourceTree = "<group>"; };
 		5B27A3BF40F89EDE5C96D671 /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
 		62DB074CBE862325B4337472 /* StremioSkeletonApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioSkeletonApp.swift; sourceTree = "<group>"; };
+		6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaContainerSniffer.swift; sourceTree = "<group>"; };
+		75CCC31778EA4D9C3C4561B9 /* KSPlayer */ = {isa = PBXFileReference; lastKnownFileType = folder; name = KSPlayer; path = Vendor/KSPlayer; sourceTree = SOURCE_ROOT; };
 		76BC44034EB5CB12127AC2DB /* StremioAccountClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioAccountClient.swift; sourceTree = "<group>"; };
 		80A2FE21D2D44501F475EC70 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryStore.swift; sourceTree = "<group>"; };
 		8F159C8CD01833BCBB337842 /* PlayerDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerDiagnostics.swift; sourceTree = "<group>"; };
 		92DDACDA7F728CAAF6D6CF77 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		AF4419C84972F1AEE3CFEF98 /* StreamTransportBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamTransportBridge.swift; sourceTree = "<group>"; };
 		AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorrentStreamingClient.swift; sourceTree = "<group>"; };
+		C232DE83E2D6EAF131790095 /* StremioSkeleton-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "StremioSkeleton-Bridging-Header.h"; sourceTree = "<group>"; };
+		C313C30F9B95926CD57F2DA4 /* VLCBoundedVideoView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = VLCBoundedVideoView.m; sourceTree = "<group>"; };
 		C66DC93D56D584B637C0F01F /* AddonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddonClient.swift; sourceTree = "<group>"; };
 		CAD90D9901EB74BA61FFE593 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
 		DA1179280522C1057C8BA39E /* UIStateScreenshots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIStateScreenshots.swift; sourceTree = "<group>"; };
+		E0E219FD5EF3EED1DD2F06EC /* WatchTogether.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogether.swift; sourceTree = "<group>"; };
+		EA3DDC8105E3ACC202BC100A /* PlaybackPerformanceCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPerformanceCore.swift; sourceTree = "<group>"; };
+		F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorBoxStreamSelection.swift; sourceTree = "<group>"; };
 		F80BD475FE77AB54F9BCCC6A /* AddonEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddonEndpoint.swift; sourceTree = "<group>"; };
+		FF877DAB24AD41D59FA71549 /* VLCBoundedVideoView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VLCBoundedVideoView.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -50,6 +86,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				38245866A82E0464B4719346 /* KSPlayer in Frameworks */,
+				9CC2C3A1910D8AF547959D16 /* MobileVLCKit.xcframework in Frameworks */,
+				7093365DD7D27F80CE45F97B /* StremioPlaybackCore.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -60,9 +98,20 @@
 			isa = PBXGroup;
 			children = (
 				F9F8FECF9E920E7FD503BC7D /* App */,
+				D632989DDF21E4D09C054ED9 /* Packages */,
 				F487699F38004DD5AD864466 /* StremioSkeletonCore */,
+				4C9F136E89688C04C8B4A482 /* Frameworks */,
 				71EF0A8EAE3C7A7AFAA9AD4C /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		4C9F136E89688C04C8B4A482 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */,
+				546F368855314461B504B462 /* StremioPlaybackCore.xcframework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		71EF0A8EAE3C7A7AFAA9AD4C /* Products */ = {
@@ -73,6 +122,14 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		D632989DDF21E4D09C054ED9 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				75CCC31778EA4D9C3C4561B9 /* KSPlayer */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
 		F487699F38004DD5AD864466 /* StremioSkeletonCore */ = {
 			isa = PBXGroup;
 			children = (
@@ -80,9 +137,12 @@
 				F80BD475FE77AB54F9BCCC6A /* AddonEndpoint.swift */,
 				524A29523E9B036217F6D8B4 /* CatalogPaging.swift */,
 				87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */,
+				6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */,
 				80A2FE21D2D44501F475EC70 /* Models.swift */,
 				76BC44034EB5CB12127AC2DB /* StremioAccountClient.swift */,
+				F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */,
 				AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */,
+				4F84A5B9B58C73676B524832 /* WatchTogetherSync.swift */,
 			);
 			name = StremioSkeletonCore;
 			path = Sources/StremioSkeletonCore;
@@ -92,13 +152,19 @@
 			isa = PBXGroup;
 			children = (
 				92DDACDA7F728CAAF6D6CF77 /* AppModel.swift */,
+				EA3DDC8105E3ACC202BC100A /* PlaybackPerformanceCore.swift */,
 				8F159C8CD01833BCBB337842 /* PlayerDiagnostics.swift */,
 				0D845BAABF69E61C0D51B653 /* PlayerView.swift */,
 				5B27A3BF40F89EDE5C96D671 /* SessionStore.swift */,
+				AF4419C84972F1AEE3CFEF98 /* StreamTransportBridge.swift */,
+				C232DE83E2D6EAF131790095 /* StremioSkeleton-Bridging-Header.h */,
 				62DB074CBE862325B4337472 /* StremioSkeletonApp.swift */,
 				3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */,
 				DA1179280522C1057C8BA39E /* UIStateScreenshots.swift */,
 				CAD90D9901EB74BA61FFE593 /* Views.swift */,
+				FF877DAB24AD41D59FA71549 /* VLCBoundedVideoView.h */,
+				C313C30F9B95926CD57F2DA4 /* VLCBoundedVideoView.m */,
+				E0E219FD5EF3EED1DD2F06EC /* WatchTogether.swift */,
 			);
 			name = App;
 			path = iOS/App;
@@ -113,6 +179,7 @@
 			buildPhases = (
 				3B74A5540C9A70CD7E758E81 /* Sources */,
 				52FD8A24CB064C12B30808EC /* Frameworks */,
+				562A2126E967616896FDB8BA /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -151,7 +218,7 @@
 			mainGroup = 30EA7B51C7F994C2336CBCF1;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				8A23023D9874ECFCFE0C1827 /* XCRemoteSwiftPackageReference "KSPlayer" */,
+				00A007B065EAAB6437AD3100 /* XCLocalSwiftPackageReference "Vendor/KSPlayer" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 71EF0A8EAE3C7A7AFAA9AD4C /* Products */;
@@ -173,16 +240,23 @@
 				58E6FDEFC1F6D94530F36242 /* AppModel.swift in Sources */,
 				677807F725A111C9AB600D4D /* CatalogPaging.swift in Sources */,
 				D9A23E6C603D85C066AFB531 /* LibraryStore.swift in Sources */,
+				15AAD0E732450B4D3F3EC0A9 /* MediaContainerSniffer.swift in Sources */,
 				BB81810366F95923ECD1BE2A /* Models.swift in Sources */,
+				2828583DACBC80473C094A07 /* PlaybackPerformanceCore.swift in Sources */,
 				B0D9439C0F01597F3E33BD3A /* PlayerDiagnostics.swift in Sources */,
 				14C99D949BC218C407119A03 /* PlayerView.swift in Sources */,
 				A3E389B58EB73059865D5150 /* SessionStore.swift in Sources */,
+				BDECE20EEEE3B43AD7A63BF3 /* StreamTransportBridge.swift in Sources */,
 				68FB9CF30638ECE62FAEC739 /* StremioAccountClient.swift in Sources */,
 				A9890D53A34F0439AE8942E2 /* StremioSkeletonApp.swift in Sources */,
 				9B2A9768EC7A1B4CD6DDAD36 /* TorBoxPlaybackResolver.swift in Sources */,
+				C2A10ADB9140E2015DBFB710 /* TorBoxStreamSelection.swift in Sources */,
 				50769A5D4E22B6480AFDE5D2 /* TorrentStreamingClient.swift in Sources */,
 				24310D9E15C770621577B87F /* UIStateScreenshots.swift in Sources */,
+				71FE0B2E4A216184270888EF /* VLCBoundedVideoView.m in Sources */,
 				3E006AA43C2FEB3FBE9E46B0 /* Views.swift in Sources */,
+				A53E10B82D0F85640AD42534 /* WatchTogether.swift in Sources */,
+				4F71D3171D4CA484D422DAD2 /* WatchTogetherSync.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -193,10 +267,16 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = iOS/Resources/StremioSkeleton.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"build/dependencies\"",
+				);
+				HEADER_SEARCH_PATHS = "$(inherited) $(SRCROOT)/rust/StremioPlaybackCore/include";
 				INFOPLIST_FILE = iOS/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -206,6 +286,7 @@
 				PRODUCT_NAME = StremioSkeleton;
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OBJC_BRIDGING_HEADER = "iOS/App/StremioSkeleton-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -216,10 +297,16 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = iOS/Resources/StremioSkeleton.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"build/dependencies\"",
+				);
+				HEADER_SEARCH_PATHS = "$(inherited) $(SRCROOT)/rust/StremioPlaybackCore/include";
 				INFOPLIST_FILE = iOS/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -229,6 +316,7 @@
 				PRODUCT_NAME = StremioSkeleton;
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OBJC_BRIDGING_HEADER = "iOS/App/StremioSkeleton-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -377,21 +465,16 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		8A23023D9874ECFCFE0C1827 /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/kingslay/KSPlayer.git";
-			requirement = {
-				kind = revision;
-				revision = 25c923b70d3d7881275e8f3d917e1e9752416e27;
-			};
+/* Begin XCLocalSwiftPackageReference section */
+		00A007B065EAAB6437AD3100 /* XCLocalSwiftPackageReference "Vendor/KSPlayer" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/KSPlayer;
 		};
-/* End XCRemoteSwiftPackageReference section */
+/* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		CF821B7ADD29BE7D7C8930AC /* KSPlayer */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 8A23023D9874ECFCFE0C1827 /* XCRemoteSwiftPackageReference "KSPlayer" */;
 			productName = KSPlayer;
 		};
 /* End XCSwiftPackageProductDependency section */

@@ -20,6 +20,12 @@ artifacts/*
 *.xcarchive
 xcuserdata/
 DerivedData/
+target/
+
+# Machine-local player deployment state and accidental Xcode duplicates.
+minimal-app/config/*.snapshot.json
+minimal-app/StremioSkeleton [3-9]*.xcodeproj/
+minimal-app/iOS/Resources/StremioSkeleton [0-9]*.entitlements
 
 # Local enhancer build products.
 enhancer/build/

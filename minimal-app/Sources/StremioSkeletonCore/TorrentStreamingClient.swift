@@ -64,7 +64,9 @@ public struct TorrentStreamingClient: Sendable {
     public func isOnline() async -> Bool {
         do {
             let url = endpoint.baseURL.appendingPathComponent("heartbeat")
-            let (_, response) = try await loader.data(for: URLRequest(url: url))
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 2
+            let (_, response) = try await loader.data(for: request)
             return (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
         } catch {
             return false
@@ -159,7 +161,9 @@ public struct TorrentStreamingClient: Sendable {
     private func playbackSettings() async -> PlaybackSettings {
         do {
             let url = endpoint.baseURL.appendingPathComponent("settings")
-            let (data, response) = try await loader.data(for: URLRequest(url: url))
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 3
+            let (data, response) = try await loader.data(for: request)
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode),
                   let envelope = try? JSONDecoder().decode(ServerSettingsEnvelope.self, from: data)

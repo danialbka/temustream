@@ -20,7 +20,7 @@ enum StremioPlayerConfiguration {
         case renderer
     }
 
-    static func configureEngine(_ engine: Engine = .automatic) {
+    static func configureEngine(_ engine: Engine = .ffmpeg) {
         switch engine {
         case .automatic:
             KSOptions.firstPlayerType = KSAVPlayer.self
@@ -39,8 +39,9 @@ enum StremioPlayerConfiguration {
     }
 
     static func makeOptions(
-        engine: Engine = .automatic,
-        audioOutput: AudioOutput = .engine
+        engine: Engine = .ffmpeg,
+        audioOutput: AudioOutput = .engine,
+        performancePolicy: PlaybackPerformancePolicy? = nil
     ) -> KSOptions {
         configureEngine(engine)
         KSOptions.audioPlayerType = switch audioOutput {
@@ -49,15 +50,31 @@ enum StremioPlayerConfiguration {
         }
         let options = KSOptions()
         options.hardwareDecode = true
+        #if targetEnvironment(simulator)
+        if ProcessInfo.processInfo.environment["SKELETON_KS_ASYNC_DECOMPRESSION"] == "1" {
+            options.asynchronousDecompression = true
+        }
+        #endif
         options.autoRotate = true
         options.autoSelectEmbedSubtitle = true
         options.canStartPictureInPictureAutomaticallyFromInline = true
         // The stress benchmark found no stall reduction at six seconds, while
         // startup regressed and dropped frames increased. Keep KSPlayer's
         // measured three-second default explicit here.
-        options.preferredForwardBufferDuration = 3
-        options.maxBufferDuration = 30
+        options.preferredForwardBufferDuration = performancePolicy?.forwardBufferSeconds ?? 3
+        options.maxBufferDuration = performancePolicy?.maximumBufferSeconds ?? 30
         options.isSeekedAutoPlay = false
+        options.mpegTSByteSeekResolver = performancePolicy?.mpegTSByteSeekResolver
+        options.useTimeBasedSeekingForMPEGTS = options.mpegTSByteSeekResolver != nil
+        // The bridge intentionally resolves to the preceding keyframe region.
+        // Accurate seek decodes that small preroll and withholds frames until
+        // the requested presentation timestamp, preventing post-seek A/V skew.
+        options.isAccurateSeek = options.mpegTSByteSeekResolver != nil
+        // Bound a dead range request without changing KSPlayer's proven
+        // buffering depth or enabling its risky infinite DNS retry option.
+        options.formatContextOptions["rw_timeout"] = 15_000_000
+        options.formatContextOptions["reconnect_delay_max"] = 2
+        options.formatContextOptions["reconnect_on_http_error"] = "5xx"
         return options
     }
 
@@ -232,16 +249,27 @@ enum PlayerStressBenchmark {
             throw PlayerStressError.invalidDuration(duration)
         }
 
+        // The production controls intentionally keep scrubbing disabled until
+        // KSPlayer exposes a seekable range. Measuring a seek before that
+        // point makes the first request look like a four-second seek while the
+        // demuxer is actually still publishing its initial index.
+        try await waitUntil(timeout: 8) { layer.player.seekable }
+        NSLog("PLAYER_STRESS_STEP seekable title=%@", title)
+
         var seekLatencies = [Double]()
         var seekSyncLatencies = [Double]()
         var successfulSeeks = 0
         for (seekIndex, fraction) in seekFractions.enumerated() {
             let target = min(max(duration * fraction, 0.5), duration - 1)
-            let wasPlaying = layer.player.isPlaying
+            // This phase explicitly measures seeks while playback is wanted.
+            // `isPlaying` can momentarily be false during a cold buffer
+            // transition even though the layer is in autoplay mode, which
+            // would otherwise turn the first stress seek into a paused seek.
+            let shouldResume = true
             PlayerSeekRecovery.pause(layer: layer)
             let seekStartedAt = ProcessInfo.processInfo.systemUptime
             NSLog("PLAYER_STRESS_STEP seek_begin title=%@ index=%ld", title, seekIndex + 1)
-            let finished = try await seek(layer: layer, to: target, resume: wasPlaying)
+            let finished = try await seek(layer: layer, to: target, resume: shouldResume)
             let seekMilliseconds = elapsedMilliseconds(since: seekStartedAt)
             seekLatencies.append(seekMilliseconds)
             NSLog(
@@ -274,11 +302,14 @@ enum PlayerStressBenchmark {
             } catch {
                 let nativeRate = (layer.player as? KSAVPlayer)?.player.rate ?? -1
                 NSLog(
-                    "PLAYER_STRESS_STEP seek_resume_timeout title=%@ index=%ld start=%.3f current=%.3f rate=%.3f state=%@ load=%@",
+                    "PLAYER_STRESS_STEP seek_resume_timeout title=%@ index=%ld target=%.3f start=%.3f current=%.3f video=%.3f delta_ms=%.1f rate=%.3f state=%@ load=%@",
                     title,
                     seekIndex + 1,
+                    target,
                     resumeStartTime,
                     layer.player.currentPlaybackTime,
+                    displayedTime(for: layer),
+                    abs(layer.player.currentPlaybackTime - displayedTime(for: layer)) * 1_000,
                     nativeRate,
                     String(describing: layer.player.playbackState),
                     String(describing: layer.player.loadState)
@@ -468,8 +499,14 @@ enum PlayerStressBenchmark {
             let videoTime = displayedTime(for: layer)
             let nearTarget = abs(audioTime - target) <= 5 && abs(videoTime - target) <= 5
             let synchronized = abs(audioTime - videoTime) <= 0.15
+            // KSAVPlayer can keep the wrapper's loadState at `.loading` while
+            // AVPlayer is already rendering at rate 1. The native rate is the
+            // stronger signal here; rejecting it produced false stress
+            // failures even as the clock advanced smoothly past the target.
+            let activelyRendering = layer.player.loadState == .playable
+                || ((layer.player as? KSAVPlayer)?.player.rate ?? 0) > 0
             if layer.player.isPlaying,
-               layer.player.loadState == .playable,
+               activelyRendering,
                nearTarget,
                synchronized {
                 consecutiveSynchronizedSamples += 1
@@ -515,10 +552,9 @@ enum PlayerStressBenchmark {
     }
 }
 
-/// KSPlayer's `autoPlay` seek path can leave AVPlayer-backed HLS streams with
-/// playbackState `.playing` while the actual player rate remains zero. Keeping
-/// seek and resume as distinct state transitions makes both KSAVPlayer and
-/// KSMEPlayer reliably leave `.seeking` after a completed scrub.
+/// KSPlayer's `autoPlay` seek path can leave HLS streams in an engine-specific
+/// transitional state. Keeping seek and resume distinct gives each backend a
+/// bounded opportunity to reassert playback after a completed scrub.
 @MainActor
 enum PlayerSeekRecovery {
     private static var generations = [ObjectIdentifier: Int]()
@@ -534,6 +570,33 @@ enum PlayerSeekRecovery {
         generations[key, default: 0] += 1
         let generation = generations[key, default: 0]
         layer.play()
+        if let mediaPlayer = layer.player as? KSMEPlayer {
+            // MPEG-TS HLS can report a completed demux seek before KSMEPlayer
+            // has left `.seeking`. Reassert playback for a bounded window so a
+            // late state update cannot permanently strand the default engine.
+            mediaPlayer.play()
+            Task { @MainActor in
+                for _ in 0..<24 {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard generations[key] == generation,
+                          !Task.isCancelled
+                    else { return }
+                    if !mediaPlayer.isPlaying {
+                        // Some segmented HLS demuxers deliver their seek
+                        // completion before KSMEPlayer's queued `.seeking`
+                        // transition has drained. Force a real state edge;
+                        // repeatedly assigning `.playing` alone can be
+                        // overwritten by that late transition.
+                        mediaPlayer.pause()
+                        try? await Task.sleep(for: .milliseconds(25))
+                        guard generations[key] == generation else { return }
+                        mediaPlayer.play()
+                        layer.play()
+                    }
+                }
+            }
+            return
+        }
         guard let nativePlayer = layer.player as? KSAVPlayer else { return }
         nativePlayer.player.automaticallyWaitsToMinimizeStalling = false
         nativePlayer.player.currentItem?.preferredForwardBufferDuration = 1
@@ -577,36 +640,75 @@ enum PlayerSeekRecovery {
             return
         }
         Self.pause(layer: layer)
-        layer.seek(time: target, autoPlay: false) { finished in
-            guard finished else {
-                completion(false)
-                return
-            }
+        let key = ObjectIdentifier(layer)
+        let generation = generations[key, default: 0]
+        seekFFmpeg(
+            layer: layer,
+            target: target,
+            resume: resume,
+            generation: generation,
+            attempt: 0,
+            completion: completion
+        )
+    }
 
-            // KSMEPlayer can invoke its seek callback before the demux/audio
-            // clocks have adopted the requested timestamp. Completing at that
-            // point lets a caller capture the old position and wait for an
-            // impossible resume target. Keep playback paused until the public
-            // clock settles at the requested position, then resume exactly
-            // once. This also prevents queued pre-seek audio from pulling the
-            // clock backwards after scrubbing.
-            let key = ObjectIdentifier(layer)
-            let generation = generations[key, default: 0]
+    private static func seekFFmpeg(
+        layer: KSPlayerLayer,
+        target: TimeInterval,
+        resume: Bool,
+        generation: Int,
+        attempt: Int,
+        completion: @escaping (Bool) -> Void
+    ) {
+        layer.seek(time: target, autoPlay: false) { finished in
             Task { @MainActor in
-                let deadline = ProcessInfo.processInfo.systemUptime + 2
-                while ProcessInfo.processInfo.systemUptime < deadline {
-                    guard generations[key] == generation else {
-                        completion(false)
-                        return
-                    }
-                    if abs(layer.player.currentPlaybackTime - target) <= 2 {
-                        if resume { Self.resume(layer: layer) }
-                        completion(true)
-                        return
-                    }
-                    try? await Task.sleep(for: .milliseconds(40))
+                let key = ObjectIdentifier(layer)
+                guard generations[key] == generation else {
+                    completion(false)
+                    return
                 }
-                completion(false)
+
+                if finished {
+                    // KSMEPlayer can invoke its callback before the demux and
+                    // audio clocks have adopted the requested timestamp. Keep
+                    // playback paused until its public clock settles.
+                    // A successful FFmpeg seek updates MEPlayerItem's clocks
+                    // immediately. If the public clock has not adopted the
+                    // target within this short first-attempt window, waiting
+                    // several seconds only delays the same recovery seek.
+                    let adoptionWindow = attempt == 0 ? 0.6 : 4.0
+                    let deadline = ProcessInfo.processInfo.systemUptime + adoptionWindow
+                    while ProcessInfo.processInfo.systemUptime < deadline {
+                        guard generations[key] == generation else {
+                            completion(false)
+                            return
+                        }
+                        if abs(layer.player.currentPlaybackTime - target) <= 2 {
+                            if resume { Self.resume(layer: layer) }
+                            completion(true)
+                            return
+                        }
+                        try? await Task.sleep(for: .milliseconds(40))
+                    }
+                }
+
+                // A range-backed FFmpeg demux can occasionally acknowledge a
+                // seek before its reopened decoder adopts the timestamp. Give
+                // the selected KSPlayer engine one bounded retry before the UI
+                // reports a failure or considers another player.
+                guard attempt == 0, generations[key] == generation else {
+                    completion(false)
+                    return
+                }
+                NSLog("PLAYER_REPAIR seek=retry engine=ffmpeg")
+                seekFFmpeg(
+                    layer: layer,
+                    target: target,
+                    resume: resume,
+                    generation: generation,
+                    attempt: 1,
+                    completion: completion
+                )
             }
         }
     }
@@ -615,6 +717,8 @@ enum PlayerSeekRecovery {
 private enum PlayerStressError: LocalizedError {
     case invalidDuration(TimeInterval)
     case timedOut
+    case prefixCaptureRequiresByteRanges
+    case invalidPrefixCaptureSize(Int64)
 
     var errorDescription: String? {
         switch self {
@@ -622,6 +726,10 @@ private enum PlayerStressError: LocalizedError {
             "Player stress source has invalid duration: \(duration)"
         case .timedOut:
             "Player stress operation timed out"
+        case .prefixCaptureRequiresByteRanges:
+            "Provider did not honor the bounded byte-range capture request"
+        case let .invalidPrefixCaptureSize(bytes):
+            "Provider returned an invalid prefix capture size: \(bytes) bytes"
         }
     }
 }
@@ -659,7 +767,13 @@ struct PlayerStressScreen: View {
                     title: "\(engine):b\(bufferLabel):\(url.lastPathComponent)",
                     options: options
                 )
-                let data = try JSONEncoder().encode(result)
+                let encoder = JSONEncoder()
+                encoder.nonConformingFloatEncodingStrategy = .convertToString(
+                    positiveInfinity: "Infinity",
+                    negativeInfinity: "-Infinity",
+                    nan: "NaN"
+                )
+                let data = try encoder.encode(result)
                 let json = String(decoding: data, as: UTF8.self)
                 status = result.passed ? "Player stress PASS" : "Player stress FAIL"
                 NSLog("PLAYER_STRESS %@ %@", result.passed ? "PASS" : "FAIL", json)
@@ -668,6 +782,194 @@ struct PlayerStressScreen: View {
                 NSLog("PLAYER_STRESS FAIL error=%@", error.localizedDescription)
             }
         }
+    }
+}
+
+#if targetEnvironment(simulator)
+private enum ProviderPrefixCapture {
+    static func save(
+        source: PlaybackPlan,
+        megabytes: Int
+    ) async throws -> (url: URL, bytes: Int64) {
+        let boundedMegabytes = min(max(megabytes, 1), 128)
+        let byteCount = boundedMegabytes * 1_024 * 1_024
+        var request = URLRequest(url: source.primaryURL)
+        request.setValue("bytes=0-\(byteCount - 1)", forHTTPHeaderField: "Range")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        request.timeoutInterval = 45
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 45
+        configuration.timeoutIntervalForResource = 90
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let (temporaryURL, response) = try await session.download(for: request)
+        guard let http = response as? HTTPURLResponse,
+              http.statusCode == 206,
+              http.value(forHTTPHeaderField: "Content-Range") != nil else {
+            throw PlayerStressError.prefixCaptureRequiresByteRanges
+        }
+
+        let actualBytes = try temporaryURL.resourceValues(forKeys: [.fileSizeKey])
+            .fileSize
+            .map(Int64.init) ?? 0
+        guard actualBytes > 0, actualBytes <= Int64(byteCount) else {
+            throw PlayerStressError.invalidPrefixCaptureSize(actualBytes)
+        }
+
+        let fileExtension = source.detectedMIMEType == "video/mp2t" ? "ts" : "media"
+        let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first!
+        let destination = documents.appendingPathComponent(
+            "provider-network-isolation.\(fileExtension)"
+        )
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: temporaryURL, to: destination)
+        return (destination, actualBytes)
+    }
+}
+#endif
+
+@MainActor
+struct ProviderPlayerAuditScreen: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var plan: PlaybackPlan?
+    @State private var title = "Resolving provider stream…"
+    @State private var failureMessage: String?
+
+    var body: some View {
+        Group {
+            if let plan {
+                NavigationStack {
+                    PlayerScreen(
+                        plan: plan,
+                        title: title,
+                        minimumVideoDuration: 20 * 60
+                    ) { error in
+                        failureMessage = error.localizedDescription
+                        NSLog(
+                            "PROVIDER_PLAYER_AUDIT FAIL player=%@ error=%@",
+                            StremioInternalPlayer.selected.rawValue,
+                            error.localizedDescription
+                        )
+                    }
+                }
+            } else if let failureMessage {
+                VStack(spacing: 12) {
+                    Image(systemName: "play.slash")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.orange)
+                    Text("Provider stream unavailable").font(.title3.bold())
+                    Text(failureMessage)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding()
+            } else {
+                ProgressView(title)
+            }
+        }
+        .task { await resolveProviderStream() }
+    }
+
+    private func resolveProviderStream() async {
+        let environment = ProcessInfo.processInfo.environment
+        let movieNeedle = environment["SKELETON_PROVIDER_MOVIE"] ?? "Obsession"
+        let providerNeedle = environment["SKELETON_PROVIDER_NAME"] ?? "Torrentio"
+        let streamNeedle = environment["SKELETON_PROVIDER_STREAM_NEEDLE"] ?? "Lootera"
+
+        await model.start()
+        guard let item = model.catalog.first(where: {
+            $0.name.range(of: movieNeedle, options: .caseInsensitive) != nil
+        }) else {
+            fail("Missing movie matching \(movieNeedle)")
+            return
+        }
+
+        let detail = await model.details(for: item)
+        let providers = await model.streamProviders(for: detail)
+        guard let provider = providers.first(where: {
+            $0.name.range(of: providerNeedle, options: .caseInsensitive) != nil
+        }) else {
+            fail("Missing provider matching \(providerNeedle)")
+            return
+        }
+        if environment["SKELETON_PROVIDER_LIST_STREAMS"] == "1" {
+            for (index, stream) in provider.streams.enumerated() {
+                NSLog(
+                    "PROVIDER_STREAM index=%ld metadata=%@",
+                    index,
+                    streamMetadata(stream)
+                )
+            }
+        }
+        let selectedStream: Stream?
+        if let rawIndex = environment["SKELETON_PROVIDER_STREAM_INDEX"],
+           let index = Int(rawIndex),
+           provider.streams.indices.contains(index) {
+            selectedStream = provider.streams[index]
+        } else {
+            selectedStream = provider.streams.first(where: {
+                streamMetadata($0).range(of: streamNeedle, options: .caseInsensitive) != nil
+            })
+        }
+        guard let stream = selectedStream else {
+            fail("Missing stream matching \(streamNeedle)")
+            return
+        }
+
+        title = streamMetadata(stream)
+        do {
+            let resolvedPlan = try await model.playbackPlan(
+                for: stream,
+                providerName: provider.name
+            )
+            #if targetEnvironment(simulator)
+            if let rawMegabytes = environment["SKELETON_PROVIDER_CAPTURE_PREFIX_MB"],
+               let megabytes = Int(rawMegabytes) {
+                let captured = try await ProviderPrefixCapture.save(
+                    source: resolvedPlan,
+                    megabytes: megabytes
+                )
+                NSLog(
+                    "NETWORK_ISOLATION_CAPTURE bytes=%lld file=%@ mime=%@",
+                    captured.bytes,
+                    captured.url.lastPathComponent,
+                    resolvedPlan.detectedMIMEType ?? "unknown"
+                )
+            }
+            #endif
+            plan = resolvedPlan
+            NSLog(
+                "PROVIDER_PLAYER_AUDIT RESOLVED player=%@ movie=%@ provider=%@ stream=%@",
+                StremioInternalPlayer.selected.rawValue,
+                detail.name,
+                provider.name,
+                title
+            )
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    private func streamMetadata(_ stream: Stream) -> String {
+        [stream.title, stream.name, stream.description]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
+    private func fail(_ message: String) {
+        failureMessage = message
+        NSLog(
+            "PROVIDER_PLAYER_AUDIT FAIL player=%@ error=%@",
+            StremioInternalPlayer.selected.rawValue,
+            message
+        )
     }
 }
 
@@ -691,6 +993,14 @@ extension AppModel {
         case "renderer": .renderer
         default: .engine
         }
+        let configuredSeekFractions = environment[
+            "SKELETON_SINGLE_MOVIE_SEEK_FRACTIONS"
+        ]?.split(separator: ",").compactMap { Double($0) }.filter {
+            $0 > 0 && $0 < 1
+        }
+        let seekFractions = configuredSeekFractions?.isEmpty == false
+            ? configuredSeekFractions!
+            : [0.10, 0.50, 0.85, 0.25, 0.70]
 
         let movieName = "Obsession"
         guard let obsession = catalog.first(where: {
@@ -761,16 +1071,25 @@ extension AppModel {
             // This audit intentionally exercises one resolved source and one
             // selected backend. It never retries another URL or player engine.
             let plan = try await playbackPlan(for: stream, providerName: provider.name)
+            let performancePolicy = PlaybackPerformanceCore.policy(
+                url: plan.primaryURL,
+                title: [metadata, plan.detectedMIMEType]
+                    .compactMap { $0 }
+                    .joined(separator: " "),
+                player: .ksPlayer
+            )
             let metrics = try await PlayerStressBenchmark.measure(
                 url: plan.primaryURL,
                 title: metadata,
                 options: StremioPlayerConfiguration.makeOptions(
                     engine: engine,
-                    audioOutput: audioOutput
+                    audioOutput: audioOutput,
+                    performancePolicy: performancePolicy
                 ),
                 visible: true,
                 startupTimeout: 20,
                 minimumDuration: 20 * 60,
+                seekFractions: seekFractions,
                 cadenceSampleSeconds: 20
             )
             writeSingleMoviePlaybackAudit(
@@ -864,9 +1183,7 @@ extension AppModel {
                 var selectedMetrics: PlayerStressMetrics?
                 var attemptErrors = [String]()
 
-                let engines: [StremioPlayerConfiguration.Engine] = plan.usesCompatibilityPlayback
-                    ? [.ffmpeg, .native]
-                    : [.native, .ffmpeg]
+                let engines: [StremioPlayerConfiguration.Engine] = [.ffmpeg, .native]
                 for engine in engines {
                     do {
                         let metrics = try await PlayerStressBenchmark.measure(
@@ -990,6 +1307,11 @@ extension AppModel {
         )
         do {
             let encoder = JSONEncoder()
+            encoder.nonConformingFloatEncodingStrategy = .convertToString(
+                positiveInfinity: "Infinity",
+                negativeInfinity: "-Infinity",
+                nan: "NaN"
+            )
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(report)
@@ -1159,6 +1481,11 @@ extension AppModel {
         )
         do {
             let encoder = JSONEncoder()
+            encoder.nonConformingFloatEncodingStrategy = .convertToString(
+                positiveInfinity: "Infinity",
+                negativeInfinity: "-Infinity",
+                nan: "NaN"
+            )
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(report)
@@ -1208,6 +1535,11 @@ extension AppModel {
         )
         do {
             let encoder = JSONEncoder()
+            encoder.nonConformingFloatEncodingStrategy = .convertToString(
+                positiveInfinity: "Infinity",
+                negativeInfinity: "-Infinity",
+                nan: "NaN"
+            )
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(report)

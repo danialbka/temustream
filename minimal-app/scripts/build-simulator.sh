@@ -15,6 +15,8 @@ rm -rf "$APP_DIR"
 mkdir -p "$BUILD_DIR" "$ROOT_DIR/build"
 
 cd "$ROOT_DIR"
+"$ROOT_DIR/scripts/fetch-vlc.sh"
+"$ROOT_DIR/scripts/build-rust-core.sh"
 xcodegen generate --spec project.yml >/dev/null
 if ! xcodebuild \
   -project StremioSkeleton.xcodeproj \

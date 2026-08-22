@@ -111,6 +111,22 @@ final class TorrentStreamingClientTests: XCTestCase {
             components.queryItems?.first(where: { $0.name == "maxWidth" })?.value,
             "1280"
         )
+        let recorded = await loader.requests
+        XCTAssertEqual(recorded.first?.timeoutInterval, 3)
+    }
+
+    func testHeartbeatFailsFastWhenCompatibilityServerIsUnavailable() async throws {
+        let loader = TorrentStubLoader()
+        let client = TorrentStreamingClient(
+            endpoint: try StreamingServerEndpoint("http://127.0.0.1:11470"),
+            loader: loader
+        )
+
+        let isOnline = await client.isOnline()
+        XCTAssertTrue(isOnline)
+        let recorded = await loader.requests
+        XCTAssertEqual(recorded.first?.url?.path, "/heartbeat")
+        XCTAssertEqual(recorded.first?.timeoutInterval, 2)
     }
 
     func testDetectsStreamsThatNeedCompatibilityPlayback() {

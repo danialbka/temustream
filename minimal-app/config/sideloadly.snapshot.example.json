@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "YYYY-MM-DDTHH:MM:SSZ",
+  "account": {
+    "source": "existing Sideloadly installation record",
+    "storedInSnapshot": false
+  },
+  "sideloadly": {
+    "appPath": "/Applications/Sideloadly.app",
+    "version": "0.60",
+    "internalCommand": "--silent --enqueue",
+    "settings": {
+      "anisette": "local",
+      "anisetteDatabaseValue": 2,
+      "signingMode": "apple-id-sideload",
+      "signingModeDatabaseValue": 3,
+      "dynamicUpload": false,
+      "customUploadChunkSizeMB": null,
+      "tryOlderIOS": false,
+      "removeSupportedDeviceLimit": false,
+      "fileSharing": false,
+      "changeAppName": false,
+      "changeAppVersion": false,
+      "automaticBundleID": true,
+      "customEntitlements": false,
+      "dropPlugins": false,
+      "injectTweaks": false,
+      "infoPlistFieldChanges": 0,
+      "autoRefresh": true,
+      "refreshAfterHours": 96
+    }
+  },
+  "device": {
+    "name": "YOUR_IPHONE_NAME",
+    "udid": "YOUR_DEVICE_UDID",
+    "coreDeviceIdentifier": "YOUR_CORE_DEVICE_IDENTIFIER",
+    "model": "YOUR_IPHONE_MODEL",
+    "connection": "wifi"
+  },
+  "app": {
+    "sourceBundleID": "local.stremio.skeleton",
+    "installedBundleID": "YOUR_SIDELOADED_BUNDLE_IDENTIFIER",
+    "autoRefreshRecordIDAtCapture": 0,
+    "requiredEntitlement": "com.apple.developer.group-session",
+    "defaultIPA": "build/StremioSkeleton-device.ipa"
+  }
+}

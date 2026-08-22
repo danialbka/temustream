@@ -47,7 +47,20 @@ struct SearchCatalogGroup: Identifiable, Equatable, Sendable {
 struct PlaybackPlan: Sendable {
     let primaryURL: URL
     let fallbackURL: URL?
-    let usesCompatibilityPlayback: Bool
+    let requiresCompatibilityPlayback: Bool
+    let detectedMIMEType: String?
+
+    init(
+        primaryURL: URL,
+        fallbackURL: URL? = nil,
+        requiresCompatibilityPlayback: Bool = false,
+        detectedMIMEType: String? = nil
+    ) {
+        self.primaryURL = primaryURL
+        self.fallbackURL = fallbackURL
+        self.requiresCompatibilityPlayback = requiresCompatibilityPlayback
+        self.detectedMIMEType = detectedMIMEType
+    }
 }
 
 private enum StreamProviderLoadError: Error, Sendable {
@@ -156,14 +169,17 @@ final class AppModel: ObservableObject {
                 await runE2E()
             } else {
                 try await loadHome()
+                #if canImport(KSPlayer)
                 if ProcessInfo.processInfo.environment[
                     "SKELETON_SINGLE_MOVIE_PLAYBACK_AUDIT"
                 ] == "1" {
                     await runSingleMoviePlaybackAudit()
                     return
                 }
+                #endif
                 await refreshStreamingServerStatus()
                 if session != nil { try await syncAccount() }
+                #if canImport(KSPlayer)
                 if ProcessInfo.processInfo.environment["SKELETON_OBSESSION_STREAM_STRESS"] == "1" {
                     let stressEnvironment = ProcessInfo.processInfo.environment
                     await runObsessionStreamStressBenchmark(
@@ -173,6 +189,7 @@ final class AppModel: ObservableObject {
                 } else if ProcessInfo.processInfo.environment["SKELETON_REAL_PLAYER_STRESS"] == "1" {
                     await runRealPlayerStressBenchmark()
                 }
+                #endif
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -621,7 +638,9 @@ final class AppModel: ObservableObject {
     func playbackPlan(for stream: Stream, providerName: String? = nil) async throws -> PlaybackPlan {
         let endpoint = try? StreamingServerEndpoint(streamingServerInput)
         let client = endpoint.map { TorrentStreamingClient(endpoint: $0) }
-        let sourceURL: URL
+        var sourceURL: URL
+        var compatibilitySourceURL: URL
+        let detectedMIMEType: String?
         if let url = stream.url {
             if TorBoxPlaybackResolver.shouldResolve(
                 stream: stream,
@@ -629,24 +648,72 @@ final class AppModel: ObservableObject {
                 providerName: providerName
             ) {
                 let startedAt = ProcessInfo.processInfo.systemUptime
-                sourceURL = try await TorBoxPlaybackResolver.resolve(url)
+                let resolved = try await TorBoxPlaybackResolver.resolve(url, stream: stream)
+                sourceURL = resolved.url
+                compatibilitySourceURL = resolved.url
+                detectedMIMEType = resolved.detectedMIMEType
                 NSLog(
                     "TORBOX_STREAM_BENCHMARK resolve_ms=%.1f host=%@",
                     (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
                     sourceURL.host ?? "unknown"
                 )
+                if detectedMIMEType == "video/mp2t",
+                   resolved.supportsByteRanges,
+                   let contentLength = resolved.contentLength {
+                    sourceURL = try await StreamTransportBridge.shared.localURL(
+                        upstream: resolved.url,
+                        contentLength: contentLength,
+                        mimeType: "video/mp2t"
+                    )
+                }
             } else {
                 sourceURL = url
+                compatibilitySourceURL = url
+                detectedMIMEType = nil
             }
         } else {
             guard let client else { throw StreamingServerError.invalidServerURL }
             sourceURL = try await client.playbackURL(for: stream)
+            compatibilitySourceURL = sourceURL
+            detectedMIMEType = nil
+        }
+
+        let nativeExtensions = ["m3u8", "mp4", "m4v", "mov", "mp3", "m4a", "aac", "ts"]
+        let sourceExtension = sourceURL.pathExtension.lowercased()
+        let hasAmbiguousContainer = sourceExtension.isEmpty
+            || !nativeExtensions.contains(sourceExtension)
+        let requiresCompatibilityPlayback = stream.prefersCompatibilityPlayback
+            || (StremioInternalPlayer.selected == .avPlayer
+                && (hasAmbiguousContainer || detectedMIMEType == "video/mp2t"))
+        var compatibilityURL: URL?
+        if requiresCompatibilityPlayback, let client {
+            // Torrent resolution already proves that the configured server is
+            // reachable. Direct files get one short heartbeat in case playback
+            // was opened before the background status refresh completed.
+            let serverIsAvailable: Bool
+            if stream.isTorrent || streamingServerOnline {
+                serverIsAvailable = true
+            } else {
+                serverIsAvailable = await client.isOnline()
+                streamingServerOnline = serverIsAvailable
+            }
+
+            if serverIsAvailable {
+                compatibilityURL = try? await client.compatibilityPlaybackURL(
+                    for: compatibilitySourceURL,
+                    sessionID: UUID().uuidString
+                )
+                if compatibilityURL != nil {
+                    NSLog("PLAYER_STREAM_BRIDGE prepared=server-hls")
+                }
+            }
         }
 
         return PlaybackPlan(
             primaryURL: sourceURL,
-            fallbackURL: nil,
-            usesCompatibilityPlayback: true
+            fallbackURL: compatibilityURL,
+            requiresCompatibilityPlayback: requiresCompatibilityPlayback,
+            detectedMIMEType: detectedMIMEType
         )
     }
 

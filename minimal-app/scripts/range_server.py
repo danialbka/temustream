@@ -25,6 +25,11 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         if self.path == "/heartbeat":
             self.send_json({"success": True})
             return
+        if self.path.split("?", 1)[0] == "/provider-network-alias.ts":
+            self.send_response(307)
+            self.send_header("Location", "/provider-network-isolation.mp4")
+            self.end_headers()
+            return
         if re.match(r"/hlsv2/[^/]+/master\.m3u8(?:\?.*)?$", self.path):
             self.send_response(307)
             self.send_header("Location", "/sample.m3u8")
@@ -107,6 +112,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
     def translate_path(self, path):
         if re.fullmatch(r"/[0-9a-fA-F]{40}/-?\d+(?:\?.*)?", path):
+            path = "/sample.mp4"
+        elif path.split("?", 1)[0] == "/ambiguous-media":
+            # Extensionless provider-style route used to verify AVPlayer's
+            # bounded MIME probe without exposing a real signed URL.
             path = "/sample.mp4"
         return super().translate_path(path)
 

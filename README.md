@@ -1,9 +1,13 @@
-# Stremio iOS Enhanced (unofficial)
+# TemuStream (unofficial)
 
-An unofficial, source-auditable player-enhancement layer for a personal
-Stremio iOS sideload. It adds forced portrait/landscape rotation, exposes
-native Picture in Picture, starts PiP automatically when returning to the Home
-Screen, and keeps KSPlayer's moving-video PiP path active.
+TemuStream is a source-auditable, experimental iOS streaming client focused on
+fast startup, hardware-accelerated playback, smooth seeking, selectable
+KSPlayer/VLC/AVPlayer engines, and synchronized Watch Together sessions. The
+SwiftUI application, Rust playback policy, player bridge, tests, and deployment
+tools live in [`minimal-app/`](minimal-app/).
+
+The repository also retains the earlier `enhancer/` runtime-extension project
+and its reproducible simulator harness for historical compatibility work.
 
 This project is not affiliated with, endorsed by, or maintained by Stremio.
 It is a patch layer—not a source-code fork of the Stremio application. This
@@ -19,6 +23,7 @@ or provisioning profile belongs in this repository.
 
 ## Repository contents
 
+- `minimal-app/`: the TemuStream SwiftUI application and playback test suite.
 - `enhancer/StremioPlayerEnhancer.m`: the Objective-C runtime extension.
 - `enhancer/build.sh`: reproducible arm64 device-dylib build.
 - `enhancer/package-ipa.sh`: checksum-pinned local IPA packager.

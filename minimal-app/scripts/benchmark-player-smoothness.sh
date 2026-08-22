@@ -89,8 +89,13 @@ do
   if [ -n "$RESULT" ]; then
     printf '%s\n' "$RESULT" | jq -c --arg case "$LABEL" '. + {case: $case}' >> "$RESULTS"
   elif [ -n "$FAILED_RESULT" ]; then
-    printf '%s\n' "$FAILED_RESULT" | jq -c --arg case "$LABEL" \
-      '. + {case: $case, error: "Strict player thresholds failed"}' >> "$RESULTS"
+    if printf '%s\n' "$FAILED_RESULT" | jq -e . >/dev/null 2>&1; then
+      printf '%s\n' "$FAILED_RESULT" | jq -c --arg case "$LABEL" \
+        '. + {case: $case, error: "Strict player thresholds failed"}' >> "$RESULTS"
+    else
+      jq -nc --arg case "$LABEL" --arg error "$FAILED_RESULT" \
+        '{case: $case, error: $error}' >> "$RESULTS"
+    fi
   else
     jq -nc --arg case "$LABEL" --arg error "Stress test failed or terminated" \
       '{case: $case, error: $error}' >> "$RESULTS"

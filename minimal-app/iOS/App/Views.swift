@@ -4,20 +4,30 @@ private let grid = [GridItem(.adaptive(minimum: 132), spacing: 16)]
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var selectedTab = ProcessInfo.processInfo.environment[
+        "SKELETON_SELECTED_TAB"
+    ] ?? "home"
 
     var body: some View {
         if ProcessInfo.processInfo.environment["SKELETON_E2E"] == "1" {
             E2EStatusView()
         } else {
-            TabView {
+            TabView(selection: $selectedTab) {
                 NavigationStack { HomeView() }
                     .tabItem { Label("Home", systemImage: "rectangle.grid.2x2") }
+                    .tag("home")
                 NavigationStack { LibraryView() }
                     .tabItem { Label("Library", systemImage: "bookmark") }
+                    .tag("library")
                 NavigationStack { AddonsView() }
                     .tabItem { Label("Add-ons", systemImage: "shippingbox") }
+                    .tag("addons")
                 NavigationStack { AccountView() }
                     .tabItem { Label("Account", systemImage: "person.crop.circle") }
+                    .tag("account")
+                NavigationStack { SettingsView() }
+                    .tabItem { Label("Settings", systemImage: "gearshape") }
+                    .tag("settings")
             }
             .tint(.orange)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -395,7 +405,9 @@ struct DetailsView: View {
                                     ResolvingPlayerScreen(
                                         candidate: StreamPlaybackCandidate(
                                             stream: stream,
-                                            providerName: presented.providerName
+                                            providerName: presented.providerName,
+                                            contentIdentifier: "\(item.type):\(item.id)",
+                                            contentTitle: item.name
                                         ),
                                         minimumVideoDuration: item.type == "movie"
                                             ? 20 * 60
@@ -696,13 +708,6 @@ struct AddonsView: View {
                 }
             }
 
-            Section("Stremio player") {
-                LabeledContent("Engine", value: "KSPlayer + FFmpeg")
-                LabeledContent("Decoder", value: "Hardware accelerated")
-                LabeledContent("Playback", value: "MP4 / MKV / HLS / torrent")
-                LabeledContent("Controls", value: "PiP / audio / subtitles")
-            }
-
             Section("Torrent streaming server") {
                 TextField("http://127.0.0.1:11470", text: $model.streamingServerInput)
                     .textInputAutocapitalization(.never)
@@ -727,6 +732,75 @@ struct AddonsView: View {
             }
         }
         .navigationTitle("Add-ons")
+    }
+}
+
+struct SettingsView: View {
+    @State private var selectedPlayer = StremioInternalPlayer.selected
+    @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
+    private var playerDebugOverlayEnabled = false
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(StremioInternalPlayer.allCases) { player in
+                    Button {
+                        selectedPlayer = player
+                        StremioInternalPlayer.select(player)
+                    } label: {
+                        HStack(spacing: 14) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(player.title)
+                                    .foregroundStyle(.primary)
+                                Text(player.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if selectedPlayer == player {
+                                Image(systemName: "checkmark")
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(.orange)
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("player-option-\(player.rawValue)")
+                    .accessibilityValue(selectedPlayer == player ? "Selected" : "Not selected")
+                }
+            } header: {
+                Text("Player")
+            } footer: {
+                Text("Your preferred player repairs and retries the stream first. The playback bridge uses another player only after that path is exhausted.")
+            }
+
+            Section("Preferred player") {
+                LabeledContent("Player", value: selectedPlayer.title)
+                LabeledContent("Controls", value: selectedPlayer.controlsSummary)
+                LabeledContent("Playback", value: "MP4 / MKV / HLS / torrent")
+            }
+
+            Section {
+                Toggle(isOn: $playerDebugOverlayEnabled) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Player Debug")
+                        Text("Show live playback diagnostics over the video")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .tint(.orange)
+                .accessibilityIdentifier("player-debug-toggle")
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                Text("Shows the active decoder, display FPS, dropped frames, stalls, and buffered time. Leave it off for normal viewing.")
+            }
+        }
+        .navigationTitle("Settings")
+        .onAppear { selectedPlayer = StremioInternalPlayer.selected }
     }
 }
 

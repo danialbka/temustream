@@ -66,6 +66,10 @@ private struct UIStateScreenshotRoot: View {
             screenTab(label: "Add-ons", systemImage: "shippingbox") {
                 NavigationStack { AddonsView() }
             }
+        case "settings-player":
+            screenTab(label: "Settings", systemImage: "gearshape") {
+                NavigationStack { SettingsView() }
+            }
         case "account-signed-out":
             screenTab(label: "Account", systemImage: "person.crop.circle") {
                 NavigationStack { AccountView() }
