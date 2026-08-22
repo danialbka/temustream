@@ -85,17 +85,20 @@ establish a remote FaceTime SharePlay session.
 ./scripts/build-device.sh
 ./scripts/sideloadly-cli.sh doctor
 ./scripts/sideloadly-cli.sh update
-./scripts/benchmark-player-footprint.sh
+./scripts/benchmark-player-footprint.sh /path/to/reference.ipa
 ./scripts/benchmark-catalog-paging.sh
 ./scripts/e2e-simulator.sh
 ./scripts/ui-state-screenshots.sh
 ./scripts/verify.sh
 ```
 
-`verify.sh` is the single local quality gate. The matching GitHub Actions
-workflow runs the same unit, build, footprint, and simulator E2E sequence and
-uploads the signed ad-hoc packages plus E2E and 13-state UI screenshots as
-workflow artifacts. See `UI_STATE_MATRIX.md` for the screenshot inventory.
+`verify.sh` is the single local quality gate. Set `SKELETON_REFERENCE_IPA` to
+include the comparative player-footprint report; the comparison is skipped
+when a reference build is unavailable, such as on a clean GitHub runner. The
+matching GitHub Actions workflow runs the same unit, build, and simulator E2E
+sequence and uploads the signed ad-hoc packages plus E2E and 13-state UI
+screenshots as workflow artifacts. See `UI_STATE_MATRIX.md` for the screenshot
+inventory.
 `build-device.sh` also emits `build/StremioSkeleton-device.ipa` with the
 required `Payload/StremioSkeleton.app` archive layout for sideloading.
 See `PLAYBACK_BENCHMARKS.md` for the strict real-stream and synthetic playback
