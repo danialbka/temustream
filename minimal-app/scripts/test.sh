@@ -9,4 +9,4 @@ mkdir -p "$MODULE_CACHE" "$SCRATCH"
 cargo test --manifest-path "$ROOT_DIR/rust/StremioPlaybackCore/Cargo.toml"
 SWIFTPM_MODULECACHE_OVERRIDE="$MODULE_CACHE" \
 CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" \
-swift test --scratch-path "$SCRATCH"
+swift test --package-path "$ROOT_DIR" --scratch-path "$SCRATCH"
