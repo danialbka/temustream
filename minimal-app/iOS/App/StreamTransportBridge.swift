@@ -134,7 +134,6 @@ actor StreamTransportBridge {
         }
 
         let port = try await startListenerIfNeeded()
-        pruneExpiredSources()
         let token = UUID().uuidString.lowercased()
         sources[token] = Source(
             contentLength: contentLength,
@@ -145,6 +144,10 @@ actor StreamTransportBridge {
             ),
             registeredAt: .now
         )
+        // Prune after insertion so the newly registered source is included in
+        // the cap. Pruning beforehand allowed a thirteenth 64-MiB store to
+        // remain resident until another stream happened to be registered.
+        pruneExpiredSources()
 
         guard let url = URL(
             string: "http://127.0.0.1:\(port)/stream/\(token)/media.ts"

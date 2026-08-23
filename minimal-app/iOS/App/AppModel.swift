@@ -42,6 +42,7 @@ struct SearchCatalogGroup: Identifiable, Equatable, Sendable {
     let id: String
     let providerName: String
     let catalogName: String
+    let manifestURL: URL
     let items: [MetaItem]
 }
 
@@ -68,7 +69,7 @@ private enum StreamProviderLoadError: Error, Sendable {
     case timedOut
 }
 
-enum PlaybackProgressUpdateKind: Sendable {
+enum PlaybackProgressUpdateKind: Sendable, Equatable {
     case checkpoint
     case final
 }
@@ -98,7 +99,8 @@ final class AppModel: ObservableObject {
     @Published var isRunningE2E = false
 
     private let primaryEndpoint: AddonEndpoint
-    private let libraryStore: LibraryStore
+    private let libraryDirectory: URL
+    private var libraryStore: LibraryStore
     private let playbackProgressStore: PlaybackProgressStore
     private let playbackCompletionStore: PlaybackCompletionStore
     private let accountClient: StremioAccountClient
@@ -176,14 +178,18 @@ final class AppModel: ObservableObject {
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first!
-        libraryStore = LibraryStore(fileURL: support.appendingPathComponent("library.json"))
+        let restoredSession = SessionStore().load()
+        libraryDirectory = support
+        libraryStore = LibraryStore(
+            fileURL: Self.libraryURL(in: support, for: restoredSession)
+        )
         playbackProgressStore = PlaybackProgressStore(
             fileURL: support.appendingPathComponent("playback-progress.json")
         )
         playbackCompletionStore = PlaybackCompletionStore(
             fileURL: support.appendingPathComponent("playback-completions.json")
         )
-        session = SessionStore().load()
+        session = restoredSession
         accountEmail = session?.user.email
     }
 
@@ -196,6 +202,9 @@ final class AppModel: ObservableObject {
         }
 
         do {
+            #if targetEnvironment(simulator)
+            try await activateEphemeralSimulatorAccountIfRequested()
+            #endif
             library = try await libraryStore.items()
             do {
                 for progress in try await playbackProgressStore.items() {
@@ -245,6 +254,25 @@ final class AppModel: ObservableObject {
             errorMessage = error.localizedDescription
         }
     }
+
+    #if targetEnvironment(simulator)
+    /// Allows real-account provider audits without writing the supplied password or
+    /// resulting session to disk. The session exists only for this simulator process.
+    private func activateEphemeralSimulatorAccountIfRequested() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let email = environment["SKELETON_SIMULATOR_ACCOUNT_EMAIL"],
+              let password = environment["SKELETON_SIMULATOR_ACCOUNT_PASSWORD"],
+              !email.isEmpty,
+              !password.isEmpty
+        else { return }
+
+        let signedIn = try await accountClient.login(email: email, password: password)
+        session = signedIn
+        accountEmail = signedIn.user.email ?? email
+        await selectLibraryStore(for: signedIn)
+        NSLog("SIMULATOR_ACCOUNT_AUDIT authenticated ephemeral=1")
+    }
+    #endif
 
     func selectCatalogSource(_ source: CatalogSource) async throws {
         guard source.id != selectedCatalogSourceID else { return }
@@ -367,6 +395,7 @@ final class AppModel: ObservableObject {
                                         id: "\(url.absoluteString)#\(descriptor.type)#\(descriptor.id)",
                                         providerName: manifest.name,
                                         catalogName: descriptor.name ?? descriptor.id,
+                                        manifestURL: url,
                                         items: uniqueItems
                                     )
                                 )
@@ -438,9 +467,16 @@ final class AppModel: ObservableObject {
         catalog = catalogPaging.items
     }
 
-    func details(for item: MetaItem) async -> MetaItem {
+    func details(
+        for item: MetaItem,
+        preferredManifestURL: URL? = nil
+    ) async -> MetaItem {
         let startedAt = ProcessInfo.processInfo.systemUptime
-        var endpoints = [activeCatalogEndpoint, primaryEndpoint].compactMap { $0 }
+        let preferredEndpoint = preferredManifestURL.flatMap {
+            try? AddonEndpoint(manifestURL: $0)
+        }
+        var endpoints = [preferredEndpoint, activeCatalogEndpoint, primaryEndpoint]
+            .compactMap { $0 }
         var seen = Set<URL>()
         endpoints = endpoints.filter { seen.insert($0.manifestURL).inserted }
         var resolvedDetail: MetaItem?
@@ -449,7 +485,7 @@ final class AppModel: ObservableObject {
                 .meta(type: item.type, id: item.id) {
                 resolvedDetail = resolvedDetail?.fillingTrailerMetadata(from: detail)
                     ?? detail
-                if item.type != "movie" || resolvedDetail?.preferredTrailerURL != nil {
+                if resolvedDetail?.preferredTrailerURL != nil {
                     break
                 }
             }
@@ -576,7 +612,13 @@ final class AppModel: ObservableObject {
     func toggleLibrary(_ item: MetaItem) async {
         do {
             let removing = isInLibrary(item)
-            library = try await libraryStore.toggle(item)
+            let activeStore = libraryStore
+            let activeAuthKey = session?.authKey
+            let updatedLibrary = try await activeStore.toggle(item)
+            guard activeStore === libraryStore,
+                  activeAuthKey == session?.authKey
+            else { return }
+            library = updatedLibrary
             if let session {
                 try await accountClient.pushLibrary(
                     authKey: session.authKey,
@@ -610,6 +652,26 @@ final class AppModel: ObservableObject {
 
     func episodeProgress(_ video: Video, in series: MetaItem) -> PlaybackProgress? {
         playbackProgress[episodeContentIdentifier(video, in: series)]
+    }
+
+    func seriesResumeSelection(for series: MetaItem) -> EpisodeResumeSelection? {
+        EpisodeResumeSelector.latest(
+            episodes: series.videos ?? [],
+            seriesID: series.id,
+            progressByIdentifier: currentPlaybackProgress
+        )
+    }
+
+    func seasonResumeSelection(
+        _ season: Int,
+        in series: MetaItem
+    ) -> EpisodeResumeSelection? {
+        EpisodeResumeSelector.latest(
+            episodes: series.videos ?? [],
+            seriesID: series.id,
+            season: season,
+            progressByIdentifier: currentPlaybackProgress
+        )
     }
 
     func isEpisodeCompleted(_ video: Video, in series: MetaItem) -> Bool {
@@ -748,26 +810,33 @@ final class AppModel: ObservableObject {
         try sessionStore.save(signedIn)
         session = signedIn
         accountEmail = signedIn.user.email ?? email
+        await selectLibraryStore(for: signedIn)
         try await syncAccount()
     }
 
-    func signOut() {
+    func signOut() async {
         sessionStore.clear()
         session = nil
         accountEmail = nil
         syncedAddonDescriptors = []
         accountSyncStatus = "Not signed in"
+        await selectLibraryStore(for: nil)
     }
 
     func syncAccount() async throws {
         guard let session else { return }
+        let activeStore = libraryStore
         accountSyncStatus = "Syncing…"
         do {
             async let remoteLibrary = accountClient.pullLibrary(authKey: session.authKey)
             async let remoteAddons = accountClient.pullAddons(authKey: session.authKey)
             let (libraryItems, addonDescriptors) = try await (remoteLibrary, remoteAddons)
 
-            library = try await libraryStore.applyRemote(libraryItems)
+            let updatedLibrary = try await activeStore.replaceWithRemoteSnapshot(libraryItems)
+            guard activeStore === libraryStore,
+                  self.session?.authKey == session.authKey
+            else { return }
+            library = updatedLibrary
             syncedAddonDescriptors = addonDescriptors
             for descriptor in addonDescriptors {
                 addonManifestCache[descriptor.transportUrl] = descriptor.manifest
@@ -783,10 +852,38 @@ final class AppModel: ObservableObject {
             persistAddonURLs()
             accountSyncStatus = "Synced now"
         } catch {
+            guard self.session?.authKey == session.authKey else { return }
             accountSyncStatus = "Sync failed"
             NSLog("[AccountSync] %@", error.localizedDescription)
             throw error
         }
+    }
+
+    private func selectLibraryStore(for session: StremioSession?) async {
+        libraryStore = LibraryStore(
+            fileURL: Self.libraryURL(in: libraryDirectory, for: session)
+        )
+        do {
+            library = try await libraryStore.items()
+        } catch {
+            library = []
+            NSLog("[Library] load_failed=%@", error.localizedDescription)
+        }
+    }
+
+    private static func libraryURL(
+        in directory: URL,
+        for session: StremioSession?
+    ) -> URL {
+        guard let session else {
+            return directory.appendingPathComponent("library.json")
+        }
+        let identity = session.user.id ?? session.user.email ?? "signed-in"
+        let encoded = Data(identity.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        return directory.appendingPathComponent("library-account-\(encoded).json")
     }
 
     func saveStreamingServer() async throws {
@@ -846,13 +943,10 @@ final class AppModel: ObservableObject {
             detectedMIMEType = nil
         }
 
-        let nativeExtensions = ["m3u8", "mp4", "m4v", "mov", "mp3", "m4a", "aac", "ts"]
-        let sourceExtension = sourceURL.pathExtension.lowercased()
-        let hasAmbiguousContainer = sourceExtension.isEmpty
-            || !nativeExtensions.contains(sourceExtension)
-        let requiresCompatibilityPlayback = stream.prefersCompatibilityPlayback
-            || (StremioInternalPlayer.selected == .avPlayer
-                && (hasAmbiguousContainer || detectedMIMEType == "video/mp2t"))
+        let selectedPlayer = StremioInternalPlayer.selected
+        let requiresCompatibilityPlayback = selectedPlayer == .bunny
+            ? false
+            : stream.prefersCompatibilityPlayback
         var compatibilityURL: URL?
         if requiresCompatibilityPlayback, let client {
             // Torrent resolution already proves that the configured server is

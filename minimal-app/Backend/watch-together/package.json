@@ -1,0 +1,19 @@
+{
+  "name": "temustream-watch-together",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "convex dev",
+    "deploy:dev": "convex dev --once",
+    "probe": "node scripts/probe.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "convex": "1.45.0",
+    "livekit-server-sdk": "2.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "typescript": "5.9.2"
+  }
+}

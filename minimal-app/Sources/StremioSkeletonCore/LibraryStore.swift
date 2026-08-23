@@ -60,6 +60,24 @@ public actor LibraryStore {
         return merged
     }
 
+    /// Replaces this store with a complete account snapshot returned by
+    /// `datastoreGet(all: true)`. Anonymous or other-account items must not be
+    /// merged into that snapshot.
+    @discardableResult
+    public func replaceWithRemoteSnapshot(
+        _ incoming: [RemoteLibraryItem]
+    ) throws -> [MetaItem] {
+        var seen = Set<String>()
+        let snapshot = incoming.compactMap { remote -> MetaItem? in
+            guard !remote.removed,
+                  seen.insert("\(remote.type)|\(remote.id)").inserted
+            else { return nil }
+            return remote.metaItem
+        }
+        try persist(snapshot)
+        return snapshot
+    }
+
     private func persist(_ items: [MetaItem]) throws {
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),

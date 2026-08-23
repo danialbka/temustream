@@ -1,4 +1,5 @@
 @preconcurrency import AVKit
+@preconcurrency import CoreMedia
 import SwiftUI
 import UIKit
 #if canImport(KSPlayer)
@@ -13,6 +14,8 @@ typealias PlaybackProgressHandler = @MainActor (
     _ duration: TimeInterval,
     _ updateKind: PlaybackProgressUpdateKind
 ) -> Void
+
+typealias PlaybackControlsVisibilityHandler = @MainActor (_ isVisible: Bool) -> Void
 
 /// Mutable playback progress that does not participate in SwiftUI observation.
 /// Checkpoint updates must never recreate the active decoder or its parent view.
@@ -36,37 +39,42 @@ private final class PlaybackProgressReference {
 }
 
 enum StremioInternalPlayer: String, CaseIterable, Identifiable, Sendable {
+    case bunny = "bunny"
     case performance = "performance"
     case ksPlayer = "ksplayer"
     case vlcKit = "vlckit"
-    case avPlayer = "avplayer"
+
+    private static let preferenceKey = "preferredInternalPlayer"
+    private static let legacyAVPlayerKey = "useAVPlayer"
+    private static let legacyVLCKey = "useVLCKit"
+    private static let removedAVPlayerRawValue = "avplayer"
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .performance: "Performance"
+        case .bunny: "Bunny"
         case .ksPlayer: "KSPlayer"
         case .vlcKit: "VLC"
-        case .avPlayer: "AVPlayer (deprecated)"
         }
     }
 
     var detail: String {
         switch self {
         case .performance: "Rust policy + hardware decode"
+        case .bunny: "Custom Apple + FFmpeg decoder"
         case .ksPlayer: "Official Stremio default"
-        case .vlcKit: "Official compatibility player"
-        case .avPlayer: "Apple formats only"
+        case .vlcKit: "Native fast path + VLC compatibility"
         }
     }
 
     var controlsSummary: String {
         switch self {
         case .performance: "Adaptive controls / PiP"
+        case .bunny: "Custom controls / PiP / tracks"
         case .ksPlayer: "PiP / audio / subtitles"
-        case .vlcKit: "Seek / pause / rotate"
-        case .avPlayer: "Native AV controls"
+        case .vlcKit: "Seek / tracks / mute / rotate"
         }
     }
 
@@ -77,20 +85,32 @@ enum StremioInternalPlayer: String, CaseIterable, Identifiable, Sendable {
             return player
         }
         let defaults = UserDefaults.standard
-        if let stored = defaults.string(forKey: "preferredInternalPlayer"),
-           let player = Self(rawValue: stored) {
-            return player
+        if let stored = defaults.string(forKey: preferenceKey) {
+            if stored == removedAVPlayerRawValue {
+                migrateRemovedAVPlayerPreference(defaults: defaults)
+                return .bunny
+            }
+            if let player = Self(rawValue: stored) { return player }
         }
-        if defaults.bool(forKey: "useAVPlayer") { return .avPlayer }
-        if defaults.bool(forKey: "useVLCKit") { return .vlcKit }
-        return .performance
+        if defaults.bool(forKey: legacyAVPlayerKey) {
+            migrateRemovedAVPlayerPreference(defaults: defaults)
+            return .bunny
+        }
+        if defaults.bool(forKey: legacyVLCKey) { return .vlcKit }
+        return .bunny
     }
 
     static func select(_ player: Self) {
         let defaults = UserDefaults.standard
-        defaults.set(player.rawValue, forKey: "preferredInternalPlayer")
-        defaults.set(player == .avPlayer, forKey: "useAVPlayer")
-        defaults.set(player == .vlcKit, forKey: "useVLCKit")
+        defaults.set(player.rawValue, forKey: preferenceKey)
+        defaults.set(false, forKey: legacyAVPlayerKey)
+        defaults.set(player == .vlcKit, forKey: legacyVLCKey)
+    }
+
+    private static func migrateRemovedAVPlayerPreference(defaults: UserDefaults) {
+        defaults.set(Self.bunny.rawValue, forKey: preferenceKey)
+        defaults.set(false, forKey: legacyAVPlayerKey)
+        defaults.set(false, forKey: legacyVLCKey)
     }
 }
 
@@ -100,6 +120,234 @@ enum PlayerDebugPreferences {
     static var environmentForcesOverlay: Bool {
         ProcessInfo.processInfo.environment["SKELETON_PLAYER_DEBUG_OVERLAY"] == "1"
     }
+}
+
+struct SubtitleVisualStyle {
+    static let horizontalPadding: CGFloat = 10
+    static let verticalPadding: CGFloat = 5
+
+    let value: SubtitleStyle
+
+    init(_ value: SubtitleStyle = SubtitleStylePreferences.current()) {
+        self.value = value
+    }
+
+    var uiFont: UIFont {
+        let base = UIFont.systemFont(
+            ofSize: CGFloat(value.size.pointSize),
+            weight: uiFontWeight
+        )
+        return UIFontMetrics(forTextStyle: .body).scaledFont(for: base)
+    }
+
+    var font: Font { Font(uiFont) }
+
+    var color: Color { Color(uiColor: uiColor) }
+
+    var uiColor: UIColor {
+        UIColor(
+            red: CGFloat(value.color.redComponent),
+            green: CGFloat(value.color.greenComponent),
+            blue: CGFloat(value.color.blueComponent),
+            alpha: 1
+        )
+    }
+
+    var backgroundColor: Color {
+        .black.opacity(value.backgroundOpacity)
+    }
+
+    var shadowColor: Color {
+        value.shadowEnabled ? .black.opacity(0.95) : .clear
+    }
+
+    var vlcOptions: [String] {
+        let opacity = Int((value.backgroundOpacity * 255).rounded())
+        let shadowOpacity = value.shadowEnabled ? 255 : 0
+        var options = [
+            "--sub-text-scale=\(value.size.relativeScalePercent)",
+            "--freetype-color=0x\(value.color.hexRGB)",
+            "--freetype-background-color=0x000000",
+            "--freetype-background-opacity=\(opacity)",
+            "--freetype-shadow-color=0x000000",
+            "--freetype-shadow-opacity=\(shadowOpacity)",
+        ]
+        if value.weight == .bold {
+            options.append("--freetype-bold")
+        }
+        return options
+    }
+
+    var avTextStyleRules: [AVTextStyleRule] {
+        let edgeStyle = (value.shadowEnabled
+            ? kCMTextMarkupCharacterEdgeStyle_DropShadow
+            : kCMTextMarkupCharacterEdgeStyle_None) as String
+        let foreground: [NSNumber] = [
+            1,
+            NSNumber(value: value.color.redComponent),
+            NSNumber(value: value.color.greenComponent),
+            NSNumber(value: value.color.blueComponent),
+        ]
+        let background: [NSNumber] = [
+            NSNumber(value: value.backgroundOpacity), 0, 0, 0,
+        ]
+        let attributes: [String: Any] = [
+            kCMTextMarkupAttribute_ForegroundColorARGB as String: foreground,
+            kCMTextMarkupAttribute_CharacterBackgroundColorARGB as String: background,
+            kCMTextMarkupAttribute_BoldStyle as String: NSNumber(
+                value: value.weight != .regular
+            ),
+            kCMTextMarkupAttribute_RelativeFontSize as String: NSNumber(
+                value: value.size.relativeScalePercent
+            ),
+            kCMTextMarkupAttribute_CharacterEdgeStyle as String: edgeStyle,
+        ]
+        guard let rule = AVTextStyleRule(textMarkupAttributes: attributes) else {
+            return []
+        }
+        return [rule]
+    }
+
+    private var uiFontWeight: UIFont.Weight {
+        switch value.weight {
+        case .regular: .regular
+        case .semibold: .semibold
+        case .bold: .bold
+        }
+    }
+}
+
+@propertyWrapper
+struct SubtitleStyleStorage: DynamicProperty {
+    @AppStorage(SubtitleStylePreferences.sizeKey)
+    private var sizeRawValue = SubtitleStyle.default.size.rawValue
+    @AppStorage(SubtitleStylePreferences.colorKey)
+    private var colorRawValue = SubtitleStyle.default.color.rawValue
+    @AppStorage(SubtitleStylePreferences.weightKey)
+    private var weightRawValue = SubtitleStyle.default.weight.rawValue
+    @AppStorage(SubtitleStylePreferences.backgroundOpacityKey)
+    private var backgroundOpacity = SubtitleStyle.default.backgroundOpacity
+    @AppStorage(SubtitleStylePreferences.shadowEnabledKey)
+    private var shadowEnabled = SubtitleStyle.default.shadowEnabled
+
+    var wrappedValue: SubtitleVisualStyle {
+        SubtitleVisualStyle(
+            SubtitleStyle(
+                sizeRawValue: sizeRawValue,
+                colorRawValue: colorRawValue,
+                weightRawValue: weightRawValue,
+                backgroundOpacity: backgroundOpacity,
+                shadowEnabled: shadowEnabled
+            )
+        )
+    }
+}
+
+struct StyledSubtitleText: View {
+    let text: AttributedString
+    let style: SubtitleVisualStyle
+
+    init(_ text: String, style: SubtitleVisualStyle) {
+        self.text = AttributedString(text)
+        self.style = style
+    }
+
+    init(_ text: AttributedString, style: SubtitleVisualStyle) {
+        self.text = text
+        self.style = style
+    }
+
+    var body: some View {
+        Text(text)
+            .font(style.font)
+            .multilineTextAlignment(.center)
+            .foregroundStyle(style.color)
+            .padding(.horizontal, SubtitleVisualStyle.horizontalPadding)
+            .padding(.vertical, SubtitleVisualStyle.verticalPadding)
+            .background(
+                style.backgroundColor,
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .shadow(color: style.shadowColor, radius: 2, x: 0, y: 1)
+    }
+}
+
+@MainActor
+func applySubtitleStyle(
+    to item: AVPlayerItem,
+    style: SubtitleStyle = SubtitleStylePreferences.current()
+) {
+    item.textStyleRules = SubtitleVisualStyle(style).avTextStyleRules
+}
+
+@MainActor
+func applyPlaybackLanguagePreferences(to item: AVPlayerItem) async {
+    let asset = item.asset
+    let audioGroup = try? await asset.loadMediaSelectionGroup(for: .audible)
+    let subtitleGroup = try? await asset.loadMediaSelectionGroup(for: .legible)
+
+    if let audioGroup,
+       let preferredAudio = preferredAVMediaOption(
+            in: audioGroup,
+            language: PlaybackLanguagePreferences.preferredAudioLanguage()
+       ) {
+        item.select(preferredAudio, in: audioGroup)
+    }
+
+    if let subtitleGroup {
+        if PlaybackLanguagePreferences.subtitlesEnabled(),
+           let preferredSubtitle = preferredAVMediaOption(
+                in: subtitleGroup,
+                language: PlaybackLanguagePreferences.preferredSubtitleLanguage()
+           ) {
+            item.select(preferredSubtitle, in: subtitleGroup)
+        } else {
+            item.select(nil, in: subtitleGroup)
+        }
+    }
+}
+
+@MainActor
+func rememberPlaybackLanguageSelections(from item: AVPlayerItem) async {
+    let asset = item.asset
+    let audioGroup = try? await asset.loadMediaSelectionGroup(for: .audible)
+    let subtitleGroup = try? await asset.loadMediaSelectionGroup(for: .legible)
+
+    if let audioGroup,
+       let selected = item.currentMediaSelection.selectedMediaOption(in: audioGroup) {
+        PlaybackLanguagePreferences.rememberAudioSelection(
+            languageTag: selected.extendedLanguageTag ?? selected.locale?.identifier,
+            displayName: selected.displayName
+        )
+    }
+
+    if let subtitleGroup,
+       let selected = item.currentMediaSelection.selectedMediaOption(in: subtitleGroup) {
+        PlaybackLanguagePreferences.rememberSubtitleSelection(
+            languageTag: selected.extendedLanguageTag ?? selected.locale?.identifier,
+            displayName: selected.displayName
+        )
+    } else if subtitleGroup != nil {
+        PlaybackLanguagePreferences.rememberSubtitlesDisabled()
+    }
+}
+
+@MainActor
+private func preferredAVMediaOption(
+    in group: AVMediaSelectionGroup,
+    language: String
+) -> AVMediaSelectionOption? {
+    let options = group.options.map {
+        PlaybackLanguageOption(
+            languageTag: $0.extendedLanguageTag ?? $0.locale?.identifier,
+            displayName: $0.displayName
+        )
+    }
+    guard let index = PlaybackLanguageMatcher.bestMatchIndex(
+        in: options,
+        preferredLanguage: language
+    ) else { return nil }
+    return group.options[index]
 }
 
 private struct PlayerDebugSnapshot: Equatable {
@@ -415,6 +663,75 @@ private struct PlayerOrientationButton: View {
     }
 }
 
+/// Shared fit/fill interaction used by every internal player. A two-finger
+/// pinch commits to one of two stable presentation modes instead of leaving
+/// the video at an arbitrary zoom level. The small pill confirms the change
+/// without covering the center controls or debug overlay.
+private struct PlaybackViewportInteractionModifier: ViewModifier {
+    @Binding var mode: PlaybackViewportMode
+    @State private var feedbackVisible = false
+    @State private var feedbackRevision = 0
+
+    func body(content: Content) -> some View {
+        content
+            .simultaneousGesture(
+                MagnificationGesture()
+                    .onEnded { magnification in
+                        let updated = mode.applying(
+                            magnification: Double(magnification)
+                        )
+                        if updated != mode {
+                            mode = updated
+                        }
+                    }
+            )
+            .overlay(alignment: .topTrailing) {
+                if feedbackVisible {
+                    Label(
+                        mode == .fill ? "Fill screen" : "Fit video",
+                        systemImage: mode == .fill
+                            ? "arrow.up.left.and.arrow.down.right"
+                            : "arrow.down.right.and.arrow.up.left"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.78), in: Capsule())
+                    .padding(.top, 64)
+                    .padding(.trailing, 14)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("player-content-mode-status")
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+                }
+            }
+            .onChange(of: mode) { _ in
+                showFeedback()
+            }
+            .animation(.easeOut(duration: 0.16), value: feedbackVisible)
+    }
+
+    @MainActor
+    private func showFeedback() {
+        feedbackRevision += 1
+        let revision = feedbackRevision
+        feedbackVisible = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1_100))
+            guard revision == feedbackRevision else { return }
+            feedbackVisible = false
+        }
+    }
+}
+
+private extension View {
+    func playbackViewportInteraction(
+        mode: Binding<PlaybackViewportMode>
+    ) -> some View {
+        modifier(PlaybackViewportInteractionModifier(mode: mode))
+    }
+}
+
 #if canImport(KSPlayer)
 /// KSPlayer path matching the official Stremio default. Direct containers use
 /// its FFmpeg engine; HLS stays inside KSPlayer but uses KSAVPlayer because its
@@ -425,6 +742,8 @@ struct KSPlayerScreen: View {
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
+    private let watchChannel: WatchPlaybackControlChannel?
+    private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
     @State private var attemptRevision = 0
     @State private var failureMessage: String?
     @State private var automaticRetryCount = 0
@@ -436,12 +755,16 @@ struct KSPlayerScreen: View {
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
+        watchChannel: WatchPlaybackControlChannel? = nil,
+        onControlsVisibilityChanged: PlaybackControlsVisibilityHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)? = nil
     ) {
         self.plan = plan
         self.title = title
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.watchChannel = watchChannel
+        self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
         _retryPosition = State(initialValue: max(initialPosition, 0))
     }
@@ -480,7 +803,7 @@ struct KSPlayerScreen: View {
     }
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .bottomTrailing) {
             if failureMessage == nil {
                 KSPlaybackAttempt(
                     url: candidate.url,
@@ -490,6 +813,8 @@ struct KSPlayerScreen: View {
                     initialPosition: retryPosition,
                     performancePolicy: playbackPolicy,
                     onProgress: onProgress,
+                    watchChannel: watchChannel,
+                    onControlsVisibilityChanged: onControlsVisibilityChanged,
                     onFailure: advanceOrFail
                 )
                 .id("\(candidate.engine.rawValue)-\(attemptRevision)")
@@ -564,6 +889,8 @@ private struct KSPlaybackAttempt: View {
     let initialPosition: TimeInterval
     let performancePolicy: PlaybackPerformancePolicy
     let onProgress: PlaybackProgressHandler?
+    let watchChannel: WatchPlaybackControlChannel?
+    let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
     let onFailure: @MainActor (Error) -> Void
     @StateObject private var coordinator = KSVideoPlayer.Coordinator()
     @State private var startupStartedAt = ProcessInfo.processInfo.systemUptime
@@ -577,9 +904,13 @@ private struct KSPlaybackAttempt: View {
     @State private var didRestorePosition = false
     @State private var didAttemptStallRecovery = false
     @State private var didRunParityVerification = false
+    @State private var didApplyAudioPreference = false
+    @State private var didApplySubtitlePreference = false
+    @State private var viewportMode = PlaybackViewportMode.fit
     @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
     private var debugOverlaySetting = false
     @State private var debugSnapshot = PlayerDebugSnapshot.waiting(engine: "KSPlayer")
+    @State private var watchRegistrationID: UUID?
 
     private let options: KSOptions
 
@@ -591,6 +922,8 @@ private struct KSPlaybackAttempt: View {
         initialPosition: TimeInterval,
         performancePolicy: PlaybackPerformancePolicy,
         onProgress: PlaybackProgressHandler?,
+        watchChannel: WatchPlaybackControlChannel?,
+        onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?,
         onFailure: @escaping @MainActor (Error) -> Void
     ) {
         self.url = url
@@ -600,6 +933,8 @@ private struct KSPlaybackAttempt: View {
         self.initialPosition = initialPosition
         self.performancePolicy = performancePolicy
         self.onProgress = onProgress
+        self.watchChannel = watchChannel
+        self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onFailure = onFailure
 
         self.options = StremioPlayerConfiguration.makeOptions(
@@ -712,6 +1047,7 @@ private struct KSPlaybackAttempt: View {
                     state: playerState,
                     title: title,
                     wantsPlayback: $wantsPlayback,
+                    viewportMode: $viewportMode,
                     onSeekFailure: { position in
                         reportFailure(PlayerAttemptError.seekRecoveryTimedOut(engine, position))
                     },
@@ -726,6 +1062,7 @@ private struct KSPlaybackAttempt: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
+        .playbackViewportInteraction(mode: $viewportMode)
         .animation(.easeOut(duration: 0.18), value: coordinator.isMaskShow)
         .onAppear {
             startupStartedAt = ProcessInfo.processInfo.systemUptime
@@ -745,15 +1082,27 @@ private struct KSPlaybackAttempt: View {
             }
             didAttemptStallRecovery = false
             didRunParityVerification = false
+            didApplyAudioPreference = false
+            didApplySubtitlePreference = false
             debugSnapshot = .waiting(engine: debugEngineName)
+            viewportMode = .fit
             coordinator.isScaleAspectFill = false
             coordinator.isMaskShow = true
+            onControlsVisibilityChanged?(true)
+            registerWatchChannel()
             if startsLandscapeForVerification {
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(350))
                     PlayerPresentation.toggleOrientation()
                 }
             }
+        }
+        .onChange(of: viewportMode) { mode in
+            coordinator.isScaleAspectFill = mode == .fill
+            NSLog("PLAYER_VIEWPORT engine=%@ mode=%@", debugEngineName, mode.rawValue)
+        }
+        .onChange(of: coordinator.isMaskShow) { isVisible in
+            onControlsVisibilityChanged?(isVisible)
         }
         .task(id: "\(engine.rawValue)|\(url.absoluteString)") {
             var lastPlaybackTime = 0.0
@@ -774,6 +1123,7 @@ private struct KSPlaybackAttempt: View {
                 let now = ProcessInfo.processInfo.systemUptime
                 let hasVideo = !player.tracks(mediaType: .video).isEmpty
                 let hasAudio = !player.tracks(mediaType: .audio).isEmpty
+                applyPreferredTracksIfAvailable(to: player)
                 let currentTime = hasVideo
                     ? ((player as? KSMEPlayer)?.displayedVideoTime
                         ?? player.currentPlaybackTime)
@@ -875,7 +1225,17 @@ private struct KSPlaybackAttempt: View {
                             ensurePlayback(layer)
                         }
                     }
-                    if didProduceMedia, now - lastProgressAt >= 5 {
+                    let postStartStallTimeout: TimeInterval = player.loadState == .loading
+                        ? 30
+                        : 15
+                    if didProduceMedia,
+                       now - lastProgressAt >= postStartStallTimeout {
+                        NSLog(
+                            "PLAYER_REPAIR stalled_after_start engine=%@ seconds=%.1f load=%@",
+                            engine.rawValue,
+                            now - lastProgressAt,
+                            String(describing: player.loadState)
+                        )
                         reportFailure(
                             PlayerAttemptError.playbackDidNotAdvance(engine, currentTime)
                         )
@@ -904,6 +1264,7 @@ private struct KSPlaybackAttempt: View {
             startPictureInPictureIfPossible()
         }
         .onDisappear {
+            if let watchRegistrationID { watchChannel?.unregister(watchRegistrationID) }
             if let player = coordinator.playerLayer?.player {
                 let currentTime = (player as? KSMEPlayer)?.displayedVideoTime
                     ?? player.currentPlaybackTime
@@ -912,6 +1273,46 @@ private struct KSPlaybackAttempt: View {
             coordinator.playerLayer?.stop()
             coordinator.resetPlayer()
         }
+    }
+
+    @MainActor
+    private func registerWatchChannel() {
+        guard watchRegistrationID == nil, let watchChannel else { return }
+        watchRegistrationID = watchChannel.register(
+            sample: {
+                guard let player = coordinator.playerLayer?.player else { return nil }
+                let position = (player as? KSMEPlayer)?.displayedVideoTime ?? player.currentPlaybackTime
+                guard position.isFinite else { return nil }
+                return WatchLocalPlaybackSample(
+                    position: position,
+                    isPlaying: player.isPlaying,
+                    rate: player.playbackRate > 0 ? Double(player.playbackRate) : 1
+                )
+            },
+            apply: { adjustment, baselineRate in
+                guard let layer = coordinator.playerLayer else { return }
+                if let target = adjustment.targetPosition {
+                    await withCheckedContinuation { continuation in
+                        PlayerSeekRecovery.seek(
+                            layer: layer,
+                            to: target,
+                            resume: adjustment.shouldPlay ?? wantsPlayback
+                        ) { _ in continuation.resume() }
+                    }
+                }
+                let requestedRate = adjustment.temporaryRate ?? adjustment.playbackRate ?? baselineRate
+                if adjustment.temporaryRate != nil || adjustment.playbackRate != nil {
+                    layer.player.playbackRate = Float(requestedRate)
+                }
+                if adjustment.shouldPlay == false {
+                    wantsPlayback = false
+                    PlayerSeekRecovery.pause(layer: layer)
+                } else if adjustment.shouldPlay == true {
+                    wantsPlayback = true
+                    PlayerSeekRecovery.resume(layer: layer)
+                }
+            }
+        )
     }
 
     private func startPictureInPictureIfPossible() {
@@ -924,6 +1325,58 @@ private struct KSPlaybackAttempt: View {
 
     private var debugOverlayEnabled: Bool {
         debugOverlaySetting || PlayerDebugPreferences.environmentForcesOverlay
+    }
+
+    @MainActor
+    private func applyPreferredTracksIfAvailable(
+        to player: any MediaPlayerProtocol
+    ) {
+        if !didApplyAudioPreference {
+            let tracks = player.tracks(mediaType: .audio)
+            let options = tracks.map {
+                PlaybackLanguageOption(
+                    languageTag: $0.languageCode,
+                    displayName: $0.name
+                )
+            }
+            if let index = PlaybackLanguageMatcher.bestMatchIndex(
+                in: options,
+                preferredLanguage: PlaybackLanguagePreferences.preferredAudioLanguage()
+            ) {
+                player.select(track: tracks[index])
+                didApplyAudioPreference = true
+            } else if !tracks.isEmpty {
+                // Keep the container's default audio when the preferred
+                // language is unavailable, but do not keep rescanning it.
+                didApplyAudioPreference = true
+            }
+        }
+
+        guard !didApplySubtitlePreference else { return }
+        let subtitleModel = coordinator.subtitleModel
+        guard PlaybackLanguagePreferences.subtitlesEnabled() else {
+            subtitleModel.selectedSubtitleInfo = nil
+            didApplySubtitlePreference = true
+            return
+        }
+        let infos = subtitleModel.subtitleInfos
+        let options = infos.map { info in
+            let track = info as? any MediaPlayerTrack
+            return PlaybackLanguageOption(
+                languageTag: track?.languageCode,
+                displayName: info.name
+            )
+        }
+        guard let index = PlaybackLanguageMatcher.bestMatchIndex(
+            in: options,
+            preferredLanguage: PlaybackLanguagePreferences.preferredSubtitleLanguage()
+        ) else { return }
+        let selected = infos[index]
+        subtitleModel.selectedSubtitleInfo = selected
+        if let track = selected as? any MediaPlayerTrack {
+            player.select(track: track)
+        }
+        didApplySubtitlePreference = true
     }
 
     private var debugEngineName: String {
@@ -1171,8 +1624,13 @@ private struct PlayerControlsOverlay: View {
     let state: KSPlayerState
     let title: String
     @Binding var wantsPlayback: Bool
+    @Binding var viewportMode: PlaybackViewportMode
     let onSeekFailure: (TimeInterval) -> Void
     let close: () -> Void
+    @State private var isAudioPickerPresented = false
+    @State private var audioTrackOptions: [PlayerAudioTrackOption] = []
+    @State private var isSubtitlePickerPresented = false
+    @State private var subtitleTrackOptions: [PlayerSubtitleTrackOption] = []
 
     var body: some View {
         ZStack {
@@ -1193,6 +1651,15 @@ private struct PlayerControlsOverlay: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+
+            if isAudioPickerPresented {
+                audioTrackPicker
+                    .zIndex(2)
+            }
+            if isSubtitlePickerPresented {
+                subtitleTrackPicker
+                    .zIndex(2)
+            }
         }
         .tint(.white)
         .buttonStyle(PlayerOverlayButtonStyle())
@@ -1206,9 +1673,19 @@ private struct PlayerControlsOverlay: View {
             Spacer(minLength: 8)
 
             if hasAudioTracks {
-                PlayerAudioMenu(coordinator: coordinator)
+                overlayButton(
+                    "waveform",
+                    label: "Audio tracks",
+                    identifier: "player-audio-tracks",
+                    action: toggleAudioPicker
+                )
             }
-            PlayerSubtitleMenu(coordinator: coordinator)
+            overlayButton(
+                "captions.bubble",
+                label: "Subtitles",
+                identifier: "player-subtitles",
+                action: toggleSubtitlePicker
+            )
             overlayButton(
                 coordinator.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
                 label: coordinator.isMuted ? "Unmute" : "Mute",
@@ -1230,6 +1707,295 @@ private struct PlayerControlsOverlay: View {
                 }
             )
         }
+    }
+
+    private var audioTrackPicker: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Label("Audio", systemImage: "waveform")
+                        .font(.headline)
+                    Spacer(minLength: 8)
+                    Button {
+                        dismissAudioPicker()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.bold())
+                            .frame(width: 30, height: 30)
+                            .background(.white.opacity(0.10), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close audio tracks")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+
+                Divider().overlay(.white.opacity(0.12))
+
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(audioTrackOptions) { option in
+                            Button {
+                                selectAudioTrack(option)
+                            } label: {
+                                HStack(spacing: 11) {
+                                    Image(
+                                        systemName: option.isSelected
+                                            ? "checkmark"
+                                            : "waveform"
+                                    )
+                                    .frame(width: 18)
+                                    Text(option.name)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                    Spacer(minLength: 8)
+                                }
+                                .font(.subheadline)
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("player-audio-track-\(option.id)")
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .frame(
+                width: min(340, max(proxy.size.width - 32, 220)),
+                height: min(max(proxy.size.height - 96, 150), 390)
+            )
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(.white.opacity(0.14), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.45), radius: 18, y: 8)
+            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            .accessibilityIdentifier("player-audio-track-picker")
+        }
+    }
+
+    private var subtitleTrackPicker: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Label("Subtitles", systemImage: "captions.bubble")
+                        .font(.headline)
+                    Spacer(minLength: 8)
+                    Button {
+                        dismissSubtitlePicker()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.bold())
+                            .frame(width: 30, height: 30)
+                            .background(.white.opacity(0.10), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close subtitles")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+
+                Divider().overlay(.white.opacity(0.12))
+
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        subtitleTrackRow(
+                            id: "off",
+                            name: "Off",
+                            isSelected: coordinator.subtitleModel.selectedSubtitleInfo == nil
+                        ) {
+                            coordinator.subtitleModel.selectedSubtitleInfo = nil
+                            PlaybackLanguagePreferences.rememberSubtitlesDisabled()
+                            dismissSubtitlePicker()
+                        }
+
+                        ForEach(subtitleTrackOptions) { option in
+                            subtitleTrackRow(
+                                id: option.id,
+                                name: option.name,
+                                isSelected: option.isSelected
+                            ) {
+                                selectSubtitleTrack(option)
+                            }
+                        }
+
+                        if subtitleTrackOptions.isEmpty {
+                            Text("No embedded subtitles")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(14)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .frame(
+                width: min(340, max(proxy.size.width - 32, 220)),
+                height: min(max(proxy.size.height - 96, 150), 390)
+            )
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(.white.opacity(0.14), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.45), radius: 18, y: 8)
+            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            .accessibilityIdentifier("player-subtitle-track-picker")
+        }
+    }
+
+    private func subtitleTrackRow(
+        id: String,
+        name: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: isSelected ? "checkmark" : "captions.bubble")
+                    .frame(width: 18)
+                Text(name)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 8)
+            }
+            .font(.subheadline)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("player-subtitle-track-\(id)")
+    }
+
+    @MainActor
+    private func toggleAudioPicker() {
+        if isAudioPickerPresented {
+            dismissAudioPicker()
+            return
+        }
+        guard let player = coordinator.playerLayer?.player else { return }
+        audioTrackOptions = player.tracks(mediaType: .audio).map {
+            PlayerAudioTrackOption(
+                id: $0.trackID,
+                name: $0.name,
+                languageCode: $0.languageCode,
+                isSelected: $0.isEnabled
+            )
+        }
+        guard !audioTrackOptions.isEmpty else { return }
+        isSubtitlePickerPresented = false
+        isAudioPickerPresented = true
+        // Freeze the controls while the picker is open. The playback clock
+        // continues updating, but it can no longer tear down the selection UI.
+        coordinator.mask(show: true, autoHide: false)
+        NSLog("PLAYER_TRACK_PICKER opened tracks=%ld", audioTrackOptions.count)
+    }
+
+    @MainActor
+    private func selectAudioTrack(_ option: PlayerAudioTrackOption) {
+        guard let layer = coordinator.playerLayer else { return }
+        let player = layer.player
+        guard let track = player.tracks(mediaType: .audio).first(where: {
+                  $0.trackID == option.id
+              }) else { return }
+        let shouldResume = wantsPlayback
+        let selectionTime = player.currentPlaybackTime
+        PlayerSeekRecovery.pause(layer: layer)
+        player.select(track: track)
+        PlayerSeekRecovery.seek(
+            layer: layer,
+            to: selectionTime,
+            resume: shouldResume
+        ) { finished in
+            NSLog(
+                "PLAYER_TRACK_PICKER audio_realign finished=%@ position=%.2f",
+                finished ? "yes" : "no",
+                selectionTime
+            )
+        }
+        PlaybackLanguagePreferences.rememberAudioSelection(
+            languageTag: option.languageCode,
+            displayName: option.name
+        )
+        audioTrackOptions = audioTrackOptions.map {
+            PlayerAudioTrackOption(
+                id: $0.id,
+                name: $0.name,
+                languageCode: $0.languageCode,
+                isSelected: $0.id == option.id
+            )
+        }
+        NSLog("PLAYER_TRACK_PICKER selected id=%d name=%@", option.id, option.name)
+        dismissAudioPicker()
+    }
+
+    @MainActor
+    private func dismissAudioPicker() {
+        isAudioPickerPresented = false
+        coordinator.mask(show: true)
+    }
+
+    @MainActor
+    private func toggleSubtitlePicker() {
+        if isSubtitlePickerPresented {
+            dismissSubtitlePicker()
+            return
+        }
+        let model = coordinator.subtitleModel
+        subtitleTrackOptions = model.subtitleInfos.map { info in
+            let track = info as? any MediaPlayerTrack
+            return PlayerSubtitleTrackOption(
+                id: info.subtitleID,
+                name: info.name,
+                languageCode: track?.languageCode,
+                isSelected: model.selectedSubtitleInfo?.subtitleID == info.subtitleID
+            )
+        }
+        isAudioPickerPresented = false
+        isSubtitlePickerPresented = true
+        coordinator.mask(show: true, autoHide: false)
+        NSLog("PLAYER_TRACK_PICKER opened kind=subtitles tracks=%ld", subtitleTrackOptions.count)
+    }
+
+    @MainActor
+    private func selectSubtitleTrack(_ option: PlayerSubtitleTrackOption) {
+        let model = coordinator.subtitleModel
+        guard let info = model.subtitleInfos.first(where: {
+            $0.subtitleID == option.id
+        }) else { return }
+        model.selectedSubtitleInfo = info
+        if let track = info as? any MediaPlayerTrack {
+            coordinator.playerLayer?.player.select(track: track)
+        }
+        PlaybackLanguagePreferences.rememberSubtitleSelection(
+            languageTag: option.languageCode,
+            displayName: option.name
+        )
+        subtitleTrackOptions = subtitleTrackOptions.map {
+            PlayerSubtitleTrackOption(
+                id: $0.id,
+                name: $0.name,
+                languageCode: $0.languageCode,
+                isSelected: $0.id == option.id
+            )
+        }
+        NSLog("PLAYER_TRACK_PICKER selected kind=subtitles id=%@", option.id)
+        dismissSubtitlePicker()
+    }
+
+    @MainActor
+    private func dismissSubtitlePicker() {
+        isSubtitlePickerPresented = false
+        coordinator.mask(show: true)
     }
 
     private var centerControls: some View {
@@ -1274,10 +2040,10 @@ private struct PlayerControlsOverlay: View {
                 }
                 Spacer(minLength: 8)
                 overlayButton(
-                    coordinator.isScaleAspectFill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                    label: coordinator.isScaleAspectFill ? "Fit video" : "Fill screen",
+                    viewportMode == .fill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                    label: viewportMode == .fill ? "Fit video" : "Fill screen",
                     identifier: "player-content-mode",
-                    action: { coordinator.isScaleAspectFill.toggle() }
+                    action: { viewportMode = viewportMode.toggled }
                 )
             }
             PlayerTimeline(
@@ -1348,6 +2114,20 @@ private struct PlayerControlsOverlay: View {
         .buttonStyle(.plain)
         .accessibilityLabel(label)
     }
+}
+
+private struct PlayerAudioTrackOption: Identifiable, Equatable {
+    let id: Int32
+    let name: String
+    let languageCode: String?
+    let isSelected: Bool
+}
+
+private struct PlayerSubtitleTrackOption: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let languageCode: String?
+    let isSelected: Bool
 }
 
 private struct PlayerTimeline: View {
@@ -1452,70 +2232,9 @@ private struct PlayerTimeline: View {
     }
 }
 
-private struct PlayerAudioMenu: View {
-    @ObservedObject var coordinator: KSVideoPlayer.Coordinator
-
-    private var tracks: [MediaPlayerTrack] {
-        coordinator.playerLayer?.player.tracks(mediaType: .audio) ?? []
-    }
-
-    var body: some View {
-        Menu {
-            ForEach(tracks, id: \.trackID) { track in
-                Button {
-                    coordinator.playerLayer?.player.select(track: track)
-                } label: {
-                    Label(track.name, systemImage: track.isEnabled ? "checkmark" : "waveform")
-                }
-            }
-        } label: {
-            Image(systemName: "waveform")
-                .font(.system(size: 17, weight: .semibold))
-                .frame(width: 42, height: 42)
-                .background(.black.opacity(0.68), in: Circle())
-        }
-        .accessibilityLabel("Audio tracks")
-        .accessibilityIdentifier("player-audio-tracks")
-    }
-}
-
-private struct PlayerSubtitleMenu: View {
-    @ObservedObject var coordinator: KSVideoPlayer.Coordinator
-    @ObservedObject private var model: SubtitleModel
-
-    init(coordinator: KSVideoPlayer.Coordinator) {
-        self.coordinator = coordinator
-        model = coordinator.subtitleModel
-    }
-
-    var body: some View {
-        Menu {
-            Button("Off") {
-                model.selectedSubtitleInfo = nil
-            }
-            ForEach(model.subtitleInfos, id: \.subtitleID) { info in
-                Button {
-                    model.selectedSubtitleInfo = info
-                    if let track = info as? MediaPlayerTrack {
-                        coordinator.playerLayer?.player.select(track: track)
-                    }
-                } label: {
-                    Label(info.name, systemImage: info.isEnabled ? "checkmark" : "captions.bubble")
-                }
-            }
-        } label: {
-            Image(systemName: "captions.bubble")
-                .font(.system(size: 17, weight: .semibold))
-                .frame(width: 42, height: 42)
-                .background(.black.opacity(0.68), in: Circle())
-        }
-        .accessibilityLabel("Subtitles")
-        .accessibilityIdentifier("player-subtitles")
-    }
-}
-
 private struct PlayerSubtitleOverlay: View {
     @ObservedObject var model: SubtitleModel
+    @SubtitleStyleStorage private var subtitleStyle
     @State private var anchor = SubtitlePlacement.defaultPosition
     @GestureState private var dragTranslation = CGSize.zero
 
@@ -1534,16 +2253,10 @@ private struct PlayerSubtitleOverlay: View {
             VStack(spacing: 6) {
                 ForEach(model.parts) { part in
                     if let text = part.text {
-                        Text(AttributedString(text))
-                            .font(.body.weight(.semibold))
-                            .multilineTextAlignment(.center)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(
-                                .black.opacity(0.7),
-                                in: RoundedRectangle(cornerRadius: 6)
-                            )
+                        StyledSubtitleText(
+                            AttributedString(text),
+                            style: subtitleStyle
+                        )
                     } else if let image = part.image {
                         Image(uiImage: image)
                             .resizable()
@@ -1611,10 +2324,9 @@ private struct PlayerSubtitleOverlay: View {
     }
 
     private func estimatedContentSize(maximumWidth: CGFloat) -> CGSize {
-        let font = UIFont.systemFont(
-            ofSize: UIFont.preferredFont(forTextStyle: .body).pointSize,
-            weight: .semibold
-        )
+        let font = subtitleStyle.uiFont
+        let horizontalPadding = SubtitleVisualStyle.horizontalPadding * 2
+        let verticalPadding = SubtitleVisualStyle.verticalPadding * 2
         var width: CGFloat = 0
         var height: CGFloat = 0
         var partCount = 0
@@ -1624,7 +2336,7 @@ private struct PlayerSubtitleOverlay: View {
             if let text = part.text {
                 let bounds = (text.string as NSString).boundingRect(
                     with: CGSize(
-                        width: max(maximumWidth - 20, 1),
+                        width: max(maximumWidth - horizontalPadding, 1),
                         height: .greatestFiniteMagnitude
                     ),
                     options: [.usesLineFragmentOrigin, .usesFontLeading],
@@ -1632,8 +2344,8 @@ private struct PlayerSubtitleOverlay: View {
                     context: nil
                 )
                 size = CGSize(
-                    width: min(ceil(bounds.width) + 20, maximumWidth),
-                    height: ceil(bounds.height) + 10
+                    width: min(ceil(bounds.width) + horizontalPadding, maximumWidth),
+                    height: ceil(bounds.height) + verticalPadding
                 )
             } else if let image = part.image, image.size.height > 0 {
                 let scale = min(
@@ -1664,6 +2376,37 @@ private struct PlayerSubtitleOverlay: View {
 
 struct NativePlayerView: UIViewControllerRepresentable {
     let player: AVPlayer
+    @Binding var viewportMode: PlaybackViewportMode
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var viewportMode: Binding<PlaybackViewportMode>
+
+        init(viewportMode: Binding<PlaybackViewportMode>) {
+            self.viewportMode = viewportMode
+        }
+
+        @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+            guard recognizer.state == .ended else { return }
+            let current = viewportMode.wrappedValue
+            let updated = current.applying(
+                magnification: Double(recognizer.scale)
+            )
+            if updated != current {
+                viewportMode.wrappedValue = updated
+            }
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(viewportMode: $viewportMode)
+    }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
@@ -1671,13 +2414,27 @@ struct NativePlayerView: UIViewControllerRepresentable {
         controller.allowsPictureInPicturePlayback = true
         controller.canStartPictureInPictureAutomaticallyFromInline = true
         controller.entersFullScreenWhenPlaybackBegins = false
+        controller.videoGravity = viewportMode == .fill
+            ? .resizeAspectFill
+            : .resizeAspect
+        let pinch = UIPinchGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePinch(_:))
+        )
+        pinch.cancelsTouchesInView = false
+        pinch.delegate = context.coordinator
+        controller.view.addGestureRecognizer(pinch)
         return controller
     }
 
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        context.coordinator.viewportMode = $viewportMode
         if controller.player !== player {
             controller.player = player
         }
+        controller.videoGravity = viewportMode == .fill
+            ? .resizeAspectFill
+            : .resizeAspect
     }
 }
 
@@ -1788,9 +2545,13 @@ private enum AVPlayerSourceProbe {
 struct AVPlayerScreen: View {
     let title: String
     private let plan: PlaybackPlan
+    private let debugEngineName: String
+    private let benchmarkEngineName: String
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
+    private let watchChannel: WatchPlaybackControlChannel?
+    private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
     @State private var player = AVPlayer()
     @State private var candidateIndex = 0
     @State private var attemptRevision = 0
@@ -1799,9 +2560,11 @@ struct AVPlayerScreen: View {
     @State private var nominalFPS: Double?
     @State private var progressReference: PlaybackProgressReference
     @State private var didRestorePosition = false
+    @State private var viewportMode = PlaybackViewportMode.fit
     @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
     private var debugOverlaySetting = false
-    @State private var debugSnapshot = PlayerDebugSnapshot.waiting(engine: "AVPlayer")
+    @State private var debugSnapshot: PlayerDebugSnapshot
+    @State private var watchRegistrationID: UUID?
 
     init(
         plan: PlaybackPlan,
@@ -1809,15 +2572,26 @@ struct AVPlayerScreen: View {
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
+        watchChannel: WatchPlaybackControlChannel? = nil,
+        onControlsVisibilityChanged: PlaybackControlsVisibilityHandler? = nil,
+        debugEngineName: String = "AVPlayer",
+        benchmarkEngineName: String = "avplayer",
         onExhausted: (@MainActor (Error) -> Void)? = nil
     ) {
         self.plan = plan
         self.title = title
+        self.debugEngineName = debugEngineName
+        self.benchmarkEngineName = benchmarkEngineName
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.watchChannel = watchChannel
+        self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
         _progressReference = State(
             initialValue: PlaybackProgressReference(position: initialPosition)
+        )
+        _debugSnapshot = State(
+            initialValue: PlayerDebugSnapshot.waiting(engine: debugEngineName)
         )
     }
 
@@ -1844,7 +2618,7 @@ struct AVPlayerScreen: View {
 
     var body: some View {
         ZStack {
-            NativePlayerView(player: player)
+            NativePlayerView(player: player, viewportMode: $viewportMode)
                 .background(.black)
 
             if let failureMessage {
@@ -1865,9 +2639,23 @@ struct AVPlayerScreen: View {
         }
         .background(.black)
         .ignoresSafeArea()
+        .playbackViewportInteraction(mode: $viewportMode)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    viewportMode = viewportMode.toggled
+                } label: {
+                    Image(
+                        systemName: viewportMode == .fill
+                            ? "arrow.down.right.and.arrow.up.left"
+                            : "arrow.up.left.and.arrow.down.right"
+                    )
+                }
+                .accessibilityLabel(viewportMode == .fill ? "Fit video" : "Fill screen")
+                .accessibilityIdentifier("player-content-mode")
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 PlayerOrientationButton()
             }
@@ -1878,6 +2666,10 @@ struct AVPlayerScreen: View {
         }
         .task(id: "progress-\(candidateIndex)-\(attemptRevision)") {
             await monitorPlaybackProgress()
+        }
+        .onAppear {
+            onControlsVisibilityChanged?(true)
+            registerWatchChannel()
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime)
@@ -1897,12 +2689,54 @@ struct AVPlayerScreen: View {
                 onProgress?(duration, duration, .final)
             }
         }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: AVPlayerItem.mediaSelectionDidChangeNotification
+            )
+        ) { notification in
+            guard let item = notification.object as? AVPlayerItem,
+                  item === player.currentItem
+            else { return }
+            Task { @MainActor in
+                await rememberPlaybackLanguageSelections(from: item)
+            }
+        }
         .onDisappear {
+            if let watchRegistrationID { watchChannel?.unregister(watchRegistrationID) }
             reportCurrentProgress(updateKind: .final)
             player.pause()
             player.replaceCurrentItem(with: nil)
             PlayerPresentation.endAudioSession()
         }
+    }
+
+    @MainActor
+    private func registerWatchChannel() {
+        guard watchRegistrationID == nil, let watchChannel else { return }
+        watchRegistrationID = watchChannel.register(
+            sample: {
+                guard let item = player.currentItem else { return nil }
+                let position = item.currentTime().seconds
+                guard position.isFinite else { return nil }
+                return WatchLocalPlaybackSample(
+                    position: position,
+                    isPlaying: player.timeControlStatus == .playing || player.rate > 0,
+                    rate: player.rate > 0 ? Double(player.rate) : 1
+                )
+            },
+            apply: { adjustment, baselineRate in
+                if let target = adjustment.targetPosition { await seek(to: target) }
+                let requestedRate = adjustment.temporaryRate ?? adjustment.playbackRate ?? baselineRate
+                if adjustment.shouldPlay == false {
+                    player.pause()
+                } else if adjustment.shouldPlay == true {
+                    player.playImmediately(atRate: Float(requestedRate))
+                } else if adjustment.temporaryRate != nil || adjustment.playbackRate != nil,
+                          player.timeControlStatus == .playing || player.rate > 0 {
+                    player.rate = Float(requestedRate)
+                }
+            }
+        )
     }
 
     @ViewBuilder
@@ -1975,10 +2809,15 @@ struct AVPlayerScreen: View {
             nominalFPS = nil
         }
         let item = AVPlayerItem(asset: preparedSource.asset)
+        applySubtitleStyle(to: item)
         let videoOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         item.add(videoOutput)
         player.replaceCurrentItem(with: item)
         player.play()
+        Task { @MainActor [weak item] in
+            guard let item else { return }
+            await applyPlaybackLanguagePreferences(to: item)
+        }
 
         for _ in 0..<160 {
             guard !Task.isCancelled, player.currentItem === item else { return }
@@ -2038,8 +2877,9 @@ struct AVPlayerScreen: View {
                 statusMessage = ""
                 let elapsed = (ProcessInfo.processInfo.systemUptime - startupStartedAt) * 1_000
                 NSLog(
-                    "PLAYER_BENCHMARK playing_ms=%.1f engine=avplayer title=%@",
+                    "PLAYER_BENCHMARK playing_ms=%.1f engine=%@ title=%@",
                     elapsed,
+                    benchmarkEngineName,
                     title
                 )
                 await runVerificationIfRequested(item: item, videoOutput: videoOutput)
@@ -2054,12 +2894,12 @@ struct AVPlayerScreen: View {
 
     @MainActor
     private func monitorPlayerDebug() async {
-        debugSnapshot = .waiting(engine: "AVPlayer")
+        debugSnapshot = .waiting(engine: debugEngineName)
         guard debugOverlayEnabled else { return }
         while !Task.isCancelled {
             let sample = PlayerDebugMetrics.avPlayer(
                 player,
-                engine: "AVPlayer",
+                engine: debugEngineName,
                 nominalFPS: nominalFPS
             )
             debugSnapshot = sample
@@ -2126,7 +2966,10 @@ struct AVPlayerScreen: View {
             try? await Task.sleep(for: .milliseconds(100))
         }
         guard renderedFrame, item.currentTime().seconds >= startedAt + 0.35 else {
-            NSLog("PLAYER_PARITY FAIL player=avplayer step=autoplay-or-visible-frame")
+            NSLog(
+                "PLAYER_PARITY FAIL player=%@ step=autoplay-or-visible-frame",
+                benchmarkEngineName
+            )
             return
         }
 
@@ -2140,7 +2983,7 @@ struct AVPlayerScreen: View {
             ) { _ in continuation.resume() }
         }
         guard abs(item.currentTime().seconds - seekTarget) <= 2 else {
-            NSLog("PLAYER_PARITY FAIL player=avplayer step=seek")
+            NSLog("PLAYER_PARITY FAIL player=%@ step=seek", benchmarkEngineName)
             return
         }
 
@@ -2159,7 +3002,7 @@ struct AVPlayerScreen: View {
             pausedAt = sampledTime
         }
         guard player.rate == 0, stablePauseSamples >= 3 else {
-            NSLog("PLAYER_PARITY FAIL player=avplayer step=pause")
+            NSLog("PLAYER_PARITY FAIL player=%@ step=pause", benchmarkEngineName)
             return
         }
 
@@ -2169,12 +3012,13 @@ struct AVPlayerScreen: View {
             try? await Task.sleep(for: .milliseconds(100))
         }
         guard player.rate > 0, item.currentTime().seconds >= pausedAt + 0.35 else {
-            NSLog("PLAYER_PARITY FAIL player=avplayer step=resume")
+            NSLog("PLAYER_PARITY FAIL player=%@ step=resume", benchmarkEngineName)
             return
         }
 
         NSLog(
-            "PLAYER_PARITY PASS player=avplayer autoplay=yes frame=yes seek=yes pause=yes resume=yes duration=%.1f",
+            "PLAYER_PARITY PASS player=%@ autoplay=yes frame=yes seek=yes pause=yes resume=yes duration=%.1f",
+            benchmarkEngineName,
             duration
         )
         #endif
@@ -2184,6 +3028,19 @@ struct AVPlayerScreen: View {
     private func advanceOrFail() {
         reportCurrentProgress()
         player.pause()
+        player.replaceCurrentItem(with: nil)
+        let nextCandidateIndex = candidateIndex + 1
+        if candidates.indices.contains(nextCandidateIndex) {
+            NSLog(
+                "PLAYER_REPAIR avplayer=advance-candidate from=%ld to=%ld",
+                candidateIndex,
+                nextCandidateIndex
+            )
+            failureMessage = nil
+            statusMessage = "Trying the original stream…"
+            candidateIndex = nextCandidateIndex
+            return
+        }
         failPlayback()
     }
 
@@ -2251,9 +3108,16 @@ private final class VLCPlaybackModel: NSObject, ObservableObject, VLCMediaPlayer
     @Published var isReady = false
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
+    @Published var videoSize = CGSize.zero
+    @Published var isMuted = false
     @Published var failureMessage: String?
     @Published private(set) var hasRenderedFrame = false
+    @Published private(set) var didReachEnd = false
     @Published private(set) var debugSnapshot = PlayerDebugSnapshot.waiting(engine: "VLC")
+    @Published private(set) var audioTrackOptions: [VLCTrackOption] = []
+    @Published private(set) var subtitleTrackOptions: [VLCTrackOption] = []
+    @Published private(set) var selectedAudioTrackID = -1
+    @Published private(set) var selectedSubtitleTrackID = -1
     private var debugStallCount = 0
     private var wasBuffering = false
     private var lastStatisticsAt: TimeInterval?
@@ -2263,18 +3127,52 @@ private final class VLCPlaybackModel: NSObject, ObservableObject, VLCMediaPlayer
     private var activeBoundedRenderer = false
     private var boundedDisplayedFrames: UInt64 = 0
     private var boundedDroppedFrames: UInt64 = 0
+    private var statePollingTask: Task<Void, Never>?
+    private var preferredTrackSelectionTask: Task<Void, Never>?
+    private let adaptiveMaxWidth: Int
+    private let adaptiveMaxHeight: Int
 
     init(policy: PlaybackPerformancePolicy) {
         performancePolicy = policy
         let environment = ProcessInfo.processInfo.environment
+        #if targetEnvironment(simulator)
+        let defaultAdaptiveMaxWidth = 1_280
+        let defaultAdaptiveMaxHeight = 720
+        #else
+        let defaultAdaptiveMaxWidth = 1_920
+        let defaultAdaptiveMaxHeight = 1_080
+        #endif
+        adaptiveMaxWidth = max(
+            Int(environment["SKELETON_VLC_ADAPTIVE_MAX_WIDTH"] ?? "")
+                ?? defaultAdaptiveMaxWidth,
+            320
+        )
+        adaptiveMaxHeight = max(
+            Int(environment["SKELETON_VLC_ADAPTIVE_MAX_HEIGHT"] ?? "")
+                ?? defaultAdaptiveMaxHeight,
+            180
+        )
         var options = [
             "--network-caching=\(policy.networkCacheMilliseconds)",
             "--http-reconnect",
             "--avcodec-hw=\(environment["SKELETON_VLC_AVCODEC_HW"] ?? "any")",
+            "--adaptive-logic=rate",
+            "--adaptive-maxwidth=\(adaptiveMaxWidth)",
+            "--adaptive-maxheight=\(adaptiveMaxHeight)",
+            "--preferred-resolution=\(adaptiveMaxHeight)",
+            "--drop-late-frames",
+            "--skip-frames",
             "--no-color",
         ]
+        options.append(contentsOf: SubtitleVisualStyle().vlcOptions)
         if policy.prefersVideoToolboxChain {
-            options.append("--codec=videotoolbox,avcodec,none")
+            // VideoToolbox already has the highest iOS video-decoder priority.
+            // Restricting the global codec chain to video decoders also blocks
+            // VLC's subtitle decoders and can force an expensive avcodec
+            // fallback. Keep hardware-only VideoToolbox enabled while leaving
+            // audio and subtitle module selection unconstrained.
+            options.append("--videotoolbox")
+            options.append("--videotoolbox-hw-decoder-only")
         }
         #if targetEnvironment(simulator)
         if let codecChain = environment["SKELETON_VLC_CODEC_CHAIN"], !codecChain.isEmpty {
@@ -2307,9 +3205,23 @@ private final class VLCPlaybackModel: NSObject, ObservableObject, VLCMediaPlayer
     ) async throws {
         stop(clearFailure: true)
         activeBoundedRenderer = usesBoundedRenderer
+        let mediaNetworkCacheMilliseconds = networkCacheMilliseconds(for: url)
         let media = VLCMedia(url: url)
+        media.addOption(":network-caching=\(mediaNetworkCacheMilliseconds)")
+        media.addOption(":http-reconnect")
+        media.addOption(":adaptive-logic=rate")
+        media.addOption(":adaptive-maxwidth=\(adaptiveMaxWidth)")
+        media.addOption(":adaptive-maxheight=\(adaptiveMaxHeight)")
+        media.addOption(":preferred-resolution=\(adaptiveMaxHeight)")
         player.media = media
+        NSLog(
+            "VLC_MEDIA network_cache_ms=%ld provider_proxy=%@ transport_bridge=%@",
+            mediaNetworkCacheMilliseconds,
+            isProviderProxy(url) ? "yes" : "no",
+            isLocalTransportBridge(url) ? "yes" : "no"
+        )
         player.play()
+        beginStatePolling()
 
         // Remote HEVC sources measured between roughly ten and thirteen
         // seconds to expose their first decoded frame in MobileVLCKit. Keep a
@@ -2380,6 +3292,124 @@ private final class VLCPlaybackModel: NSObject, ObservableObject, VLCMediaPlayer
         updatePublishedState()
     }
 
+    func toggleMute() {
+        guard let audio = player.audio else { return }
+        audio.isMuted = !audio.isMuted
+        isMuted = audio.isMuted
+    }
+
+    func beginPreferredLanguageTrackSelection() {
+        preferredTrackSelectionTask?.cancel()
+        preferredTrackSelectionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for _ in 0..<40 {
+                refreshTrackOptions()
+                applyPreferredLanguageTracks()
+                if !audioTrackOptions.isEmpty, !subtitleTrackOptions.isEmpty {
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+            }
+            let selectedAudioName = audioTrackOptions.first {
+                $0.id == selectedAudioTrackID
+            }?.name ?? "Off"
+            let selectedSubtitleName = subtitleTrackOptions.first {
+                $0.id == selectedSubtitleTrackID
+            }?.name ?? "Off"
+            NSLog(
+                "VLC_TRACKS audio=%ld subtitles=%ld selected_audio=%ld selected_audio_name=%@ selected_subtitle=%ld selected_subtitle_name=%@",
+                audioTrackOptions.count,
+                subtitleTrackOptions.count,
+                selectedAudioTrackID,
+                selectedAudioName,
+                selectedSubtitleTrackID,
+                selectedSubtitleName
+            )
+        }
+    }
+
+    func selectAudioTrack(_ track: VLCTrackOption) {
+        player.currentAudioTrackIndex = Int32(track.id)
+        PlaybackLanguagePreferences.rememberAudioSelection(
+            languageTag: nil,
+            displayName: track.name
+        )
+        refreshTrackOptions()
+    }
+
+    /// LibVLC can briefly mix queued packets from the previous audio stream
+    /// when a remote track is changed in-place. Pause and realign the media
+    /// clock before resuming so the new decoder starts on the current timeline.
+    func switchAudioTrackAndRealign(_ track: VLCTrackOption) async {
+        let position = currentTime
+        let shouldResume = player.isPlaying
+        if shouldResume { pause() }
+        selectAudioTrack(track)
+        let realigned: Bool
+        if position <= 0 {
+            realigned = true
+        } else {
+            realigned = await seekAndWait(to: position)
+        }
+        if shouldResume { play() }
+        NSLog(
+            "VLC_TRACK_SWITCH audio=%ld realigned=%@ resumed=%@",
+            track.id,
+            realigned ? "yes" : "no",
+            shouldResume ? "yes" : "no"
+        )
+    }
+
+    func selectSubtitleTrack(_ track: VLCTrackOption?) {
+        guard let track else {
+            player.currentVideoSubTitleIndex = -1
+            PlaybackLanguagePreferences.rememberSubtitlesDisabled()
+            refreshTrackOptions()
+            return
+        }
+        player.currentVideoSubTitleIndex = Int32(track.id)
+        PlaybackLanguagePreferences.rememberSubtitleSelection(
+            languageTag: nil,
+            displayName: track.name
+        )
+        refreshTrackOptions()
+    }
+
+    private func applyPreferredLanguageTracks() {
+        let audioTracks = audioTrackOptions
+        let audioOptions = audioTracks.map {
+            PlaybackLanguageOption(languageTag: nil, displayName: $0.name)
+        }
+        if let index = PlaybackLanguageMatcher.bestMatchIndex(
+            in: audioOptions,
+            preferredLanguage: PlaybackLanguagePreferences.preferredAudioLanguage()
+        ) {
+            player.currentAudioTrackIndex = Int32(audioTracks[index].id)
+        }
+
+        let subtitleTracks = subtitleTrackOptions
+        guard PlaybackLanguagePreferences.subtitlesEnabled() else {
+            player.currentVideoSubTitleIndex = -1
+            selectedSubtitleTrackID = -1
+            return
+        }
+        let subtitleOptions = subtitleTracks.map {
+            PlaybackLanguageOption(languageTag: nil, displayName: $0.name)
+        }
+        if let index = PlaybackLanguageMatcher.bestMatchIndex(
+            in: subtitleOptions,
+            preferredLanguage: PlaybackLanguagePreferences.preferredSubtitleLanguage()
+        ) {
+            player.currentVideoSubTitleIndex = Int32(subtitleTracks[index].id)
+            selectedSubtitleTrackID = subtitleTracks[index].id
+        } else {
+            player.currentVideoSubTitleIndex = -1
+            selectedSubtitleTrackID = -1
+        }
+        selectedAudioTrackID = Int(player.currentAudioTrackIndex)
+    }
+
     func seek(to seconds: TimeInterval) {
         guard player.isSeekable else { return }
         player.time = VLCTime(int: Int32(max(seconds, 0) * 1_000))
@@ -2406,19 +3436,30 @@ private final class VLCPlaybackModel: NSObject, ObservableObject, VLCMediaPlayer
     }
 
     func stop(clearFailure: Bool = false) {
+        statePollingTask?.cancel()
+        statePollingTask = nil
+        preferredTrackSelectionTask?.cancel()
+        preferredTrackSelectionTask = nil
         player.stop()
         player.media = nil
         isPlaying = false
         isReady = false
         currentTime = 0
         duration = 0
+        videoSize = .zero
+        isMuted = false
         hasRenderedFrame = false
+        didReachEnd = false
         debugSnapshot = .waiting(engine: "VLC")
         debugStallCount = 0
         wasBuffering = false
         lastStatisticsAt = nil
         lastDisplayedPictures = 0
         measuredDisplayFPS = nil
+        audioTrackOptions = []
+        subtitleTrackOptions = []
+        selectedAudioTrackID = -1
+        selectedSubtitleTrackID = -1
         if clearFailure { failureMessage = nil }
     }
 
@@ -2429,18 +3470,111 @@ private final class VLCPlaybackModel: NSObject, ObservableObject, VLCMediaPlayer
             if player.state == .error {
                 failureMessage = VLCPlaybackError.playerError.localizedDescription
             }
+            if player.state == .ended, !didReachEnd {
+                didReachEnd = true
+            }
         }
     }
 
-    nonisolated func mediaPlayerTimeChanged(_ aNotification: Notification) {
-        Task { @MainActor [weak self] in self?.updatePublishedState() }
+    private func updatePublishedState() {
+        let playing = player.isPlaying
+        if isPlaying != playing { isPlaying = playing }
+        let nextCurrentTime = max(TimeInterval(player.time.intValue) / 1_000, 0)
+        if abs(currentTime - nextCurrentTime) >= 0.025 {
+            currentTime = nextCurrentTime
+        }
+        let reportedDuration = max(
+            TimeInterval(player.media?.length.intValue ?? 0) / 1_000,
+            0
+        )
+        let inferredDuration: TimeInterval
+        let playbackPosition = Double(player.position)
+        if reportedDuration <= 0,
+           nextCurrentTime > 0,
+           playbackPosition.isFinite,
+           playbackPosition > 0.000_1 {
+            inferredDuration = nextCurrentTime / playbackPosition
+        } else {
+            inferredDuration = 0
+        }
+        let nextDuration = reportedDuration > 0
+            ? reportedDuration
+            : (duration > 0 ? duration : inferredDuration)
+        if abs(duration - nextDuration) >= 0.10 {
+            duration = nextDuration
+        }
+        let currentVideoSize = player.videoSize
+        if videoSize != currentVideoSize {
+            videoSize = currentVideoSize
+        }
+        let currentMutedState = player.audio?.isMuted ?? false
+        if isMuted != currentMutedState {
+            isMuted = currentMutedState
+        }
+        refreshTrackOptions()
+        updateDebugStallState()
     }
 
-    private func updatePublishedState() {
-        isPlaying = player.isPlaying
-        currentTime = max(TimeInterval(player.time.intValue) / 1_000, 0)
-        duration = max(TimeInterval(player.media?.length.intValue ?? 0) / 1_000, 0)
-        updateDebugStallState()
+    private func beginStatePolling() {
+        statePollingTask?.cancel()
+        statePollingTask = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled {
+                updatePublishedState()
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
+
+    private func networkCacheMilliseconds(for url: URL) -> Int {
+        if let override = Int(
+            ProcessInfo.processInfo.environment["SKELETON_VLC_NETWORK_CACHE_MS"] ?? ""
+        ) {
+            return min(max(override, 300), 10_000)
+        }
+        if isLocalTransportBridge(url) {
+            return max(performancePolicy.networkCacheMilliseconds, 900)
+        }
+        if isProviderProxy(url) {
+            return max(performancePolicy.networkCacheMilliseconds, 1_200)
+        }
+        return performancePolicy.networkCacheMilliseconds
+    }
+
+    private func isProviderProxy(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        return ["debrid", "torbox", "tb-cdn", "real-debrid", "alldebrid"]
+            .contains(where: host.contains)
+    }
+
+    private func isLocalTransportBridge(_ url: URL) -> Bool {
+        url.host == "127.0.0.1"
+            && url.path.hasPrefix("/stream/")
+            && url.path.hasSuffix("/media.ts")
+    }
+
+    private func refreshTrackOptions() {
+        let nextAudioTracks = trackOptions(
+            names: player.audioTrackNames,
+            indexes: player.audioTrackIndexes
+        )
+        if audioTrackOptions != nextAudioTracks {
+            audioTrackOptions = nextAudioTracks
+        }
+        let nextSubtitleTracks = trackOptions(
+            names: player.videoSubTitlesNames,
+            indexes: player.videoSubTitlesIndexes
+        )
+        if subtitleTrackOptions != nextSubtitleTracks {
+            subtitleTrackOptions = nextSubtitleTracks
+        }
+        let nextAudioTrackID = Int(player.currentAudioTrackIndex)
+        if selectedAudioTrackID != nextAudioTrackID {
+            selectedAudioTrackID = nextAudioTrackID
+        }
+        let nextSubtitleTrackID = Int(player.currentVideoSubTitleIndex)
+        if selectedSubtitleTrackID != nextSubtitleTrackID {
+            selectedSubtitleTrackID = nextSubtitleTrackID
+        }
     }
 
     private func updateDebugStallState() {
@@ -2553,23 +3687,53 @@ private enum VLCPlaybackError: LocalizedError {
     }
 }
 
+private struct VLCTrackOption: Identifiable, Equatable {
+    let id: Int
+    let name: String
+}
+
+private enum VLCTrackPickerKind: Equatable {
+    case audio
+    case subtitles
+
+    var title: String {
+        switch self {
+        case .audio: "Audio"
+        case .subtitles: "Subtitles"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .audio: "waveform"
+        case .subtitles: "captions.bubble"
+        }
+    }
+}
+
+private func trackOptions(names: [Any], indexes: [Any]) -> [VLCTrackOption] {
+    let labels = names.compactMap { $0 as? String }
+    let identifiers = indexes.compactMap { value -> Int? in
+        if let number = value as? NSNumber { return number.intValue }
+        return value as? Int
+    }
+    return zip(labels, identifiers).compactMap { name, identifier in
+        guard identifier >= 0 else { return nil }
+        return VLCTrackOption(id: identifier, name: name)
+    }
+}
+
 private struct VLCPlayerScreen: View {
-    @Environment(\.dismiss) private var dismiss
     let title: String
     private let plan: PlaybackPlan
+    private let initialPosition: TimeInterval
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
-    private let playbackPolicy: PlaybackPerformancePolicy
-    @StateObject private var model: VLCPlaybackModel
-    @State private var controlsVisible = true
-    @State private var attemptRevision = 0
-    @State private var isScrubbing = false
-    @State private var scrubPosition: TimeInterval = 0
-    @State private var resumeAfterScrub = false
-    @State private var progressReference: PlaybackProgressReference
-    @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
-    private var debugOverlaySetting = false
+    private let watchChannel: WatchPlaybackControlChannel?
+    private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
+    private let backend: VLCPlaybackBackend
+    @State private var didFallBackToCompatibility = false
 
     init(
         plan: PlaybackPlan,
@@ -2577,6 +3741,113 @@ private struct VLCPlayerScreen: View {
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval,
         onProgress: PlaybackProgressHandler? = nil,
+        watchChannel: WatchPlaybackControlChannel? = nil,
+        onControlsVisibilityChanged: PlaybackControlsVisibilityHandler? = nil,
+        onExhausted: (@MainActor (Error) -> Void)?
+    ) {
+        self.plan = plan
+        self.title = title
+        self.initialPosition = max(initialPosition, 0)
+        self.minimumVideoDuration = minimumVideoDuration
+        self.onProgress = onProgress
+        self.watchChannel = watchChannel
+        self.onControlsVisibilityChanged = onControlsVisibilityChanged
+        self.onExhausted = onExhausted
+        #if targetEnvironment(simulator)
+        let forcesCompatibility = ProcessInfo.processInfo.environment[
+            "SKELETON_VLC_FORCE_COMPATIBILITY"
+        ] == "1"
+        #else
+        let forcesCompatibility = false
+        #endif
+        backend = forcesCompatibility
+            ? .compatibility
+            : VLCPlaybackRouting.backend(
+                for: plan.primaryURL,
+                detectedMIMEType: plan.detectedMIMEType
+            )
+    }
+
+    @ViewBuilder
+    var body: some View {
+        switch activeBackend {
+        case .nativeHardware:
+            AVPlayerScreen(
+                plan: plan,
+                title: title,
+                initialPosition: initialPosition,
+                minimumVideoDuration: minimumVideoDuration,
+                onProgress: onProgress,
+                watchChannel: watchChannel,
+                onControlsVisibilityChanged: onControlsVisibilityChanged,
+                debugEngineName: "VLC Native",
+                benchmarkEngineName: "vlc-native",
+                onExhausted: { error in
+                    NSLog(
+                        "VLC_ACCELERATOR fallback=mobilevlckit error=%@",
+                        error.localizedDescription
+                    )
+                    didFallBackToCompatibility = true
+                }
+            )
+            .onAppear {
+                NSLog("VLC_ACCELERATOR backend=avfoundation hardware=system")
+            }
+        case .compatibility:
+            VLCCompatibilityPlayerScreen(
+                plan: plan,
+                title: title,
+                initialPosition: initialPosition,
+                minimumVideoDuration: minimumVideoDuration,
+                onProgress: onProgress,
+                watchChannel: watchChannel,
+                onControlsVisibilityChanged: onControlsVisibilityChanged,
+                onExhausted: onExhausted
+            )
+            .onAppear {
+                NSLog("VLC_ACCELERATOR backend=mobilevlckit hardware=videotoolbox")
+            }
+        }
+    }
+
+    private var activeBackend: VLCPlaybackBackend {
+        didFallBackToCompatibility ? .compatibility : backend
+    }
+}
+
+private struct VLCCompatibilityPlayerScreen: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    private let plan: PlaybackPlan
+    private let minimumVideoDuration: TimeInterval
+    private let onProgress: PlaybackProgressHandler?
+    private let onExhausted: (@MainActor (Error) -> Void)?
+    private let watchChannel: WatchPlaybackControlChannel?
+    private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
+    private let playbackPolicy: PlaybackPerformancePolicy
+    @StateObject private var model: VLCPlaybackModel
+    @State private var controlsVisible = true
+    @State private var attemptRevision = 0
+    @State private var isScrubbing = false
+    @State private var scrubPosition: TimeInterval = 0
+    @State private var resumeAfterScrub = false
+    @State private var viewportMode = PlaybackViewportMode.fit
+    @State private var progressReference: PlaybackProgressReference
+    @State private var trackPicker: VLCTrackPickerKind?
+    @State private var trackPickerOptions: [VLCTrackOption] = []
+    @State private var trackPickerSelectedID: Int?
+    @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
+    private var debugOverlaySetting = false
+    @State private var watchRegistrationID: UUID?
+
+    init(
+        plan: PlaybackPlan,
+        title: String,
+        initialPosition: TimeInterval = 0,
+        minimumVideoDuration: TimeInterval,
+        onProgress: PlaybackProgressHandler? = nil,
+        watchChannel: WatchPlaybackControlChannel? = nil,
+        onControlsVisibilityChanged: PlaybackControlsVisibilityHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)?
     ) {
         let policy = PlaybackPerformanceCore.policy(
@@ -2588,6 +3859,8 @@ private struct VLCPlayerScreen: View {
         self.title = title
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.watchChannel = watchChannel
+        self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
         playbackPolicy = policy
         _model = StateObject(wrappedValue: VLCPlaybackModel(policy: policy))
@@ -2598,8 +3871,14 @@ private struct VLCPlayerScreen: View {
 
     var body: some View {
         ZStack {
-            VLCRenderView(player: model.player)
-                .ignoresSafeArea()
+            GeometryReader { proxy in
+                VLCRenderView(player: model.player)
+                    .scaleEffect(vlcRenderScale(in: proxy.size))
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .animation(.easeInOut(duration: 0.2), value: viewportMode)
+            }
+            .clipped()
+            .ignoresSafeArea()
 
             Color.clear
                 .contentShape(Rectangle())
@@ -2630,11 +3909,22 @@ private struct VLCPlayerScreen: View {
             if debugOverlayEnabled {
                 PlayerDebugOverlay(snapshot: model.debugSnapshot)
             }
+
+            if let trackPicker {
+                vlcTrackPicker(trackPicker)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .zIndex(4)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
+        .playbackViewportInteraction(mode: $viewportMode)
         .animation(.easeOut(duration: 0.18), value: controlsVisible)
+        .animation(.easeOut(duration: 0.18), value: trackPicker)
+        .onChange(of: viewportMode) { mode in
+            NSLog("PLAYER_VIEWPORT engine=VLC mode=%@", mode.rawValue)
+        }
         .task(id: attemptRevision) { await startPlayback() }
         .task(id: "debug-\(debugOverlayEnabled)-\(attemptRevision)") {
             await logPlayerDebug()
@@ -2642,7 +3932,19 @@ private struct VLCPlayerScreen: View {
         .task(id: "progress-\(attemptRevision)") {
             await monitorPlaybackProgress()
         }
+        .onAppear {
+            onControlsVisibilityChanged?(controlsVisible)
+            registerWatchChannel()
+        }
+        .onChange(of: controlsVisible) { isVisible in
+            onControlsVisibilityChanged?(isVisible)
+        }
+        .onChange(of: model.didReachEnd) { didReachEnd in
+            guard didReachEnd else { return }
+            reportCurrentProgress(updateKind: .final)
+        }
         .onDisappear {
+            if let watchRegistrationID { watchChannel?.unregister(watchRegistrationID) }
             reportCurrentProgress(updateKind: .final)
             model.stop()
             PlayerPresentation.endAudioSession()
@@ -2650,99 +3952,329 @@ private struct VLCPlayerScreen: View {
         .accessibilityIdentifier("stremio-player")
     }
 
-    private var controls: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                controlButton("xmark", label: "Close player") {
-                    controlsVisible = false
-                    PlayerPresentation.restorePortrait()
-                    dismiss()
+    @MainActor
+    private func registerWatchChannel() {
+        guard watchRegistrationID == nil, let watchChannel else { return }
+        watchRegistrationID = watchChannel.register(
+            sample: {
+                guard model.isReady else { return nil }
+                return WatchLocalPlaybackSample(
+                    position: model.currentTime,
+                    isPlaying: model.isPlaying,
+                    rate: model.player.rate > 0 ? Double(model.player.rate) : 1
+                )
+            },
+            apply: { adjustment, baselineRate in
+                if let target = adjustment.targetPosition { _ = await model.seekAndWait(to: target) }
+                let requestedRate = adjustment.temporaryRate ?? adjustment.playbackRate ?? baselineRate
+                if adjustment.shouldPlay == false {
+                    model.pause()
+                } else if adjustment.shouldPlay == true {
+                    model.player.rate = Float(requestedRate)
+                    model.play()
+                } else if adjustment.temporaryRate != nil || adjustment.playbackRate != nil,
+                          model.isPlaying {
+                    model.player.rate = Float(requestedRate)
                 }
+            }
+        )
+    }
+
+    private var controls: some View {
+        GeometryReader { proxy in
+            let isPortrait = proxy.size.height > proxy.size.width
+
+            VStack(spacing: 0) {
+                vlcTopControls(showsTitle: !isPortrait)
+
+                Spacer(minLength: 14)
+
+                HStack(spacing: 44) {
+                    controlButton("gobackward.15", label: "Back 15 seconds") {
+                        seekVLC(by: -15)
+                    }
+                    controlButton(
+                        model.isPlaying ? "pause.fill" : "play.fill",
+                        label: model.isPlaying ? "Pause" : "Play",
+                        size: 26,
+                        prominent: true
+                    ) {
+                        if model.isPlaying {
+                            model.pause()
+                        } else {
+                            model.play()
+                        }
+                    }
+                    controlButton("goforward.15", label: "Forward 15 seconds") {
+                        seekVLC(by: 15)
+                    }
+                }
+
+                Spacer(minLength: 14)
+
+                vlcBottomControls(showsTitle: isPortrait)
+            }
+        }
+        .foregroundStyle(.white)
+        .tint(.white)
+        .buttonStyle(PlayerOverlayButtonStyle())
+        .accessibilityIdentifier("player-controls")
+    }
+
+    private func vlcTopControls(showsTitle: Bool) -> some View {
+        HStack(spacing: 8) {
+            controlButton(
+                "xmark",
+                label: "Close player",
+                identifier: "player-close"
+            ) {
+                controlsVisible = false
+                PlayerPresentation.restorePortrait()
+                dismiss()
+            }
+
+            if showsTitle {
                 Text(title)
                     .font(.headline)
                     .lineLimit(1)
-                Spacer()
-                controlButton("rectangle.landscape.rotate", label: "Rotate player") {
-                    controlsVisible = false
-                    PlayerPresentation.toggleOrientation()
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
+            }
+
+            Spacer(minLength: 4)
+
+            if model.audioTrackOptions.count > 1 {
+                controlButton(
+                    "waveform",
+                    label: "Audio tracks",
+                    identifier: "player-audio-tracks"
+                ) {
+                    openTrackPicker(.audio)
                 }
             }
-            .padding()
-            .background(.linearGradient(
-                colors: [.black.opacity(0.82), .clear],
-                startPoint: .top,
-                endPoint: .bottom
-            ))
+            controlButton(
+                "captions.bubble",
+                label: "Subtitles",
+                identifier: "player-subtitles"
+            ) {
+                openTrackPicker(.subtitles)
+            }
+            controlButton(
+                model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                label: model.isMuted ? "Unmute" : "Mute"
+            ) {
+                model.toggleMute()
+            }
+            controlButton(
+                "rectangle.landscape.rotate",
+                label: "Rotate player",
+                identifier: "player-orientation-toggle"
+            ) {
+                controlsVisible = false
+                PlayerPresentation.toggleOrientation()
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.linearGradient(
+            colors: [.black.opacity(0.82), .clear],
+            startPoint: .top,
+            endPoint: .bottom
+        ))
+    }
 
-            Spacer()
-
-            HStack(spacing: 34) {
-                controlButton("gobackward.10", label: "Back 10 seconds") {
-                    seekVLC(by: -10)
+    private func vlcBottomControls(showsTitle: Bool) -> some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                if showsTitle {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
                 }
+                Spacer(minLength: 8)
                 controlButton(
-                    model.isPlaying ? "pause.fill" : "play.fill",
-                    label: model.isPlaying ? "Pause" : "Play",
-                    size: 26
+                    viewportMode == .fill
+                        ? "arrow.down.right.and.arrow.up.left"
+                        : "arrow.up.left.and.arrow.down.right",
+                    label: viewportMode == .fill ? "Fit video" : "Fill screen",
+                    identifier: "player-content-mode"
                 ) {
-                    if model.isPlaying {
-                        model.pause()
+                    viewportMode = viewportMode.toggled
+                }
+            }
+
+            Slider(
+                value: Binding(
+                    get: { isScrubbing ? scrubPosition : model.currentTime },
+                    set: { scrubPosition = $0 }
+                ),
+                in: 0...max(model.duration, 1),
+                onEditingChanged: { editing in
+                    if editing {
+                        isScrubbing = true
+                        scrubPosition = model.currentTime
+                        resumeAfterScrub = model.player.isPlaying
+                        if resumeAfterScrub {
+                            model.pause()
+                        }
                     } else {
-                        model.play()
+                        let target = scrubPosition
+                        isScrubbing = false
+                        model.seek(to: target)
+                        if resumeAfterScrub {
+                            model.play()
+                        }
                     }
                 }
-                controlButton("goforward.10", label: "Forward 10 seconds") {
-                    seekVLC(by: 10)
-                }
+            )
+            .tint(.orange)
+            .disabled(model.duration <= 0 || !model.player.isSeekable)
+            .accessibilityIdentifier("player-timeline")
+
+            HStack {
+                Text(formatTime(isScrubbing ? scrubPosition : model.currentTime))
+                Spacer()
+                Text(formatTime(model.duration))
             }
+            .font(.caption.monospacedDigit())
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.linearGradient(
+            colors: [.clear, .black.opacity(0.82)],
+            startPoint: .top,
+            endPoint: .bottom
+        ))
+    }
 
-            Spacer()
+    private func vlcTrackPicker(_ kind: VLCTrackPickerKind) -> some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { trackPicker = nil }
 
-            VStack(spacing: 8) {
-                Slider(
-                    value: Binding(
-                        get: { isScrubbing ? scrubPosition : model.currentTime },
-                        set: { scrubPosition = $0 }
-                    ),
-                    in: 0...max(model.duration, 1),
-                    onEditingChanged: { editing in
-                        if editing {
-                            isScrubbing = true
-                            scrubPosition = model.currentTime
-                            resumeAfterScrub = model.player.isPlaying
-                            if resumeAfterScrub {
-                                model.pause()
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: kind.systemImage)
+                    Text(kind.title)
+                        .font(.headline)
+                    Spacer()
+                    Button {
+                        trackPicker = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .frame(width: 34, height: 34)
+                            .background(.white.opacity(0.10), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close (kind.title.lowercased()) tracks")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+
+                Divider().overlay(.white.opacity(0.12))
+
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        if kind == .subtitles {
+                            vlcTrackRow(
+                                title: "Off",
+                                systemImage: "captions.bubble.fill",
+                                isSelected: trackPickerSelectedID == nil
+                            ) {
+                                model.selectSubtitleTrack(nil)
+                                trackPickerSelectedID = nil
+                                trackPicker = nil
                             }
-                        } else {
-                            let target = scrubPosition
-                            isScrubbing = false
-                            model.seek(to: target)
-                            if resumeAfterScrub {
-                                model.play()
+                        }
+
+                        ForEach(trackPickerOptions) { option in
+                            vlcTrackRow(
+                                title: option.name,
+                                systemImage: kind.systemImage,
+                                isSelected: trackPickerSelectedID == option.id
+                            ) {
+                                selectVLCTrack(option, kind: kind)
                             }
                         }
                     }
-                )
-                .tint(.orange)
-                .disabled(model.duration <= 0 || !model.player.isSeekable)
-                .accessibilityIdentifier("player-timeline")
-
-                HStack {
-                    Text(formatTime(isScrubbing ? scrubPosition : model.currentTime))
-                    Spacer()
-                    Text(formatTime(model.duration))
                 }
-                .font(.caption.monospacedDigit())
+                .frame(maxHeight: 310)
             }
-            .padding()
-            .background(.linearGradient(
-                colors: [.clear, .black.opacity(0.82)],
-                startPoint: .top,
-                endPoint: .bottom
-            ))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(.white.opacity(0.14), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.55), radius: 24, y: 10)
+            .padding(20)
+            .frame(maxWidth: 430)
         }
-        .foregroundStyle(.white)
-        .accessibilityIdentifier("player-controls")
+        .accessibilityIdentifier("vlc-track-picker")
+    }
+
+    private func vlcTrackRow(
+        title: String,
+        systemImage: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .frame(width: 22)
+                Text(title)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 15, weight: .bold))
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 13)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(isSelected ? Color.white.opacity(0.10) : .clear)
+    }
+
+    private func openTrackPicker(_ kind: VLCTrackPickerKind) {
+        switch kind {
+        case .audio:
+            trackPickerOptions = model.audioTrackOptions
+            trackPickerSelectedID = model.selectedAudioTrackID
+        case .subtitles:
+            trackPickerOptions = model.subtitleTrackOptions
+            let selected = model.selectedSubtitleTrackID
+            trackPickerSelectedID = selected >= 0 ? selected : nil
+        }
+        trackPicker = kind
+        NSLog(
+            "VLC_TRACK_PICKER opened kind=%@ tracks=%ld",
+            kind == .audio ? "audio" : "subtitles",
+            trackPickerOptions.count
+        )
+    }
+
+    private func selectVLCTrack(_ option: VLCTrackOption, kind: VLCTrackPickerKind) {
+        trackPickerSelectedID = option.id
+        switch kind {
+        case .audio:
+            Task { @MainActor in
+                await model.switchAudioTrackAndRealign(option)
+                trackPicker = nil
+            }
+        case .subtitles:
+            model.selectSubtitleTrack(option)
+            trackPicker = nil
+        }
     }
 
     private func seekVLC(by interval: TimeInterval) {
@@ -2757,15 +4289,33 @@ private struct VLCPlayerScreen: View {
         _ systemName: String,
         label: String,
         size: CGFloat = 18,
+        prominent: Bool = false,
+        identifier: String? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: size, weight: .semibold))
-                .frame(width: 44, height: 44)
+                .frame(
+                    width: prominent ? 56 : 44,
+                    height: prominent ? 56 : 44
+                )
                 .background(.black.opacity(0.48), in: Circle())
         }
+        .buttonStyle(.plain)
         .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier ?? label)
+    }
+
+    private func vlcRenderScale(in viewport: CGSize) -> CGFloat {
+        CGFloat(
+            viewportMode.renderScale(
+                videoWidth: Double(model.videoSize.width),
+                videoHeight: Double(model.videoSize.height),
+                viewportWidth: Double(viewport.width),
+                viewportHeight: Double(viewport.height)
+            )
+        )
     }
 
     @ViewBuilder
@@ -2801,6 +4351,7 @@ private struct VLCPlayerScreen: View {
                 minimumVideoDuration: minimumVideoDuration,
                 usesBoundedRenderer: usesBoundedRenderer
             )
+            model.beginPreferredLanguageTrackSelection()
             if progressReference.position > 0 {
                 _ = await model.seekAndWait(to: progressReference.position)
                 model.play()
@@ -2980,6 +4531,8 @@ private struct PerformancePlayerScreen: View {
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
+    private let watchChannel: WatchPlaybackControlChannel?
+    private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
     private let policy: PlaybackPerformancePolicy
 
     init(
@@ -2988,6 +4541,8 @@ private struct PerformancePlayerScreen: View {
         initialPosition: TimeInterval,
         minimumVideoDuration: TimeInterval,
         onProgress: PlaybackProgressHandler?,
+        watchChannel: WatchPlaybackControlChannel?,
+        onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?,
         onExhausted: (@MainActor (Error) -> Void)?
     ) {
         self.plan = plan
@@ -2995,6 +4550,8 @@ private struct PerformancePlayerScreen: View {
         self.initialPosition = max(initialPosition, 0)
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.watchChannel = watchChannel
+        self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
         policy = PlaybackPerformanceCore.policy(
             url: plan.primaryURL,
@@ -3013,6 +4570,8 @@ private struct PerformancePlayerScreen: View {
                 initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: onProgress,
+                watchChannel: watchChannel,
+                onControlsVisibilityChanged: onControlsVisibilityChanged,
                 onExhausted: onExhausted
             )
         case .vlcVideoToolboxBridge:
@@ -3023,12 +4582,14 @@ private struct PerformancePlayerScreen: View {
                 initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: onProgress,
+                watchChannel: watchChannel,
+                onControlsVisibilityChanged: onControlsVisibilityChanged,
                 onExhausted: onExhausted
             )
             #else
             performanceKSPlayer
             #endif
-        case .automatic, .ffmpegVideoToolbox:
+        case .automatic, .ffmpegVideoToolbox, .bunnyFFmpeg:
             performanceKSPlayer
         }
     }
@@ -3042,6 +4603,8 @@ private struct PerformancePlayerScreen: View {
             initialPosition: initialPosition,
             minimumVideoDuration: minimumVideoDuration,
             onProgress: onProgress,
+            watchChannel: watchChannel,
+            onControlsVisibilityChanged: onControlsVisibilityChanged,
             onExhausted: onExhausted
         )
         #else
@@ -3051,6 +4614,8 @@ private struct PerformancePlayerScreen: View {
             initialPosition: initialPosition,
             minimumVideoDuration: minimumVideoDuration,
             onProgress: onProgress,
+            watchChannel: watchChannel,
+            onControlsVisibilityChanged: onControlsVisibilityChanged,
             onExhausted: onExhausted
         )
         #endif
@@ -3063,6 +4628,12 @@ private enum StremioPlayerBridge {
         sourceURL: URL,
         title: String
     ) -> [StremioInternalPlayer] {
+        // Bunny owns both its native and direct-FFmpeg paths. Selecting it is
+        // an explicit request to stay in Bunny rather than visibly switching
+        // to KSPlayer or VLC after a decoder error.
+        if preferred == .bunny {
+            return [.bunny]
+        }
         #if targetEnvironment(simulator)
         if ProcessInfo.processInfo.environment["SKELETON_PLAYER_STRICT"] == "1" {
             return [preferred]
@@ -3074,15 +4645,15 @@ private enum StremioPlayerBridge {
         if ["4320p", "8k", "ai upscale"].contains(where: sourceHint.contains) {
             // The bounded LibVLC callback renderer keeps oversized sources on
             // VLC while limiting only the final decoded frame surface.
-            fallbacks = [.vlcKit, .ksPlayer, .avPlayer]
+            fallbacks = [.vlcKit, .ksPlayer, .bunny]
         } else if ["mkv", "webm", "avi"].contains(pathExtension)
             || ["x265", "hevc", "av1", "flac"].contains(where: sourceHint.contains) {
-            fallbacks = [.ksPlayer, .vlcKit, .avPlayer]
+            fallbacks = [.ksPlayer, .vlcKit, .bunny]
         } else if ["m3u8", "mp4", "mov", "m4v"].contains(pathExtension)
             || ["hls", "h264", "avc", "aac"].contains(where: sourceHint.contains) {
-            fallbacks = [.avPlayer, .vlcKit, .ksPlayer]
+            fallbacks = [.bunny, .vlcKit, .ksPlayer]
         } else {
-            fallbacks = [.vlcKit, .ksPlayer, .avPlayer]
+            fallbacks = [.vlcKit, .ksPlayer, .bunny]
         }
         return ([preferred] + fallbacks).reduce(into: []) { result, player in
             if !result.contains(player) { result.append(player) }
@@ -3091,8 +4662,12 @@ private enum StremioPlayerBridge {
 }
 
 struct PlayerScreen: View {
+    @EnvironmentObject private var watchTogether: WatchTogetherModel
     let title: String
     private let plan: PlaybackPlan
+    private let contentKey: String
+    private let contentType: String
+    private let watchContentTitle: String
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
@@ -3103,17 +4678,25 @@ struct PlayerScreen: View {
     @State private var bridgeNotice: String?
     @State private var progressReference: PlaybackProgressReference
     @State private var didRunSimulatorPlayerSwitch = false
+    @State private var playerChromeVisible = true
+    @StateObject private var watchChannel = WatchPlaybackControlChannel()
 
     init(
         plan: PlaybackPlan,
         title: String,
         initialPosition: TimeInterval = 0,
+        contentIdentifier: String? = nil,
+        contentType: String = "movie",
+        watchContentTitle: String? = nil,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)? = nil
     ) {
         self.plan = plan
         self.title = title
+        self.contentKey = contentIdentifier ?? "title:\(title)"
+        self.contentType = contentType
+        self.watchContentTitle = watchContentTitle ?? title
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
         self.onExhausted = onExhausted
@@ -3156,14 +4739,35 @@ struct PlayerScreen: View {
                     .accessibilityIdentifier("player-bridge-status")
             }
 
+            if playerChromeVisible, bridgeFailureMessage == nil {
+                VStack {
+                    HStack {
+                        Spacer()
+                        WatchRoomVoiceButton(contentKey: contentKey)
+                        WatchRoomPlayerButton(
+                            contentKey: contentKey,
+                            contentType: contentType,
+                            contentTitle: watchContentTitle
+                        )
+                    }
+                    Spacer()
+                }
+                .padding(.top, 54)
+                .padding(.trailing, 14)
+                .transition(.opacity)
+            }
+
         }
         .onAppear {
             PlayerPresentation.synchronizeWithCurrentOrientation()
+            watchTogether.attachPlayer(watchChannel, contentKey: contentKey)
         }
         .onChange(of: activePlayerIndex) { _ in
+            playerChromeVisible = true
             PlayerPresentation.synchronizeWithCurrentOrientation()
         }
         .onDisappear {
+            watchTogether.detachPlayer(watchChannel)
             PlayerPresentation.restorePortrait()
         }
         .task {
@@ -3190,6 +4794,19 @@ struct PlayerScreen: View {
                 initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
+                watchChannel: watchChannel,
+                onControlsVisibilityChanged: updatePlayerChromeVisibility,
+                onExhausted: { handlePlayerFailure(player: player, error: $0) }
+            )
+        case .bunny:
+            BunnyPlayerScreen(
+                plan: plan,
+                title: title,
+                initialPosition: progressReference.position,
+                minimumVideoDuration: minimumVideoDuration,
+                onProgress: handleProgress,
+                watchChannel: watchChannel,
+                onControlsVisibilityChanged: updatePlayerChromeVisibility,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
             )
         case .ksPlayer:
@@ -3200,6 +4817,8 @@ struct PlayerScreen: View {
                 initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
+                watchChannel: watchChannel,
+                onControlsVisibilityChanged: updatePlayerChromeVisibility,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
             )
             #else
@@ -3215,6 +4834,8 @@ struct PlayerScreen: View {
                 initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
+                watchChannel: watchChannel,
+                onControlsVisibilityChanged: updatePlayerChromeVisibility,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
             )
             #else
@@ -3222,17 +4843,13 @@ struct PlayerScreen: View {
                 handlePlayerFailure(player: player, error: error)
             }
             #endif
-        case .avPlayer:
-            AVPlayerScreen(
-                plan: plan,
-                title: title,
-                initialPosition: progressReference.position,
-                minimumVideoDuration: minimumVideoDuration,
-                onProgress: handleProgress,
-                onExhausted: { handlePlayerFailure(player: player, error: $0) }
-            )
             }
         }
+    }
+
+    @MainActor
+    private func updatePlayerChromeVisibility(_ isVisible: Bool) {
+        playerChromeVisible = isVisible
     }
 
     @ViewBuilder
@@ -3293,7 +4910,7 @@ struct PlayerScreen: View {
             if let onExhausted {
                 onExhausted(error)
             } else {
-                bridgeFailureMessage = "Performance, KSPlayer, VLC, and AVPlayer could not play this stream. Try another source."
+                bridgeFailureMessage = "The selected player could not play this stream. Try another source."
             }
             return
         }
@@ -3381,6 +4998,7 @@ private struct PlayerBridgeForcedFailureView: View {
 #endif
 
 struct StreamPlaybackCandidate: Identifiable {
+    let id: String
     let stream: Stream
     let providerName: String?
     let contentIdentifier: String?
@@ -3392,85 +5010,379 @@ struct StreamPlaybackCandidate: Identifiable {
         providerName: String?,
         contentIdentifier: String? = nil,
         contentTitle: String? = nil,
-        initialPosition: TimeInterval = 0
+        initialPosition: TimeInterval = 0,
+        sourceID: String? = nil
     ) {
+        id = sourceID ?? "\(providerName ?? "unknown")#\(stream.id)"
         self.stream = stream
         self.providerName = providerName
         self.contentIdentifier = contentIdentifier
         self.contentTitle = contentTitle
         self.initialPosition = max(initialPosition, 0)
     }
+}
 
-    var id: String { stream.id }
+struct EpisodeAutoplayContext {
+    let series: MetaItem
+    let episode: Video
+
+    var nextEpisode: Video? {
+        EpisodeAutoplaySelector.nextEpisode(
+            after: episode,
+            episodes: series.videos ?? []
+        )
+    }
+
+    func advancing(to episode: Video) -> Self {
+        Self(series: series, episode: episode)
+    }
 }
 
 struct ResolvingPlayerScreen: View {
     @EnvironmentObject private var model: AppModel
-    let candidate: StreamPlaybackCandidate
+    let candidates: [StreamPlaybackCandidate]
     let minimumVideoDuration: TimeInterval
+    let episodeAutoplayContext: EpisodeAutoplayContext?
+    @State private var activeCandidateIndex = 0
     @State private var playbackPlan: PlaybackPlan?
     @State private var error: String?
+    @State private var pendingFailover: PendingStreamFailover?
+    @State private var countdownRemaining = StreamFailoverPolicy.countdownSeconds
+    @State private var resumePosition: TimeInterval
+    @State private var pendingEpisodeAutoplay: PendingEpisodeAutoplay?
+    @State private var episodeAutoplayCountdown = 8
+    @State private var nextEpisodeCandidates: [StreamPlaybackCandidate] = []
+    @State private var nextEpisodeLoadError: String?
+    @State private var isLoadingNextEpisode = false
+    @State private var didOfferEpisodeAutoplay = false
+    @State private var episodeAutoplayDestination: EpisodeAutoplayDestination?
+    @State private var isPresentingNextEpisode = false
+
+    private struct PendingStreamFailover: Identifiable, Equatable {
+        let id = UUID()
+        let nextIndex: Int
+        let nextTitle: String
+    }
+
+    private struct PendingEpisodeAutoplay: Identifiable {
+        let id = UUID()
+        let episode: Video
+    }
+
+    private struct EpisodeAutoplayDestination {
+        let context: EpisodeAutoplayContext
+        let candidates: [StreamPlaybackCandidate]
+    }
 
     init(
         stream: Stream,
-        minimumVideoDuration: TimeInterval = 4
+        minimumVideoDuration: TimeInterval = 4,
+        episodeAutoplayContext: EpisodeAutoplayContext? = nil
     ) {
-        candidate = StreamPlaybackCandidate(stream: stream, providerName: nil)
-        self.minimumVideoDuration = minimumVideoDuration
+        self.init(
+            candidate: StreamPlaybackCandidate(stream: stream, providerName: nil),
+            minimumVideoDuration: minimumVideoDuration,
+            episodeAutoplayContext: episodeAutoplayContext
+        )
     }
 
     init(
         candidate: StreamPlaybackCandidate,
-        minimumVideoDuration: TimeInterval = 4
+        minimumVideoDuration: TimeInterval = 4,
+        episodeAutoplayContext: EpisodeAutoplayContext? = nil
     ) {
-        self.candidate = candidate
-        self.minimumVideoDuration = minimumVideoDuration
+        self.init(
+            candidates: [candidate],
+            minimumVideoDuration: minimumVideoDuration,
+            episodeAutoplayContext: episodeAutoplayContext
+        )
     }
 
-    private var activeCandidate: StreamPlaybackCandidate { candidate }
-    private var activeStream: Stream { candidate.stream }
+    init(
+        candidates: [StreamPlaybackCandidate],
+        minimumVideoDuration: TimeInterval = 4,
+        episodeAutoplayContext: EpisodeAutoplayContext? = nil
+    ) {
+        precondition(!candidates.isEmpty, "ResolvingPlayerScreen requires a stream")
+        self.candidates = candidates
+        self.minimumVideoDuration = minimumVideoDuration
+        self.episodeAutoplayContext = episodeAutoplayContext
+        _resumePosition = State(initialValue: candidates[0].initialPosition)
+    }
+
+    private var activeCandidate: StreamPlaybackCandidate {
+        candidates[min(activeCandidateIndex, candidates.count - 1)]
+    }
+
+    private var activeStream: Stream { activeCandidate.stream }
 
     var body: some View {
-        Group {
-            if let playbackPlan {
-                PlayerScreen(
-                    plan: playbackPlan,
-                    title: playbackTitle,
-                    initialPosition: activeCandidate.initialPosition,
-                    minimumVideoDuration: minimumVideoDuration,
-                    onProgress: recordProgress,
-                    onExhausted: advanceToNextSource
-                )
-            } else if let error {
-                VStack(spacing: 12) {
-                    Image(systemName: "play.slash").font(.system(size: 44))
-                    Text("Playback unavailable").font(.title3.bold())
-                    Text(error).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        ZStack {
+            Group {
+                if let playbackPlan {
+                    PlayerScreen(
+                        plan: playbackPlan,
+                        title: playbackTitle,
+                        initialPosition: resumePosition,
+                        contentIdentifier: activeCandidate.contentIdentifier,
+                        contentType: activeCandidate.contentIdentifier?.split(separator: ":").first.map(String.init) ?? "movie",
+                        watchContentTitle: activeCandidate.contentTitle,
+                        minimumVideoDuration: minimumVideoDuration,
+                        onProgress: recordProgress,
+                        onExhausted: beginSourceFailover
+                    )
+                } else if let error, pendingFailover == nil {
+                    VStack(spacing: 12) {
+                        Image(systemName: "play.slash").font(.system(size: 44))
+                        Text("Playback unavailable").font(.title3.bold())
+                        Text(error).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                    .padding()
+                    .accessibilityIdentifier("player-resolution-error")
+                } else if pendingFailover == nil {
+                    ProgressView(progressMessage)
                 }
-                .padding()
-                .accessibilityIdentifier("player-resolution-error")
-            } else {
-                ProgressView(progressMessage)
+            }
+
+            if let pendingFailover {
+                failoverCountdown(pendingFailover)
+                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
+            }
+
+            if let pendingEpisodeAutoplay, pendingFailover == nil {
+                episodeAutoplayCard(pendingEpisodeAutoplay)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .zIndex(3)
             }
         }
         .toolbar(.hidden, for: .tabBar)
+        .animation(.easeOut(duration: 0.18), value: pendingFailover)
+        .animation(.easeOut(duration: 0.22), value: pendingEpisodeAutoplay?.id)
+        .task(id: activeCandidate.id) {
+            await resolveActiveSource()
+        }
+        .task(id: pendingFailover?.id) {
+            guard let pendingFailover else { return }
+            await runFailoverCountdown(pendingFailover)
+        }
+        .task(id: pendingEpisodeAutoplay?.id) {
+            guard let pendingEpisodeAutoplay else { return }
+            await prepareNextEpisode(for: pendingEpisodeAutoplay)
+        }
+        .task(id: pendingEpisodeAutoplay?.id) {
+            guard let pendingEpisodeAutoplay else { return }
+            await runEpisodeAutoplayCountdown(pendingEpisodeAutoplay)
+        }
         .task {
-            playbackPlan = nil
-            error = nil
-            let startedAt = ProcessInfo.processInfo.systemUptime
-            do {
-                playbackPlan = try await model.playbackPlan(
-                    for: activeStream,
-                    providerName: activeCandidate.providerName
+            await showEpisodeAutoplayPreviewIfRequested()
+        }
+        .navigationDestination(isPresented: $isPresentingNextEpisode) {
+            if let destination = episodeAutoplayDestination {
+                ResolvingPlayerScreen(
+                    candidates: destination.candidates,
+                    minimumVideoDuration: minimumVideoDuration,
+                    episodeAutoplayContext: destination.context
                 )
-                let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
-                NSLog("STREAM_BENCHMARK resolve_ms=%.1f title=%@", elapsed, playbackTitle)
             }
-            catch let resolutionError {
-                let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
-                NSLog("STREAM_BENCHMARK failed_ms=%.1f title=%@ error=%@", elapsed, playbackTitle, resolutionError.localizedDescription)
-                advanceToNextSource(resolutionError)
+        }
+    }
+
+    private func episodeAutoplayCard(_ pending: PendingEpisodeAutoplay) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                nextEpisodeThumbnail(pending.episode)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("UP NEXT")
+                        .font(.caption2.weight(.black))
+                        .tracking(0.8)
+                        .foregroundStyle(.orange)
+                    Text(episodeLabel(pending.episode))
+                        .font(.headline)
+                    if let title = pending.episode.title,
+                       !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+                Spacer(minLength: 0)
             }
+
+            if let nextEpisodeLoadError {
+                Text(nextEpisodeLoadError)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                Text(
+                    isLoadingNextEpisode
+                        ? "Finding the best stream…"
+                        : "Playing automatically in \(episodeAutoplayCountdown)s"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.82))
+            }
+
+            HStack(spacing: 9) {
+                Button("Not Now") {
+                    cancelEpisodeAutoplay()
+                }
+                .buttonStyle(.bordered)
+                .tint(.white.opacity(0.72))
+
+                Button {
+                    playNextEpisodeIfReady()
+                } label: {
+                    Label(
+                        isLoadingNextEpisode ? "Preparing" : "Play Now",
+                        systemImage: "forward.end.fill"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+                .foregroundStyle(.black)
+                .disabled(nextEpisodeLoadError != nil)
+            }
+            .font(.caption.weight(.semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(14)
+        .frame(width: 326, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(Color.orange.opacity(0.32), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.48), radius: 18, y: 8)
+        .padding(18)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("episode-up-next")
+    }
+
+    @ViewBuilder
+    private func nextEpisodeThumbnail(_ episode: Video) -> some View {
+        if let thumbnail = episode.thumbnail {
+            AsyncImage(url: thumbnail, transaction: Transaction(animation: nil)) { phase in
+                if case let .success(image) = phase {
+                    image.resizable().scaledToFill()
+                } else {
+                    episodeThumbnailPlaceholder
+                }
+            }
+            .frame(width: 112, height: 63)
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        } else {
+            episodeThumbnailPlaceholder
+                .frame(width: 112, height: 63)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+    }
+
+    private var episodeThumbnailPlaceholder: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.10))
+            .overlay {
+                Image(systemName: "tv")
+                    .foregroundStyle(.secondary)
+            }
+    }
+
+    @ViewBuilder
+    private func failoverCountdown(_ pending: PendingStreamFailover) -> some View {
+        ZStack {
+            Color.black.opacity(0.82).ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .stroke(Color.white.opacity(0.16), lineWidth: 5)
+                    Circle()
+                        .trim(
+                            from: 0,
+                            to: CGFloat(countdownRemaining)
+                                / CGFloat(failoverCountdownSeconds)
+                        )
+                        .stroke(
+                            Color.orange,
+                            style: StrokeStyle(lineWidth: 5, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                    Text("\(countdownRemaining)")
+                        .font(.title.bold().monospacedDigit())
+                }
+                .frame(width: 72, height: 72)
+                .accessibilityHidden(true)
+
+                Text("Stream unavailable")
+                    .font(.title3.bold())
+                Text("Trying the next stream in \(countdownRemaining)s")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("stream-failover-countdown")
+                Text(pending.nextTitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+
+                Button {
+                    completeSourceFailover(pending)
+                } label: {
+                    Label("Continue to Next Stream", systemImage: "forward.end.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+                .foregroundStyle(.black)
+                .accessibilityIdentifier("stream-failover-continue")
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 340)
+            .background(.black.opacity(0.9), in: RoundedRectangle(cornerRadius: 22))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(Color.orange.opacity(0.32), lineWidth: 1)
+            }
+            .padding()
+        }
+    }
+
+    @MainActor
+    private func resolveActiveSource() async {
+        playbackPlan = nil
+        error = nil
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        do {
+            playbackPlan = try await model.playbackPlan(
+                for: activeStream,
+                providerName: activeCandidate.providerName
+            )
+            let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+            NSLog(
+                "STREAM_BENCHMARK resolve_ms=%.1f source=%ld/%ld title=%@",
+                elapsed,
+                activeCandidateIndex + 1,
+                candidates.count,
+                playbackTitle
+            )
+        } catch let resolutionError {
+            let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+            NSLog(
+                "STREAM_BENCHMARK failed_ms=%.1f source=%ld/%ld title=%@ error=%@",
+                elapsed,
+                activeCandidateIndex + 1,
+                candidates.count,
+                playbackTitle,
+                resolutionError.localizedDescription
+            )
+            beginSourceFailover(resolutionError)
         }
     }
 
@@ -3478,7 +5390,7 @@ struct ResolvingPlayerScreen: View {
         let value = [activeStream.title, activeStream.name, activeStream.description]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
-            ?? candidate.stream.displayName
+            ?? activeCandidate.stream.displayName
         return String(value.split(separator: "\n", maxSplits: 1).first?.prefix(64) ?? "Stream")
     }
 
@@ -3492,6 +5404,9 @@ struct ResolvingPlayerScreen: View {
         duration: TimeInterval,
         updateKind: PlaybackProgressUpdateKind
     ) {
+        if position.isFinite, (position >= 1 || resumePosition <= 0) {
+            resumePosition = max(position, 0)
+        }
         model.recordPlaybackProgress(
             contentIdentifier: activeCandidate.contentIdentifier,
             contentTitle: activeCandidate.contentTitle,
@@ -3501,18 +5416,243 @@ struct ResolvingPlayerScreen: View {
             duration: duration,
             updateKind: updateKind
         )
+        if EpisodeAutoplayPresentationPolicy.shouldPresent(
+            position: position,
+            duration: duration,
+            isFinalUpdate: updateKind == .final
+        ) {
+            beginEpisodeAutoplayIfAvailable()
+        }
     }
 
     @MainActor
-    private func advanceToNextSource(_ playbackError: Error) {
-        playbackPlan = nil
-        error = "This source did not return smooth movie playback. Please retry it or choose another link."
+    private func beginEpisodeAutoplayIfAvailable() {
+        guard !didOfferEpisodeAutoplay,
+              pendingEpisodeAutoplay == nil,
+              let nextEpisode = episodeAutoplayContext?.nextEpisode
+        else { return }
+        didOfferEpisodeAutoplay = true
+        episodeAutoplayCountdown = 8
+        nextEpisodeCandidates = []
+        nextEpisodeLoadError = nil
+        isLoadingNextEpisode = true
+        pendingEpisodeAutoplay = PendingEpisodeAutoplay(episode: nextEpisode)
         NSLog(
-            "STREAM_PLAYBACK failed error=%@",
+            "EPISODE_AUTOPLAY offered current=%@ next=%@",
+            episodeAutoplayContext?.episode.id ?? "unknown",
+            nextEpisode.id
+        )
+    }
+
+    @MainActor
+    private func prepareNextEpisode(for pending: PendingEpisodeAutoplay) async {
+        guard let context = episodeAutoplayContext else { return }
+        let providers = await model.streamProviders(
+            for: context.series,
+            videoID: pending.episode.id
+        )
+        guard pendingEpisodeAutoplay?.id == pending.id, !Task.isCancelled else {
+            return
+        }
+
+        let playable = rankedPresentedStreams(from: providers).filter {
+            $0.stream.isDirectlyPlayable || $0.stream.isTorrent
+        }
+        guard !playable.isEmpty else {
+            isLoadingNextEpisode = false
+            nextEpisodeLoadError = "No playable stream was found for this episode."
+            NSLog("EPISODE_AUTOPLAY no_streams next=%@", pending.episode.id)
+            return
+        }
+
+        let preferred = playable.first {
+            $0.providerName == activeCandidate.providerName
+        } ?? playable[0]
+        nextEpisodeCandidates = orderedPlaybackCandidates(
+            from: playable,
+            startingAt: preferred.id,
+            contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
+                seriesID: context.series.id,
+                videoID: pending.episode.id
+            ),
+            contentTitle: EpisodePlaybackIdentity.contentTitle(
+                seriesTitle: context.series.name,
+                video: pending.episode
+            ),
+            initialPosition: 0
+        )
+        isLoadingNextEpisode = false
+        NSLog(
+            "EPISODE_AUTOPLAY ready next=%@ streams=%ld provider=%@",
+            pending.episode.id,
+            nextEpisodeCandidates.count,
+            preferred.providerName
+        )
+        if episodeAutoplayCountdown == 0 {
+            playNextEpisodeIfReady()
+        }
+    }
+
+    @MainActor
+    private func runEpisodeAutoplayCountdown(
+        _ pending: PendingEpisodeAutoplay
+    ) async {
+        for value in stride(from: 8, through: 1, by: -1) {
+            guard pendingEpisodeAutoplay?.id == pending.id,
+                  !Task.isCancelled
+            else { return }
+            episodeAutoplayCountdown = value
+            do {
+                try await Task.sleep(for: .seconds(1))
+            } catch {
+                return
+            }
+        }
+        guard pendingEpisodeAutoplay?.id == pending.id,
+              !Task.isCancelled
+        else { return }
+        episodeAutoplayCountdown = 0
+        playNextEpisodeIfReady()
+    }
+
+    @MainActor
+    private func playNextEpisodeIfReady() {
+        guard let pending = pendingEpisodeAutoplay,
+              let context = episodeAutoplayContext,
+              !nextEpisodeCandidates.isEmpty
+        else {
+            episodeAutoplayCountdown = 0
+            return
+        }
+        episodeAutoplayDestination = EpisodeAutoplayDestination(
+            context: context.advancing(to: pending.episode),
+            candidates: nextEpisodeCandidates
+        )
+        pendingEpisodeAutoplay = nil
+        isPresentingNextEpisode = true
+        NSLog("EPISODE_AUTOPLAY playing next=%@", pending.episode.id)
+    }
+
+    @MainActor
+    private func cancelEpisodeAutoplay() {
+        pendingEpisodeAutoplay = nil
+        nextEpisodeCandidates = []
+        nextEpisodeLoadError = nil
+        isLoadingNextEpisode = false
+        NSLog("EPISODE_AUTOPLAY cancelled")
+    }
+
+    private func episodeLabel(_ episode: Video) -> String {
+        if let season = episode.season, let number = episode.episode {
+            return "S\(season) E\(number)"
+        }
+        if let number = episode.episode { return "Episode \(number)" }
+        return "Next Episode"
+    }
+
+    @MainActor
+    private func showEpisodeAutoplayPreviewIfRequested() async {
+        #if targetEnvironment(simulator)
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SKELETON_EPISODE_AUTOPLAY_PREVIEW"] == "1"
+                || environment["UI_SCREENSHOT_STATE"] == "episode-up-next"
+        else { return }
+        try? await Task.sleep(for: .milliseconds(350))
+        guard !Task.isCancelled else { return }
+        beginEpisodeAutoplayIfAvailable()
+        #endif
+    }
+
+    @MainActor
+    private func beginSourceFailover(_ playbackError: Error) {
+        guard pendingFailover == nil else { return }
+        playbackPlan = nil
+        guard let nextIndex = StreamFailoverPolicy.nextSourceIndex(
+            after: activeCandidateIndex,
+            sourceCount: candidates.count
+        ) else {
+            error = "Every available stream was tried, but none returned playable media. Go back and choose a different provider."
+            NSLog(
+                "STREAM_PLAYBACK exhausted sources=%ld error=%@",
+                candidates.count,
+                playbackError.localizedDescription
+            )
+            return
+        }
+
+        let nextCandidate = candidates[nextIndex]
+        countdownRemaining = failoverCountdownSeconds
+        pendingFailover = PendingStreamFailover(
+            nextIndex: nextIndex,
+            nextTitle: sourceTitle(for: nextCandidate)
+        )
+        NSLog(
+            "STREAM_PLAYBACK failover from=%ld to=%ld countdown=%ld error=%@",
+            activeCandidateIndex + 1,
+            nextIndex + 1,
+            failoverCountdownSeconds,
             playbackError.localizedDescription
         )
     }
 
+    @MainActor
+    private func runFailoverCountdown(_ pending: PendingStreamFailover) async {
+        for value in stride(from: failoverCountdownSeconds, through: 1, by: -1) {
+            guard pendingFailover?.id == pending.id, !Task.isCancelled else { return }
+            countdownRemaining = value
+            do {
+                try await Task.sleep(for: .seconds(1))
+            } catch {
+                return
+            }
+        }
+        guard pendingFailover?.id == pending.id, !Task.isCancelled else { return }
+        completeSourceFailover(pending)
+    }
+
+    @MainActor
+    private func completeSourceFailover(_ pending: PendingStreamFailover) {
+        guard pendingFailover?.id == pending.id else { return }
+        activeCandidateIndex = pending.nextIndex
+        playbackPlan = nil
+        error = nil
+        pendingFailover = nil
+        NSLog(
+            "STREAM_PLAYBACK selected source=%ld/%ld resume=%.1f",
+            activeCandidateIndex + 1,
+            candidates.count,
+            resumePosition
+        )
+    }
+
+    private func sourceTitle(for candidate: StreamPlaybackCandidate) -> String {
+        let title = [
+            candidate.stream.title,
+            candidate.stream.name,
+            candidate.stream.description,
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .first { !$0.isEmpty }
+            ?? candidate.stream.displayName
+        let compactTitle = String(
+            title.split(separator: "\n", maxSplits: 1).first?.prefix(64) ?? "Next stream"
+        )
+        guard let provider = candidate.providerName, !provider.isEmpty else {
+            return compactTitle
+        }
+        return "\(provider) · \(compactTitle)"
+    }
+
+    private var failoverCountdownSeconds: Int {
+        #if targetEnvironment(simulator)
+        if let rawValue = ProcessInfo.processInfo.environment[
+            "SKELETON_FAILOVER_TEST_COUNTDOWN_SECONDS"
+        ], let value = Int(rawValue), (3...30).contains(value) {
+            return value
+        }
+        #endif
+        return StreamFailoverPolicy.countdownSeconds
+    }
 }
 
 private struct PlayerOverlayButtonStyle: ButtonStyle {

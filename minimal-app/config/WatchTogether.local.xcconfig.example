@@ -1,0 +1,3 @@
+// Copy to WatchTogether.local.xcconfig. Never put API keys or secrets here.
+WATCH_TOGETHER_CONVEX_URL = https:/$()/example.convex.cloud
+WATCH_TOGETHER_LIVEKIT_URL = wss:/$()/example.livekit.cloud

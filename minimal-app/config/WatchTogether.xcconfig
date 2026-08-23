@@ -1,0 +1,4 @@
+// Safe defaults. scripts/configure-watch-together.sh writes the ignored local include.
+WATCH_TOGETHER_CONVEX_URL =
+WATCH_TOGETHER_LIVEKIT_URL =
+#include? "WatchTogether.local.xcconfig"

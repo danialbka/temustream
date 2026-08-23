@@ -1,3 +1,7 @@
 build/
 .build/
 .swiftpm/
+node_modules/
+Backend/watch-together/.env.local
+Backend/watch-together/.env.*.local
+config/WatchTogether.local.xcconfig

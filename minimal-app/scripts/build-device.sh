@@ -35,6 +35,31 @@ if ! xcodebuild \
 fi
 cp -R "$BUILT_APP" "$APP_DIR"
 
+# The vendored MobileVLCKit device framework still carries armv7 and armv7s
+# slices even though this app targets iOS 16+. Keep only arm64 in the device
+# handoff so local signing and CoreDevice Wi-Fi transfer tens of megabytes less.
+for FRAMEWORK_DIR in "$APP_DIR"/Frameworks/*.framework; do
+  [ -d "$FRAMEWORK_DIR" ] || continue
+  EXECUTABLE_NAME="$(plutil -extract CFBundleExecutable raw -o - "$FRAMEWORK_DIR/Info.plist" 2>/dev/null || true)"
+  FRAMEWORK_BINARY="$FRAMEWORK_DIR/$EXECUTABLE_NAME"
+  [ -n "$EXECUTABLE_NAME" ] && [ -f "$FRAMEWORK_BINARY" ] || continue
+  FRAMEWORK_ARCHS="$(lipo -archs "$FRAMEWORK_BINARY" 2>/dev/null || true)"
+  case " $FRAMEWORK_ARCHS " in
+    *" arm64 "*) ;;
+    *)
+      echo "Framework is missing arm64: $FRAMEWORK_DIR" >&2
+      exit 1
+      ;;
+  esac
+  ARCH_COUNT="$(printf '%s\n' "$FRAMEWORK_ARCHS" | awk '{print NF}')"
+  if [ "$ARCH_COUNT" -gt 1 ]; then
+    THIN_BINARY="$FRAMEWORK_BINARY.arm64.tmp"
+    lipo "$FRAMEWORK_BINARY" -thin arm64 -output "$THIN_BINARY"
+    mv -f "$THIN_BINARY" "$FRAMEWORK_BINARY"
+    echo "Thinned $(basename "$FRAMEWORK_DIR") to arm64"
+  fi
+done
+
 xattr -cr "$APP_DIR"
 xattr -d com.apple.FinderInfo "$APP_DIR" 2>/dev/null || true
 xattr -d 'com.apple.fileprovider.fpfs#P' "$APP_DIR" 2>/dev/null || true
@@ -50,9 +75,14 @@ echo "Built $APP_DIR"
 du -sh "$APP_DIR"
 file "$APP_DIR/StremioSkeleton"
 codesign --verify --strict --verbose=1 "$APP_DIR"
-rm -f "$ARCHIVE"
-ditto -c -k --norsrc --keepParent "$APP_DIR" "$ARCHIVE"
-echo "Archived $ARCHIVE"
+if [ "${SKELETON_SKIP_DEVICE_ZIP:-0}" != "1" ]; then
+  rm -f "$ARCHIVE"
+  ditto -c -k --norsrc --keepParent "$APP_DIR" "$ARCHIVE"
+  echo "Archived $ARCHIVE"
+else
+  rm -f "$ARCHIVE"
+  echo "Skipped the redundant device ZIP for fast OTA"
+fi
 
 # Sideloaders require an IPA whose archive root is Payload/, not a renamed
 # application ZIP. Strip resource-fork metadata above, preserve framework

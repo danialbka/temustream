@@ -8,6 +8,17 @@ packages:
     # Pinned from upstream revision 25c923b. The local package carries narrowly
     # scoped timestamp-seek and display-cadence fixes for real device playback.
     path: Vendor/KSPlayer
+  FFmpegKit:
+    # Bunny links the pinned libav products directly. KSPlayer remains an
+    # independent selectable player; Bunny does not instantiate or wrap it.
+    url: https://github.com/kingslay/FFmpegKit.git
+    exactVersion: 6.1.4
+  ConvexMobile:
+    url: https://github.com/get-convex/convex-swift.git
+    exactVersion: 0.8.1
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift.git
+    exactVersion: 2.16.0
 targets:
   StremioSkeleton:
     type: application
@@ -21,7 +32,11 @@ targets:
       path: iOS/Resources/Info.plist
       properties:
         CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "7"
+        CFBundleVersion: "12"
+        WatchTogetherConvexURL: $(WATCH_TOGETHER_CONVEX_URL)
+        WatchTogetherLiveKitURL: $(WATCH_TOGETHER_LIVEKIT_URL)
+        NSMicrophoneUsageDescription: TemuStream uses your microphone only when you enable voice chat in a Watch Together room.
+        NSLocalNetworkUsageDescription: TemuStream connects to streaming servers on your local network when you configure one for playback.
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio
@@ -33,12 +48,27 @@ targets:
       path: iOS/Resources/StremioSkeleton.entitlements
       properties: {}
     dependencies:
+      - package: ConvexMobile
+      - package: LiveKit
       - package: KSPlayer
+      - package: FFmpegKit
+        product: Libavcodec
+      - package: FFmpegKit
+        product: Libavformat
+      - package: FFmpegKit
+        product: Libavutil
+      - package: FFmpegKit
+        product: Libswresample
+      - package: FFmpegKit
+        product: Libswscale
       - framework: build/dependencies/MobileVLCKit.xcframework
         embed: true
         codeSign: true
       - framework: build/dependencies/StremioPlaybackCore.xcframework
         embed: false
+    configFiles:
+      Debug: config/WatchTogether.xcconfig
+      Release: config/WatchTogether.xcconfig
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: local.stremio.skeleton

@@ -39,4 +39,20 @@ final class AddonEndpointTests: XCTestCase {
             "https://example.com/catalog/movie/top/search=science%20fiction&skip=50.json"
         )
     }
+
+    func testEscapesReservedCharactersInsideCatalogSearchValue() throws {
+        let endpoint = try AddonEndpoint(manifestInput: "https://example.com/manifest.json")
+        let url = try endpoint.catalogURL(
+            type: "movie",
+            id: "top",
+            search: "rock & roll/100%?#=yes",
+            skip: 50
+        )
+
+        XCTAssertEqual(
+            url.absoluteString,
+            "https://example.com/catalog/movie/top/"
+                + "search=rock%20%26%20roll%2F100%25%3F%23%3Dyes&skip=50.json"
+        )
+    }
 }

@@ -7,8 +7,24 @@ BUILD_DIR="$BUILD_ROOT/ui-state-simulator"
 APP_DIR="$BUILD_DIR/StremioSkeletonUIStates.app"
 SERVER_DIR="$ROOT_DIR/build/ui-state-server"
 OUTPUT_DIR="${UI_SCREENSHOT_OUTPUT_DIR:-$ROOT_DIR/build/ui-states}"
-MODULE_CACHE="$ROOT_DIR/build/ModuleCacheUIStates"
+# Keep compiler caches off iCloud-backed workspaces. Swift's Clang importer can
+# otherwise spend minutes waiting on FileProvider while emitting the bridging PCH.
+MODULE_CACHE="${SKELETON_UI_MODULE_CACHE:-$BUILD_ROOT/ui-state-module-cache}"
 PORT=18766
+# A cold Simulator can spend over a minute restoring graphics/compiler state
+# before the fixture app reaches its first SwiftUI task. Keep this harness gate
+# bounded, but do not mistake that cold boot for an app-state failure.
+READY_ATTEMPTS="${UI_SCREENSHOT_READY_ATTEMPTS:-600}"
+
+BUILD_OUTPUT_ROOT="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$ROOT_DIR/build")"
+OUTPUT_DIR="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$OUTPUT_DIR")"
+case "$OUTPUT_DIR" in
+  "$BUILD_OUTPUT_ROOT"/*) ;;
+  *)
+    echo "UI_SCREENSHOT_OUTPUT_DIR must resolve inside $BUILD_OUTPUT_ROOT" >&2
+    exit 1
+    ;;
+esac
 
 rm -rf "$APP_DIR" "$SERVER_DIR" "$OUTPUT_DIR"
 mkdir -p "$APP_DIR" "$SERVER_DIR" "$OUTPUT_DIR" "$MODULE_CACHE"
@@ -18,12 +34,17 @@ plutil -replace CFBundleIdentifier -string local.stremio.skeleton.uistates "$APP
 
 SDK_PATH="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 SIMULATOR_ARCH="${SIMULATOR_ARCH:-$(uname -m)}"
-RUST_SLICE="$ROOT_DIR/build/dependencies/StremioPlaybackCore.xcframework/ios-$SIMULATOR_ARCH-simulator"
-if [ ! -f "$RUST_SLICE/libstremio_playback_core.a" ]; then
+RUST_FRAMEWORK="$ROOT_DIR/build/dependencies/StremioPlaybackCore.xcframework"
+RUST_SLICE="$(find "$RUST_FRAMEWORK" -maxdepth 1 -type d -name '*-simulator' -print -quit 2>/dev/null || true)"
+if [ -z "$RUST_SLICE" ] || [ ! -f "$RUST_SLICE/libstremio_playback_core.a" ]; then
   "$ROOT_DIR/scripts/build-rust-core.sh"
+  RUST_SLICE="$(find "$RUST_FRAMEWORK" -maxdepth 1 -type d -name '*-simulator' -print -quit)"
 fi
 SOURCES="$(find "$ROOT_DIR/Sources/StremioSkeletonCore" "$ROOT_DIR/iOS/App" \
-  -name '*.swift' ! -name 'StremioSkeletonApp.swift' -print)"
+  -name '*.swift' ! -name 'StremioSkeletonApp.swift' \
+  ! -name 'BunnyPlayerView.swift' \
+  ! -name 'WatchTogetherModel.swift' \
+  ! -name 'WatchTogetherViews.swift' -print)"
 
 # shellcheck disable=SC2086
 xcrun --sdk iphonesimulator swiftc \
@@ -103,7 +124,7 @@ xcrun simctl bootstatus "$DEVICE_ID" -b
 xcrun simctl uninstall "$DEVICE_ID" local.stremio.skeleton.uistates 2>/dev/null || true
 xcrun simctl install "$DEVICE_ID" "$APP_DIR"
 
-ALL_STATES="catalog-loading home-cinemeta home-letterboxd home-series catalog-error details-streams details-resume details-series-episodes episode-streams library-empty library-synced addons-offline account-signed-out account-signed-in torrent-starting playback-unavailable player-active"
+ALL_STATES="catalog-loading home-cinemeta home-letterboxd home-series catalog-error details-streams details-resume details-series-episodes episode-streams library-empty library-synced addons-offline account-signed-out account-signed-in torrent-starting playback-unavailable player-active settings-subtitles"
 STATES="${UI_SCREENSHOT_STATES:-$ALL_STATES}"
 for STATE in $STATES; do
   RUN_ID="$(date +%s)-$$-$STATE"
@@ -120,6 +141,15 @@ for STATE in $STATES; do
     LAUNCH_ARGS="-selectedCatalogSource cinemeta-series"
   fi
 
+  BRIDGE_FAILURES=""
+  FAILOVER_COUNTDOWN_SECONDS=""
+  if [ "$STATE" = "stream-failover-countdown" ]; then
+    BRIDGE_FAILURES="bunny"
+    # Simulator cold-start work can delay the harness marker. Keep this
+    # fixture visible long enough to capture the actual recovery card.
+    FAILOVER_COUNTDOWN_SECONDS="30"
+  fi
+
   # shellcheck disable=SC2086
   SIMCTL_CHILD_UI_SCREENSHOT_STATE="$STATE" \
   SIMCTL_CHILD_UI_SCREENSHOT_RUN_ID="$RUN_ID" \
@@ -129,6 +159,8 @@ for STATE in $STATES; do
   SIMCTL_CHILD_SKELETON_LETTERBOXD_CATALOG_ID="letterboxd-popular" \
   SIMCTL_CHILD_SKELETON_API_URL="http://127.0.0.1:$PORT" \
   SIMCTL_CHILD_SKELETON_STREAMING_SERVER_URL="http://127.0.0.1:$PORT" \
+  SIMCTL_CHILD_SKELETON_PLAYER_BRIDGE_FAIL="$BRIDGE_FAILURES" \
+  SIMCTL_CHILD_SKELETON_FAILOVER_TEST_COUNTDOWN_SECONDS="$FAILOVER_COUNTDOWN_SECONDS" \
   xcrun simctl launch --terminate-running-process \
     "$DEVICE_ID" local.stremio.skeleton.uistates $LAUNCH_ARGS >/dev/null
 
@@ -136,7 +168,7 @@ for STATE in $STATES; do
     "$DEVICE_ID" local.stremio.skeleton.uistates data)"
   READY_MARKER="$DATA_CONTAINER/tmp/ui-state-$RUN_ID.ready"
   ATTEMPT=0
-  while [ "$ATTEMPT" -lt 50 ] && [ ! -f "$READY_MARKER" ]; do
+  while [ "$ATTEMPT" -lt "$READY_ATTEMPTS" ] && [ ! -f "$READY_MARKER" ]; do
     ATTEMPT=$((ATTEMPT + 1))
     sleep 0.2
   done
@@ -159,7 +191,7 @@ sips -g pixelWidth -g pixelHeight "$OUTPUT_DIR"/*.png >"$OUTPUT_DIR/dimensions.t
 cp "$ROOT_DIR/UI_STATE_MATRIX.md" "$OUTPUT_DIR/README.md"
 
 if [ "$STATES" = "$ALL_STATES" ]; then
-  test "$COUNT" -eq 17
+  test "$COUNT" -eq 18
   ffmpeg -hide_banner -loglevel error -y \
   -i "$OUTPUT_DIR/catalog-loading.png" \
   -i "$OUTPUT_DIR/home-cinemeta.png" \
@@ -178,7 +210,8 @@ if [ "$STATES" = "$ALL_STATES" ]; then
   -i "$OUTPUT_DIR/torrent-starting.png" \
   -i "$OUTPUT_DIR/playback-unavailable.png" \
   -i "$OUTPUT_DIR/player-active.png" \
-  -filter_complex '[0:v]scale=201:437[s0];[1:v]scale=201:437[s1];[2:v]scale=201:437[s2];[3:v]scale=201:437[s3];[4:v]scale=201:437[s4];[5:v]scale=201:437[s5];[6:v]scale=201:437[s6];[7:v]scale=201:437[s7];[8:v]scale=201:437[s8];[9:v]scale=201:437[s9];[10:v]scale=201:437[s10];[11:v]scale=201:437[s11];[12:v]scale=201:437[s12];[13:v]scale=201:437[s13];[14:v]scale=201:437[s14];[15:v]scale=201:437[s15];[16:v]scale=201:437[s16];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11][s12][s13][s14][s15][s16]xstack=inputs=17:layout=0_0|201_0|402_0|603_0|0_437|201_437|402_437|603_437|0_874|201_874|402_874|603_874|0_1311|201_1311|402_1311|603_1311|0_1748:fill=black[out]' \
+  -i "$OUTPUT_DIR/settings-subtitles.png" \
+  -filter_complex '[0:v]scale=201:437[s0];[1:v]scale=201:437[s1];[2:v]scale=201:437[s2];[3:v]scale=201:437[s3];[4:v]scale=201:437[s4];[5:v]scale=201:437[s5];[6:v]scale=201:437[s6];[7:v]scale=201:437[s7];[8:v]scale=201:437[s8];[9:v]scale=201:437[s9];[10:v]scale=201:437[s10];[11:v]scale=201:437[s11];[12:v]scale=201:437[s12];[13:v]scale=201:437[s13];[14:v]scale=201:437[s14];[15:v]scale=201:437[s15];[16:v]scale=201:437[s16];[17:v]scale=201:437[s17];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11][s12][s13][s14][s15][s16][s17]xstack=inputs=18:layout=0_0|201_0|402_0|603_0|0_437|201_437|402_437|603_437|0_874|201_874|402_874|603_874|0_1311|201_1311|402_1311|603_1311|0_1748|201_1748:fill=black[out]' \
     -map '[out]' -frames:v 1 "$OUTPUT_DIR/all-states-contact-sheet.png"
   test -s "$OUTPUT_DIR/all-states-contact-sheet.png"
   echo "UI STATE SCREENSHOTS PASS: $COUNT state PNGs + contact sheet in $OUTPUT_DIR"

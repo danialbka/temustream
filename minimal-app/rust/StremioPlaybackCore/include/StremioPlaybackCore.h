@@ -33,7 +33,9 @@ typedef struct StremioTransportTiming {
     uint64_t bitrate_bps;
 } StremioTransportTiming;
 
-/// Player kinds: 0 performance, 1 KSPlayer, 2 VLC, 3 AVPlayer.
+typedef struct StremioBunnyClock StremioBunnyClock;
+
+/// Player kinds: 0 performance, 1 KSPlayer, 2 VLC, 3 AVPlayer, 4 Bunny.
 StremioPlaybackPolicy stremio_playback_policy(
     const char *url,
     const char *title,
@@ -50,6 +52,14 @@ StremioTransportTiming stremio_mpegts_timing(
     const uint8_t *bytes,
     size_t length
 );
+
+/// Thread-safe Rust session clock used by Bunny's custom FFmpeg backend.
+StremioBunnyClock *stremio_bunny_clock_create(void);
+void stremio_bunny_clock_destroy(StremioBunnyClock *clock);
+void stremio_bunny_clock_seek(StremioBunnyClock *clock, int64_t media_time_us);
+void stremio_bunny_clock_set_rate(StremioBunnyClock *clock, double rate);
+void stremio_bunny_clock_observe(StremioBunnyClock *clock, int64_t media_time_us);
+int64_t stremio_bunny_clock_position_us(const StremioBunnyClock *clock);
 
 #ifdef __cplusplus
 }

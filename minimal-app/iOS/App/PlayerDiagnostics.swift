@@ -559,6 +559,337 @@ enum PlayerStressBenchmark {
     }
 }
 
+@MainActor
+private final class BunnyStressProbe {
+    var info: BunnyFFmpegMediaInfo?
+    var firstFrameRendered = false
+    var failure: Error?
+    var ended = false
+    var seekRevision = 0
+    var seekSucceeded = false
+    var decodedVideoFrames = 0
+    var droppedVideoFrames = 0
+    var renderedAudioFrames = 0
+    var bufferedDuration: TimeInterval = 0
+    var videoQueueEnd = TimeInterval.nan
+    var audioQueueEnd = TimeInterval.nan
+    var lastVideoAdvanceAt = ProcessInfo.processInfo.systemUptime
+
+    func bind(to decoder: BunnyFFmpegDecoder) {
+        decoder.onOpen = { [weak self] info in
+            self?.info = info
+        }
+        decoder.onFirstFrame = { [weak self] in
+            self?.firstFrameRendered = true
+        }
+        decoder.onSeekCompleted = { [weak self] _, succeeded in
+            guard let self else { return }
+            seekSucceeded = succeeded
+            seekRevision += 1
+        }
+        decoder.onMetrics = { [weak self] decoded, dropped, audio, buffered, videoEnd, audioEnd in
+            guard let self else { return }
+            if decoded > decodedVideoFrames {
+                lastVideoAdvanceAt = ProcessInfo.processInfo.systemUptime
+            }
+            decodedVideoFrames = decoded
+            droppedVideoFrames = dropped
+            renderedAudioFrames = audio
+            bufferedDuration = max(buffered, 0)
+            videoQueueEnd = videoEnd
+            audioQueueEnd = audioEnd
+        }
+        decoder.onEnded = { [weak self] in
+            self?.ended = true
+        }
+        decoder.onFailure = { [weak self] error in
+            self?.failure = error
+        }
+    }
+}
+
+/// Measures Bunny's direct libavformat/libavcodec backend without passing
+/// through KSPlayer or VLC. The same sample-buffer renderers used by the
+/// production Bunny surface remain attached so backpressure and frame pacing
+/// are representative of playback rather than an unbounded decode benchmark.
+@MainActor
+private enum BunnyPlayerStressBenchmark {
+    static func measure(
+        url: URL,
+        title: String,
+        visible: Bool = false,
+        startupTimeout: TimeInterval = 30,
+        minimumDuration: TimeInterval = 4,
+        seekFractions: [Double] = [0.10, 0.50, 0.85, 0.25, 0.70],
+        cadenceSampleSeconds: TimeInterval = 12
+    ) async throws -> PlayerStressMetrics {
+        let window = foregroundWindow()
+        let host = UIView(
+            frame: visible
+                ? (window?.bounds ?? UIScreen.main.bounds)
+                : CGRect(x: -4, y: -4, width: 2, height: 2)
+        )
+        host.isUserInteractionEnabled = false
+        host.alpha = visible ? 1 : 0.01
+        host.backgroundColor = .black
+        window?.addSubview(host)
+
+        let decoder = BunnyFFmpegDecoder(url: url)
+        decoder.videoLayer.frame = host.bounds
+        decoder.videoLayer.videoGravity = .resizeAspect
+        host.layer.addSublayer(decoder.videoLayer)
+        let probe = BunnyStressProbe()
+        probe.bind(to: decoder)
+
+        defer {
+            decoder.stop()
+            decoder.videoLayer.removeFromSuperlayer()
+            host.removeFromSuperview()
+        }
+
+        let startupStartedAt = ProcessInfo.processInfo.systemUptime
+        NSLog("PLAYER_STRESS_STEP startup_begin title=%@", title)
+        decoder.start()
+        try await waitUntil(timeout: startupTimeout, probe: probe) {
+            probe.info != nil && probe.firstFrameRendered
+        }
+        decoder.play(atRate: 1)
+        try await waitUntil(timeout: 5, probe: probe) {
+            decoder.currentTime > 0.15
+        }
+        let startupMilliseconds = elapsedMilliseconds(since: startupStartedAt)
+        NSLog("PLAYER_STRESS_STEP startup_end title=%@ elapsed_ms=%.1f", title, startupMilliseconds)
+
+        guard let info = probe.info else { throw PlayerStressError.timedOut }
+        let duration = info.duration
+        guard duration.isFinite, duration >= minimumDuration else {
+            throw PlayerStressError.invalidDuration(duration)
+        }
+
+        var seekLatencies = [Double]()
+        var seekSyncLatencies = [Double]()
+        var successfulSeeks = 0
+        for (seekIndex, fraction) in seekFractions.enumerated() {
+            let target = min(max(duration * fraction, 0.5), duration - 1)
+            decoder.pause()
+            let revision = probe.seekRevision
+            let decodedBeforeSeek = probe.decodedVideoFrames
+            let seekStartedAt = ProcessInfo.processInfo.systemUptime
+            NSLog("PLAYER_STRESS_STEP seek_begin title=%@ index=%ld", title, seekIndex + 1)
+            decoder.seek(toTime: target)
+            try await waitUntil(timeout: 15, probe: probe) {
+                probe.seekRevision > revision
+            }
+            let seekMilliseconds = elapsedMilliseconds(since: seekStartedAt)
+            seekLatencies.append(seekMilliseconds)
+            guard probe.seekSucceeded else { continue }
+
+            decoder.play(atRate: 1)
+            do {
+                try await waitUntil(timeout: 12, probe: probe) {
+                    let videoReady = !info.hasVideo
+                        || (probe.decodedVideoFrames > decodedBeforeSeek
+                            && probe.videoQueueEnd.isFinite
+                            && probe.videoQueueEnd >= target - 0.20)
+                    return videoReady && decoder.currentTime >= target
+                }
+                seekSyncLatencies.append(elapsedMilliseconds(since: seekStartedAt))
+                successfulSeeks += 1
+            } catch {
+                NSLog(
+                    "PLAYER_STRESS_STEP seek_resume_timeout title=%@ index=%ld target=%.3f current=%.3f video=%.3f",
+                    title,
+                    seekIndex + 1,
+                    target,
+                    decoder.currentTime,
+                    probe.videoQueueEnd
+                )
+            }
+        }
+
+        let pauseResumeAttempts = 5
+        var successfulPauseResumes = 0
+        for _ in 0..<pauseResumeAttempts {
+            let pausedAt = decoder.currentTime
+            decoder.pause()
+            try await Task.sleep(for: .milliseconds(120))
+            let stayedPaused = decoder.rate == 0
+                && abs(decoder.currentTime - pausedAt) < 0.20
+            decoder.play(atRate: 1)
+            do {
+                try await waitUntil(timeout: 3, probe: probe) {
+                    decoder.rate > 0 && decoder.currentTime >= pausedAt + 0.20
+                }
+                if stayedPaused { successfulPauseResumes += 1 }
+            } catch {
+                // Continue so the report captures all five cycles.
+            }
+        }
+
+        let pausedSeekTarget = min(max(duration * 0.48, 0.5), duration - 1)
+        decoder.pause()
+        let pausedSeekRevision = probe.seekRevision
+        decoder.seek(toTime: pausedSeekTarget)
+        try await waitUntil(timeout: 15, probe: probe) {
+            probe.seekRevision > pausedSeekRevision
+        }
+        decoder.pause()
+        try await Task.sleep(for: .milliseconds(350))
+        let pausedSeekPreserved = probe.seekSucceeded
+            && decoder.rate == 0
+            && abs(decoder.currentTime - pausedSeekTarget) < 2
+        decoder.play(atRate: 1)
+        try await waitUntil(timeout: 8, probe: probe) {
+            decoder.rate > 0 && decoder.currentTime >= pausedSeekTarget + 0.35
+        }
+
+        let sampleStartedAt = ProcessInfo.processInfo.systemUptime
+        let mediaStartedAt = decoder.currentTime
+        let decodedStartedAt = probe.decodedVideoFrames
+        var lastDecodedCount = probe.decodedVideoFrames
+        var unchangedSince: TimeInterval?
+        var isInsideCountedStall = false
+        var stalledIntervals = 0
+        var bufferingTransitions = 0
+        var wasBuffering = false
+        var syncDeltaSamples = [Double]()
+        var longestVideoFreezeMilliseconds = 0.0
+
+        let cadenceSampleCount = max(Int(cadenceSampleSeconds * 10), 1)
+        for _ in 0..<cadenceSampleCount {
+            try await Task.sleep(for: .milliseconds(100))
+            if let failure = probe.failure { throw failure }
+            let now = ProcessInfo.processInfo.systemUptime
+            let buffering = info.hasVideo && now - probe.lastVideoAdvanceAt >= 0.75
+            if buffering != wasBuffering {
+                bufferingTransitions += 1
+                wasBuffering = buffering
+            }
+
+            if info.hasVideo {
+                if probe.decodedVideoFrames == lastDecodedCount, decoder.rate > 0 {
+                    unchangedSince = unchangedSince ?? now
+                    if let unchangedSince,
+                       now - unchangedSince >= 0.35,
+                       !isInsideCountedStall {
+                        stalledIntervals += 1
+                        isInsideCountedStall = true
+                    }
+                    if let unchangedSince {
+                        longestVideoFreezeMilliseconds = max(
+                            longestVideoFreezeMilliseconds,
+                            elapsedMilliseconds(since: unchangedSince)
+                        )
+                    }
+                } else {
+                    lastDecodedCount = probe.decodedVideoFrames
+                    unchangedSince = nil
+                    isInsideCountedStall = false
+                }
+            }
+
+            if info.hasVideo,
+               info.hasAudio,
+               probe.videoQueueEnd.isFinite,
+               probe.audioQueueEnd.isFinite {
+                // Both renderers use the same AVSampleBufferRenderSynchronizer
+                // clock. Queue tails may legitimately differ because demuxers
+                // deliver packets in chunks; only unequal underflow can make
+                // one renderer visibly or audibly fall behind the other.
+                let clock = decoder.currentTime
+                let videoUnderflow = max(clock - probe.videoQueueEnd, 0)
+                let audioUnderflow = max(clock - probe.audioQueueEnd, 0)
+                syncDeltaSamples.append(abs(videoUnderflow - audioUnderflow) * 1_000)
+            }
+        }
+
+        let wallSeconds = ProcessInfo.processInfo.systemUptime - sampleStartedAt
+        let mediaSeconds = max(decoder.currentTime - mediaStartedAt, 0)
+        let decodedFrames = max(probe.decodedVideoFrames - decodedStartedAt, 0)
+        let displayedFPS = wallSeconds > 0 ? Double(decodedFrames) / wallSeconds : 0
+        guard !info.hasAudio || probe.renderedAudioFrames > 0 else {
+            throw PlayerStressError.missingAudioOutput
+        }
+        NSLog(
+            "PLAYER_STRESS_STEP bunny_media title=%@ video_frames=%ld audio_frames=%ld video_end=%.3f audio_end=%.3f",
+            title,
+            probe.decodedVideoFrames,
+            probe.renderedAudioFrames,
+            probe.videoQueueEnd,
+            probe.audioQueueEnd
+        )
+        return PlayerStressMetrics(
+            title: title,
+            startupMilliseconds: startupMilliseconds,
+            seekAttempts: seekFractions.count,
+            successfulSeeks: successfulSeeks,
+            seekMedianMilliseconds: percentile(seekLatencies, percentile: 0.50),
+            seekP95Milliseconds: percentile(seekLatencies, percentile: 0.95),
+            seekSyncRecoveryMilliseconds: seekSyncLatencies,
+            seekSyncRecoveryP95Milliseconds: percentile(
+                seekSyncLatencies,
+                percentile: 0.95
+            ),
+            pauseResumeAttempts: pauseResumeAttempts,
+            successfulPauseResumes: successfulPauseResumes,
+            pausedSeekPreserved: pausedSeekPreserved,
+            stalledIntervals: stalledIntervals,
+            bufferingTransitions: bufferingTransitions,
+            nominalFPS: info.nominalFrameRate,
+            displayedFPS: displayedFPS,
+            droppedVideoFrames: UInt32(clamping: probe.droppedVideoFrames),
+            droppedVideoPackets: 0,
+            realTimeRatio: wallSeconds > 0 ? mediaSeconds / wallSeconds : 0,
+            audioVideoSyncP95Milliseconds: percentile(
+                syncDeltaSamples,
+                percentile: 0.95,
+                emptyValue: 0
+            ),
+            audioVideoSyncMaxMilliseconds: syncDeltaSamples.max() ?? 0,
+            longestVideoFreezeMilliseconds: longestVideoFreezeMilliseconds,
+            audioTrackCount: info.audioTracks.count,
+            videoTrackCount: info.hasVideo ? 1 : 0,
+            renderedVideoFrame: !info.hasVideo || probe.firstFrameRendered
+        )
+    }
+
+    private static func waitUntil(
+        timeout: TimeInterval,
+        probe: BunnyStressProbe,
+        condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if let failure = probe.failure { throw failure }
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw PlayerStressError.timedOut
+    }
+
+    private static func percentile(
+        _ values: [Double],
+        percentile: Double,
+        emptyValue: Double = .infinity
+    ) -> Double {
+        guard !values.isEmpty else { return emptyValue }
+        let sorted = values.sorted()
+        let index = Int((Double(sorted.count - 1) * percentile).rounded(.up))
+        return sorted[min(max(index, 0), sorted.count - 1)]
+    }
+
+    private static func elapsedMilliseconds(since start: TimeInterval) -> Double {
+        (ProcessInfo.processInfo.systemUptime - start) * 1_000
+    }
+
+    private static func foregroundWindow() -> UIWindow? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }?
+            .windows.first { $0.isKeyWindow }
+    }
+}
+
 /// KSPlayer's `autoPlay` seek path can leave HLS streams in an engine-specific
 /// transitional state. Keeping seek and resume distinct gives each backend a
 /// bounded opportunity to reassert playback after a completed scrub.
@@ -577,6 +908,19 @@ private final class PlayerSeekCompletionGate {
         didResolve = true
         completion(finished)
         return true
+    }
+}
+
+/// AVPlayer's seek completion is not guaranteed to arrive on the main actor.
+/// Carry only weak references through that callback, then dereference them
+/// after hopping back to the actor that owns the player UI.
+private final class PlayerSeekReferences: @unchecked Sendable {
+    weak var layer: KSPlayerLayer?
+    weak var nativePlayer: KSAVPlayer?
+
+    init(layer: KSPlayerLayer, nativePlayer: KSAVPlayer) {
+        self.layer = layer
+        self.nativePlayer = nativePlayer
     }
 }
 
@@ -600,10 +944,14 @@ enum PlayerSeekRecovery {
             // has left `.seeking`. Reassert playback for a bounded window so a
             // late state update cannot permanently strand the default engine.
             mediaPlayer.play()
-            Task { @MainActor in
+            Task { @MainActor [weak layer, weak mediaPlayer] in
                 for _ in 0..<24 {
                     try? await Task.sleep(for: .milliseconds(250))
-                    guard generations[key] == generation,
+                    guard let layer,
+                          let mediaPlayer,
+                          layer.player === mediaPlayer,
+                          mediaPlayer.playbackState != .stopped,
+                          generations[key] == generation,
                           !Task.isCancelled
                     else { return }
                     if !mediaPlayer.isPlaying {
@@ -614,7 +962,10 @@ enum PlayerSeekRecovery {
                         // overwritten by that late transition.
                         mediaPlayer.pause()
                         try? await Task.sleep(for: .milliseconds(25))
-                        guard generations[key] == generation else { return }
+                        guard layer.player === mediaPlayer,
+                              mediaPlayer.playbackState != .stopped,
+                              generations[key] == generation
+                        else { return }
                         mediaPlayer.play()
                         layer.play()
                     }
@@ -631,9 +982,13 @@ enum PlayerSeekRecovery {
             atRate: max(nativePlayer.playbackRate, 1)
         )
         for delay in [350, 900] {
-            Task { @MainActor in
+            Task { @MainActor [weak layer, weak nativePlayer] in
                 try? await Task.sleep(for: .milliseconds(delay))
-                guard generations[key] == generation,
+                guard let layer,
+                      let nativePlayer,
+                      layer.player === nativePlayer,
+                      nativePlayer.playbackState != .stopped,
+                      generations[key] == generation,
                       layer.player.playbackState == .playing,
                       nativePlayer.player.rate == 0
                 else { return }
@@ -666,12 +1021,24 @@ enum PlayerSeekRecovery {
             Self.pause(layer: layer)
             let time = CMTime(seconds: max(target, 0), preferredTimescale: 600)
             let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
+            let references = PlayerSeekReferences(
+                layer: layer,
+                nativePlayer: nativePlayer
+            )
             nativePlayer.player.seek(
                 to: time,
                 toleranceBefore: tolerance,
                 toleranceAfter: tolerance
             ) { finished in
                 Task { @MainActor in
+                    guard let layer = references.layer,
+                          let nativePlayer = references.nativePlayer,
+                          layer.player === nativePlayer,
+                          nativePlayer.playbackState != .stopped
+                    else {
+                        completionGate.resolve(false)
+                        return
+                    }
                     if finished, resume { Self.resume(layer: layer) }
                     completionGate.resolve(finished)
                 }
@@ -699,10 +1066,16 @@ enum PlayerSeekRecovery {
         attempt: Int,
         completion: @escaping @MainActor @Sendable (Bool) -> Void
     ) {
-        layer.seek(time: target, autoPlay: false) { finished in
-            Task { @MainActor in
+        layer.seek(time: target, autoPlay: false) { [weak layer] finished in
+            Task { @MainActor [weak layer] in
+                guard let layer else {
+                    completion(false)
+                    return
+                }
                 let key = ObjectIdentifier(layer)
-                guard generations[key] == generation else {
+                guard layer.player.playbackState != .stopped,
+                      generations[key] == generation
+                else {
                     completion(false)
                     return
                 }
@@ -718,7 +1091,9 @@ enum PlayerSeekRecovery {
                     let adoptionWindow = attempt == 0 ? 0.6 : 4.0
                     let deadline = ProcessInfo.processInfo.systemUptime + adoptionWindow
                     while ProcessInfo.processInfo.systemUptime < deadline {
-                        guard generations[key] == generation else {
+                        guard layer.player.playbackState != .stopped,
+                              generations[key] == generation
+                        else {
                             completion(false)
                             return
                         }
@@ -735,7 +1110,10 @@ enum PlayerSeekRecovery {
                 // seek before its reopened decoder adopts the timestamp. Give
                 // the selected KSPlayer engine one bounded retry before the UI
                 // reports a failure or considers another player.
-                guard attempt == 0, generations[key] == generation else {
+                guard attempt == 0,
+                      layer.player.playbackState != .stopped,
+                      generations[key] == generation
+                else {
                     completion(false)
                     return
                 }
@@ -756,6 +1134,7 @@ enum PlayerSeekRecovery {
 private enum PlayerStressError: LocalizedError {
     case invalidDuration(TimeInterval)
     case timedOut
+    case missingAudioOutput
     case prefixCaptureRequiresByteRanges
     case invalidPrefixCaptureSize(Int64)
 
@@ -765,6 +1144,8 @@ private enum PlayerStressError: LocalizedError {
             "Player stress source has invalid duration: \(duration)"
         case .timedOut:
             "Player stress operation timed out"
+        case .missingAudioOutput:
+            "Bunny discovered an audio track but rendered no audio samples"
         case .prefixCaptureRequiresByteRanges:
             "Provider did not honor the bounded byte-range capture request"
         case let .invalidPrefixCaptureSize(bytes):
@@ -790,22 +1171,31 @@ struct PlayerStressScreen: View {
             let environment = ProcessInfo.processInfo.environment
             let engine = environment["SKELETON_PLAYER_STRESS_ENGINE"] ?? "hybrid"
             let bufferLabel = environment["SKELETON_PLAYER_STRESS_BUFFER"] ?? "default"
-            let selectedEngine: StremioPlayerConfiguration.Engine = switch engine {
-            case "native": .native
-            case "me", "ffmpeg": .ffmpeg
-            default: .automatic
-            }
-            let options = StremioPlayerConfiguration.makeOptions(engine: selectedEngine)
-            if let rawBuffer = environment["SKELETON_PLAYER_STRESS_BUFFER"],
-               let buffer = Double(rawBuffer) {
-                options.preferredForwardBufferDuration = buffer
-            }
             do {
-                let result = try await PlayerStressBenchmark.measure(
-                    url: url,
-                    title: "\(engine):b\(bufferLabel):\(url.lastPathComponent)",
-                    options: options
-                )
+                let result: PlayerStressMetrics
+                if engine == "bunny" {
+                    result = try await BunnyPlayerStressBenchmark.measure(
+                        url: url,
+                        title: "bunny:custom:\(url.lastPathComponent)",
+                        visible: environment["SKELETON_PLAYER_STRESS_VISIBLE"] == "1"
+                    )
+                } else {
+                    let selectedEngine: StremioPlayerConfiguration.Engine = switch engine {
+                    case "native": .native
+                    case "me", "ffmpeg": .ffmpeg
+                    default: .automatic
+                    }
+                    let options = StremioPlayerConfiguration.makeOptions(engine: selectedEngine)
+                    if let rawBuffer = environment["SKELETON_PLAYER_STRESS_BUFFER"],
+                       let buffer = Double(rawBuffer) {
+                        options.preferredForwardBufferDuration = buffer
+                    }
+                    result = try await PlayerStressBenchmark.measure(
+                        url: url,
+                        title: "\(engine):b\(bufferLabel):\(url.lastPathComponent)",
+                        options: options
+                    )
+                }
                 let encoder = JSONEncoder()
                 encoder.nonConformingFloatEncodingStrategy = .convertToString(
                     positiveInfinity: "Infinity",
@@ -877,12 +1267,20 @@ private enum ProviderPrefixCapture {
 struct ProviderPlayerAuditScreen: View {
     @EnvironmentObject private var model: AppModel
     @State private var plan: PlaybackPlan?
+    @State private var failoverCandidates: [StreamPlaybackCandidate]?
     @State private var title = "Resolving provider stream…"
     @State private var failureMessage: String?
 
     var body: some View {
         Group {
-            if let plan {
+            if let failoverCandidates {
+                NavigationStack {
+                    ResolvingPlayerScreen(
+                        candidates: failoverCandidates,
+                        minimumVideoDuration: 20 * 60
+                    )
+                }
+            } else if let plan {
                 NavigationStack {
                     PlayerScreen(
                         plan: plan,
@@ -922,6 +1320,76 @@ struct ProviderPlayerAuditScreen: View {
         let providerNeedle = environment["SKELETON_PROVIDER_NAME"] ?? "Torrentio"
         let streamNeedle = environment["SKELETON_PROVIDER_STREAM_NEEDLE"] ?? "Lootera"
 
+        if let directValue = environment["SKELETON_PROVIDER_DIRECT_URL"],
+           let directURL = URL(string: directValue) {
+            let directTitle = environment["SKELETON_PROVIDER_DIRECT_TITLE"]
+                ?? "Direct provider playback audit"
+            let directMetadata = environment["SKELETON_PROVIDER_DIRECT_METADATA"]
+                ?? directTitle
+            let providerTag = providerNeedle.range(
+                of: "TB",
+                options: .caseInsensitive
+            ) == nil ? "[RD]" : "[TB]"
+            let directStream = Stream(
+                url: directURL,
+                externalUrl: nil,
+                name: "\(providerTag) Provider audit",
+                title: directMetadata,
+                description: nil,
+                infoHash: nil,
+                fileIdx: nil,
+                sources: nil
+            )
+            #if targetEnvironment(simulator)
+            if environment["SKELETON_PROVIDER_FAILOVER_AUDIT"] == "1",
+               let brokenURL = URL(string: "http://127.0.0.1:1/unavailable.mkv") {
+                let brokenStream = Stream(
+                    url: brokenURL,
+                    externalUrl: nil,
+                    name: "[TB] Forced unavailable provider source",
+                    title: "Provider failover audit source 1",
+                    description: nil,
+                    infoHash: nil,
+                    fileIdx: nil,
+                    sources: nil
+                )
+                failoverCandidates = [
+                    StreamPlaybackCandidate(
+                        stream: brokenStream,
+                        providerName: providerNeedle,
+                        sourceID: "provider-audit-broken"
+                    ),
+                    StreamPlaybackCandidate(
+                        stream: directStream,
+                        providerName: providerNeedle,
+                        sourceID: "provider-audit-real"
+                    ),
+                ]
+                title = "Provider failover audit"
+                NSLog(
+                    "PROVIDER_FAILOVER_AUDIT ready sources=2 provider=%@",
+                    providerNeedle
+                )
+                return
+            }
+            #endif
+            do {
+                plan = try await model.playbackPlan(
+                    for: directStream,
+                    providerName: providerNeedle
+                )
+                title = directTitle
+                NSLog(
+                    "PROVIDER_PLAYER_AUDIT resolved_direct player=%@ mime=%@",
+                    StremioInternalPlayer.selected.rawValue,
+                    plan?.detectedMIMEType ?? "unknown"
+                )
+            } catch {
+                fail(error.localizedDescription)
+            }
+            return
+        }
+
         await model.start()
         guard let item = model.catalog.first(where: {
             $0.name.range(of: movieNeedle, options: .caseInsensitive) != nil
@@ -932,6 +1400,15 @@ struct ProviderPlayerAuditScreen: View {
 
         let detail = await model.details(for: item)
         let providers = await model.streamProviders(for: detail)
+        if environment["SKELETON_PROVIDER_LIST_PROVIDERS"] == "1" {
+            for provider in providers {
+                NSLog(
+                    "PROVIDER_GROUP name=%@ streams=%ld",
+                    provider.name,
+                    provider.streams.count
+                )
+            }
+        }
         guard let provider = providers.first(where: {
             $0.name.range(of: providerNeedle, options: .caseInsensitive) != nil
         }) else {

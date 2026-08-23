@@ -7,6 +7,9 @@
     "description": "A deterministic series used to verify seasons, episode progress, and watched state.",
     "releaseInfo": "2024–",
     "genres": ["Drama", "Adventure"],
+    "trailerStreams": [
+      { "title": "Official trailer", "ytId": "yUQM7H4Swgw" }
+    ],
     "videos": [
       {
         "id": "tt-fixture-series:1:1",
@@ -14,6 +17,7 @@
         "season": 1,
         "episode": 1,
         "thumbnail": "http://127.0.0.1:18766/ui-states/episode-1.png",
+        "overview": "A missing signal draws the crew toward a dangerous first encounter.",
         "released": "2024-01-05T00:00:00.000Z"
       },
       {
@@ -22,6 +26,7 @@
         "season": 1,
         "episode": 2,
         "thumbnail": "http://127.0.0.1:18766/ui-states/episode-2.png",
+        "overview": "The team crosses hostile terrain while an old alliance begins to fracture.",
         "released": "2024-01-12T00:00:00.000Z"
       },
       {
@@ -30,6 +35,7 @@
         "season": 1,
         "episode": 3,
         "thumbnail": "http://127.0.0.1:18766/ui-states/episode-3.png",
+        "overview": "Returning home reveals that the mystery has already followed them there.",
         "released": "2024-01-19T00:00:00.000Z"
       },
       {
@@ -38,6 +44,7 @@
         "season": 2,
         "episode": 1,
         "thumbnail": "http://127.0.0.1:18766/ui-states/episode-4.png",
+        "overview": "A new mission forces the team to confront the cost of their last journey.",
         "released": "2025-02-07T00:00:00.000Z"
       }
     ]

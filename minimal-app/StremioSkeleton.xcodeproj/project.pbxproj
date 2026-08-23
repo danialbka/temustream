@@ -8,31 +8,48 @@
 
 /* Begin PBXBuildFile section */
 		07F292F566B3B17FE316AAAB /* AddonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C66DC93D56D584B637C0F01F /* AddonClient.swift */; };
+		09FE991F737FDE0A59DCF886 /* WatchTogetherViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCB8982E59B993CEDE4C575B /* WatchTogetherViews.swift */; };
+		0F88AD37A7AD4199F8C15E5B /* PlaybackViewportMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5EFD9F724CAC9771285F997 /* PlaybackViewportMode.swift */; };
+		128AAE2522F94D5800653E4C /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = CF821B7ADD29BE7D7C8930AC /* KSPlayer */; };
 		14C99D949BC218C407119A03 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D845BAABF69E61C0D51B653 /* PlayerView.swift */; };
 		15AAD0E732450B4D3F3EC0A9 /* MediaContainerSniffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */; };
+		1927140619BE49221D6B796B /* UIStateBunnyPlayerStub.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB0713DA2898B4307BFD5085 /* UIStateBunnyPlayerStub.swift */; };
+		1B15C14C7634EE672CA41DAA /* WatchPlaybackSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = E67CADA6805601E394F3DF32 /* WatchPlaybackSync.swift */; };
 		24310D9E15C770621577B87F /* UIStateScreenshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA1179280522C1057C8BA39E /* UIStateScreenshots.swift */; };
+		271AC0DA4A6EF3FFBBD5430B /* Libswscale in Frameworks */ = {isa = PBXBuildFile; productRef = 1EDB8E9524B7031BB54B5A3D /* Libswscale */; };
 		2828583DACBC80473C094A07 /* PlaybackPerformanceCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3DDC8105E3ACC202BC100A /* PlaybackPerformanceCore.swift */; };
 		30C5028A6D2EE15041EA9310 /* AddonEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80BD475FE77AB54F9BCCC6A /* AddonEndpoint.swift */; };
-		38245866A82E0464B4719346 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = CF821B7ADD29BE7D7C8930AC /* KSPlayer */; };
+		38245866A82E0464B4719346 /* ConvexMobile in Frameworks */ = {isa = PBXBuildFile; productRef = 8DE6E8AA2E74BC6D33338944 /* ConvexMobile */; };
 		3E006AA43C2FEB3FBE9E46B0 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAD90D9901EB74BA61FFE593 /* Views.swift */; };
 		50769A5D4E22B6480AFDE5D2 /* TorrentStreamingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */; };
 		57781119C19F36F58CE33852 /* MobileVLCKit.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		58E6FDEFC1F6D94530F36242 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92DDACDA7F728CAAF6D6CF77 /* AppModel.swift */; };
+		67276B1A5BFFB5B071B82A83 /* BunnyFFmpegDecoder.m in Sources */ = {isa = PBXBuildFile; fileRef = 9B336BE4644ACD78D123FDB5 /* BunnyFFmpegDecoder.m */; };
 		677807F725A111C9AB600D4D /* CatalogPaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 524A29523E9B036217F6D8B4 /* CatalogPaging.swift */; };
 		68FB9CF30638ECE62FAEC739 /* StremioAccountClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76BC44034EB5CB12127AC2DB /* StremioAccountClient.swift */; };
 		7093365DD7D27F80CE45F97B /* StremioPlaybackCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 546F368855314461B504B462 /* StremioPlaybackCore.xcframework */; };
+		80E94309BD60F2F03E0E53AD /* UIStateWatchTogetherStub.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24E6F5471C47FE0B2F4D0F10 /* UIStateWatchTogetherStub.swift */; };
+		8C8ED734CF335039F9A44521 /* WatchTogetherModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C611CA93396CF3AEBB880FB /* WatchTogetherModel.swift */; };
+		9827D66EECF67B26A1F44B8D /* Libavformat in Frameworks */ = {isa = PBXBuildFile; productRef = 0870106A3B670B85BEC83F50 /* Libavformat */; };
 		9997DCA09069B202121989D4 /* SubtitlePlacement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 678C989627087987EEE1A91C /* SubtitlePlacement.swift */; };
 		9B2A9768EC7A1B4CD6DDAD36 /* TorBoxPlaybackResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */; };
 		9CC2C3A1910D8AF547959D16 /* MobileVLCKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */; };
+		9DEDC02CB85674FA12036348 /* EpisodeResumeSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 460AEF93CC334BDCF6CBD994 /* EpisodeResumeSelection.swift */; };
 		A3E389B58EB73059865D5150 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B27A3BF40F89EDE5C96D671 /* SessionStore.swift */; };
 		A840DE1E376E0F89835D400A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9A287360C6BB2F0BDEC601BC /* Assets.xcassets */; };
 		A9890D53A34F0439AE8942E2 /* StremioSkeletonApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62DB074CBE862325B4337472 /* StremioSkeletonApp.swift */; };
 		AA298044E82ED14FFB4CA264 /* PlaybackProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F41290FB3D04E854F302B17E /* PlaybackProgressStore.swift */; };
+		AC05EA363D56E2A98F1BBF5B /* Libavcodec in Frameworks */ = {isa = PBXBuildFile; productRef = 210729C6F0C989705BAE4F93 /* Libavcodec */; };
+		AFA68ADCB78E5841063B0182 /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = D3907A3551A9A8003A917297 /* LiveKit */; };
 		B0D9439C0F01597F3E33BD3A /* PlayerDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F159C8CD01833BCBB337842 /* PlayerDiagnostics.swift */; };
+		B1E1779E39B7DE24F0DFB73A /* Libswresample in Frameworks */ = {isa = PBXBuildFile; productRef = 2A9CCFC1954E109AB9BFC4C3 /* Libswresample */; };
+		B73B3DDDB60F980A34BAD08D /* BunnyPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44120F14991693927D816340 /* BunnyPlayerView.swift */; };
 		BB81810366F95923ECD1BE2A /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80A2FE21D2D44501F475EC70 /* Models.swift */; };
 		BDECE20EEEE3B43AD7A63BF3 /* StreamTransportBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF4419C84972F1AEE3CFEF98 /* StreamTransportBridge.swift */; };
 		C2A10ADB9140E2015DBFB710 /* TorBoxStreamSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */; };
+		D4FF03B0AD74C8F0EA1007DB /* PlaybackPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 004AD26B7D9856D9AA52F8EC /* PlaybackPreferences.swift */; };
 		D9A23E6C603D85C066AFB531 /* LibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */; };
+		EFEEFE653C3ADF27F7315180 /* Libavutil in Frameworks */ = {isa = PBXBuildFile; productRef = 797691F8BEE241B5EDCBF767 /* Libavutil */; };
 		FA7959F257A57400167AFC41 /* PlaybackCompletionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943C8D683B84D44314618B4B /* PlaybackCompletionStore.swift */; };
 /* End PBXBuildFile section */
 
@@ -51,10 +68,15 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		004AD26B7D9856D9AA52F8EC /* PlaybackPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPreferences.swift; sourceTree = "<group>"; };
 		0D845BAABF69E61C0D51B653 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
+		1C611CA93396CF3AEBB880FB /* WatchTogetherModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogetherModel.swift; sourceTree = "<group>"; };
+		24E6F5471C47FE0B2F4D0F10 /* UIStateWatchTogetherStub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIStateWatchTogetherStub.swift; sourceTree = "<group>"; };
 		2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MobileVLCKit.xcframework; path = build/dependencies/MobileVLCKit.xcframework; sourceTree = "<group>"; };
 		3CAED137EB68745CF1797482 /* StremioSkeleton.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = StremioSkeleton.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorBoxPlaybackResolver.swift; sourceTree = "<group>"; };
+		44120F14991693927D816340 /* BunnyPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BunnyPlayerView.swift; sourceTree = "<group>"; };
+		460AEF93CC334BDCF6CBD994 /* EpisodeResumeSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeResumeSelection.swift; sourceTree = "<group>"; };
 		524A29523E9B036217F6D8B4 /* CatalogPaging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogPaging.swift; sourceTree = "<group>"; };
 		546F368855314461B504B462 /* StremioPlaybackCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = StremioPlaybackCore.xcframework; path = build/dependencies/StremioPlaybackCore.xcframework; sourceTree = "<group>"; };
 		5B27A3BF40F89EDE5C96D671 /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
@@ -69,16 +91,23 @@
 		92DDACDA7F728CAAF6D6CF77 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		943C8D683B84D44314618B4B /* PlaybackCompletionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackCompletionStore.swift; sourceTree = "<group>"; };
 		9A287360C6BB2F0BDEC601BC /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		9B336BE4644ACD78D123FDB5 /* BunnyFFmpegDecoder.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = BunnyFFmpegDecoder.m; sourceTree = "<group>"; };
 		AF4419C84972F1AEE3CFEF98 /* StreamTransportBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamTransportBridge.swift; sourceTree = "<group>"; };
 		AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorrentStreamingClient.swift; sourceTree = "<group>"; };
+		B5EFD9F724CAC9771285F997 /* PlaybackViewportMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackViewportMode.swift; sourceTree = "<group>"; };
 		C232DE83E2D6EAF131790095 /* StremioSkeleton-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "StremioSkeleton-Bridging-Header.h"; sourceTree = "<group>"; };
 		C66DC93D56D584B637C0F01F /* AddonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddonClient.swift; sourceTree = "<group>"; };
 		CAD90D9901EB74BA61FFE593 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
 		DA1179280522C1057C8BA39E /* UIStateScreenshots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIStateScreenshots.swift; sourceTree = "<group>"; };
+		DCB8982E59B993CEDE4C575B /* WatchTogetherViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogetherViews.swift; sourceTree = "<group>"; };
+		E67CADA6805601E394F3DF32 /* WatchPlaybackSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPlaybackSync.swift; sourceTree = "<group>"; };
 		EA3DDC8105E3ACC202BC100A /* PlaybackPerformanceCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPerformanceCore.swift; sourceTree = "<group>"; };
+		EAFE8BC47B2335E1250F0179 /* BunnyFFmpegDecoder.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = BunnyFFmpegDecoder.h; sourceTree = "<group>"; };
+		ED956DBDB8F34B2319BADCD1 /* WatchTogether.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = WatchTogether.xcconfig; sourceTree = "<group>"; };
 		F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorBoxStreamSelection.swift; sourceTree = "<group>"; };
 		F41290FB3D04E854F302B17E /* PlaybackProgressStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackProgressStore.swift; sourceTree = "<group>"; };
 		F80BD475FE77AB54F9BCCC6A /* AddonEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddonEndpoint.swift; sourceTree = "<group>"; };
+		FB0713DA2898B4307BFD5085 /* UIStateBunnyPlayerStub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIStateBunnyPlayerStub.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -86,7 +115,14 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				38245866A82E0464B4719346 /* KSPlayer in Frameworks */,
+				38245866A82E0464B4719346 /* ConvexMobile in Frameworks */,
+				AFA68ADCB78E5841063B0182 /* LiveKit in Frameworks */,
+				128AAE2522F94D5800653E4C /* KSPlayer in Frameworks */,
+				AC05EA363D56E2A98F1BBF5B /* Libavcodec in Frameworks */,
+				9827D66EECF67B26A1F44B8D /* Libavformat in Frameworks */,
+				EFEEFE653C3ADF27F7315180 /* Libavutil in Frameworks */,
+				B1E1779E39B7DE24F0DFB73A /* Libswresample in Frameworks */,
+				271AC0DA4A6EF3FFBBD5430B /* Libswscale in Frameworks */,
 				9CC2C3A1910D8AF547959D16 /* MobileVLCKit.xcframework in Frameworks */,
 				7093365DD7D27F80CE45F97B /* StremioPlaybackCore.xcframework in Frameworks */,
 			);
@@ -99,6 +135,7 @@
 			isa = PBXGroup;
 			children = (
 				F9F8FECF9E920E7FD503BC7D /* App */,
+				F56A59FD0CDCA10B0C956624 /* config */,
 				D632989DDF21E4D09C054ED9 /* Packages */,
 				477A839685716B2CB90FFE5C /* Resources */,
 				F487699F38004DD5AD864466 /* StremioSkeletonCore */,
@@ -147,24 +184,39 @@
 				C66DC93D56D584B637C0F01F /* AddonClient.swift */,
 				F80BD475FE77AB54F9BCCC6A /* AddonEndpoint.swift */,
 				524A29523E9B036217F6D8B4 /* CatalogPaging.swift */,
+				460AEF93CC334BDCF6CBD994 /* EpisodeResumeSelection.swift */,
 				87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */,
 				6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */,
 				80A2FE21D2D44501F475EC70 /* Models.swift */,
 				943C8D683B84D44314618B4B /* PlaybackCompletionStore.swift */,
+				004AD26B7D9856D9AA52F8EC /* PlaybackPreferences.swift */,
 				F41290FB3D04E854F302B17E /* PlaybackProgressStore.swift */,
+				B5EFD9F724CAC9771285F997 /* PlaybackViewportMode.swift */,
 				76BC44034EB5CB12127AC2DB /* StremioAccountClient.swift */,
 				678C989627087987EEE1A91C /* SubtitlePlacement.swift */,
 				F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */,
 				AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */,
+				E67CADA6805601E394F3DF32 /* WatchPlaybackSync.swift */,
 			);
 			name = StremioSkeletonCore;
 			path = Sources/StremioSkeletonCore;
+			sourceTree = "<group>";
+		};
+		F56A59FD0CDCA10B0C956624 /* config */ = {
+			isa = PBXGroup;
+			children = (
+				ED956DBDB8F34B2319BADCD1 /* WatchTogether.xcconfig */,
+			);
+			path = config;
 			sourceTree = "<group>";
 		};
 		F9F8FECF9E920E7FD503BC7D /* App */ = {
 			isa = PBXGroup;
 			children = (
 				92DDACDA7F728CAAF6D6CF77 /* AppModel.swift */,
+				EAFE8BC47B2335E1250F0179 /* BunnyFFmpegDecoder.h */,
+				9B336BE4644ACD78D123FDB5 /* BunnyFFmpegDecoder.m */,
+				44120F14991693927D816340 /* BunnyPlayerView.swift */,
 				EA3DDC8105E3ACC202BC100A /* PlaybackPerformanceCore.swift */,
 				8F159C8CD01833BCBB337842 /* PlayerDiagnostics.swift */,
 				0D845BAABF69E61C0D51B653 /* PlayerView.swift */,
@@ -173,8 +225,12 @@
 				C232DE83E2D6EAF131790095 /* StremioSkeleton-Bridging-Header.h */,
 				62DB074CBE862325B4337472 /* StremioSkeletonApp.swift */,
 				3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */,
+				FB0713DA2898B4307BFD5085 /* UIStateBunnyPlayerStub.swift */,
 				DA1179280522C1057C8BA39E /* UIStateScreenshots.swift */,
+				24E6F5471C47FE0B2F4D0F10 /* UIStateWatchTogetherStub.swift */,
 				CAD90D9901EB74BA61FFE593 /* Views.swift */,
+				1C611CA93396CF3AEBB880FB /* WatchTogetherModel.swift */,
+				DCB8982E59B993CEDE4C575B /* WatchTogetherViews.swift */,
 			);
 			name = App;
 			path = iOS/App;
@@ -198,7 +254,14 @@
 			);
 			name = StremioSkeleton;
 			packageProductDependencies = (
+				8DE6E8AA2E74BC6D33338944 /* ConvexMobile */,
+				D3907A3551A9A8003A917297 /* LiveKit */,
 				CF821B7ADD29BE7D7C8930AC /* KSPlayer */,
+				210729C6F0C989705BAE4F93 /* Libavcodec */,
+				0870106A3B670B85BEC83F50 /* Libavformat */,
+				797691F8BEE241B5EDCBF767 /* Libavutil */,
+				2A9CCFC1954E109AB9BFC4C3 /* Libswresample */,
+				1EDB8E9524B7031BB54B5A3D /* Libswscale */,
 			);
 			productName = StremioSkeleton;
 			productReference = 3CAED137EB68745CF1797482 /* StremioSkeleton.app */;
@@ -229,6 +292,9 @@
 			mainGroup = 30EA7B51C7F994C2336CBCF1;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				3B30D910061FF409721E609E /* XCRemoteSwiftPackageReference "convex-swift" */,
+				6B035CB00383413E208AC3F7 /* XCRemoteSwiftPackageReference "FFmpegKit" */,
+				F6D91D044DF79A59DA825EF9 /* XCRemoteSwiftPackageReference "client-sdk-swift" */,
 				00A007B065EAAB6437AD3100 /* XCLocalSwiftPackageReference "Vendor/KSPlayer" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -260,13 +326,18 @@
 				07F292F566B3B17FE316AAAB /* AddonClient.swift in Sources */,
 				30C5028A6D2EE15041EA9310 /* AddonEndpoint.swift in Sources */,
 				58E6FDEFC1F6D94530F36242 /* AppModel.swift in Sources */,
+				67276B1A5BFFB5B071B82A83 /* BunnyFFmpegDecoder.m in Sources */,
+				B73B3DDDB60F980A34BAD08D /* BunnyPlayerView.swift in Sources */,
 				677807F725A111C9AB600D4D /* CatalogPaging.swift in Sources */,
+				9DEDC02CB85674FA12036348 /* EpisodeResumeSelection.swift in Sources */,
 				D9A23E6C603D85C066AFB531 /* LibraryStore.swift in Sources */,
 				15AAD0E732450B4D3F3EC0A9 /* MediaContainerSniffer.swift in Sources */,
 				BB81810366F95923ECD1BE2A /* Models.swift in Sources */,
 				FA7959F257A57400167AFC41 /* PlaybackCompletionStore.swift in Sources */,
 				2828583DACBC80473C094A07 /* PlaybackPerformanceCore.swift in Sources */,
+				D4FF03B0AD74C8F0EA1007DB /* PlaybackPreferences.swift in Sources */,
 				AA298044E82ED14FFB4CA264 /* PlaybackProgressStore.swift in Sources */,
+				0F88AD37A7AD4199F8C15E5B /* PlaybackViewportMode.swift in Sources */,
 				B0D9439C0F01597F3E33BD3A /* PlayerDiagnostics.swift in Sources */,
 				14C99D949BC218C407119A03 /* PlayerView.swift in Sources */,
 				A3E389B58EB73059865D5150 /* SessionStore.swift in Sources */,
@@ -277,8 +348,13 @@
 				9B2A9768EC7A1B4CD6DDAD36 /* TorBoxPlaybackResolver.swift in Sources */,
 				C2A10ADB9140E2015DBFB710 /* TorBoxStreamSelection.swift in Sources */,
 				50769A5D4E22B6480AFDE5D2 /* TorrentStreamingClient.swift in Sources */,
+				1927140619BE49221D6B796B /* UIStateBunnyPlayerStub.swift in Sources */,
 				24310D9E15C770621577B87F /* UIStateScreenshots.swift in Sources */,
+				80E94309BD60F2F03E0E53AD /* UIStateWatchTogetherStub.swift in Sources */,
 				3E006AA43C2FEB3FBE9E46B0 /* Views.swift in Sources */,
+				1B15C14C7634EE672CA41DAA /* WatchPlaybackSync.swift in Sources */,
+				8C8ED734CF335039F9A44521 /* WatchTogetherModel.swift in Sources */,
+				09FE991F737FDE0A59DCF886 /* WatchTogetherViews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -287,6 +363,7 @@
 /* Begin XCBuildConfiguration section */
 		964C850B3C2208050D9DED5C /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = ED956DBDB8F34B2319BADCD1 /* WatchTogether.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = iOS/Resources/StremioSkeleton.entitlements;
@@ -317,6 +394,7 @@
 		};
 		B94B527A9479A99CF14015F0 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = ED956DBDB8F34B2319BADCD1 /* WatchTogether.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = iOS/Resources/StremioSkeleton.entitlements;
@@ -494,10 +572,72 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		3B30D910061FF409721E609E /* XCRemoteSwiftPackageReference "convex-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/get-convex/convex-swift.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.8.1;
+			};
+		};
+		6B035CB00383413E208AC3F7 /* XCRemoteSwiftPackageReference "FFmpegKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kingslay/FFmpegKit.git";
+			requirement = {
+				kind = exactVersion;
+				version = 6.1.4;
+			};
+		};
+		F6D91D044DF79A59DA825EF9 /* XCRemoteSwiftPackageReference "client-sdk-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/client-sdk-swift.git";
+			requirement = {
+				kind = exactVersion;
+				version = 2.16.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
+		0870106A3B670B85BEC83F50 /* Libavformat */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6B035CB00383413E208AC3F7 /* XCRemoteSwiftPackageReference "FFmpegKit" */;
+			productName = Libavformat;
+		};
+		1EDB8E9524B7031BB54B5A3D /* Libswscale */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6B035CB00383413E208AC3F7 /* XCRemoteSwiftPackageReference "FFmpegKit" */;
+			productName = Libswscale;
+		};
+		210729C6F0C989705BAE4F93 /* Libavcodec */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6B035CB00383413E208AC3F7 /* XCRemoteSwiftPackageReference "FFmpegKit" */;
+			productName = Libavcodec;
+		};
+		2A9CCFC1954E109AB9BFC4C3 /* Libswresample */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6B035CB00383413E208AC3F7 /* XCRemoteSwiftPackageReference "FFmpegKit" */;
+			productName = Libswresample;
+		};
+		797691F8BEE241B5EDCBF767 /* Libavutil */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6B035CB00383413E208AC3F7 /* XCRemoteSwiftPackageReference "FFmpegKit" */;
+			productName = Libavutil;
+		};
+		8DE6E8AA2E74BC6D33338944 /* ConvexMobile */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3B30D910061FF409721E609E /* XCRemoteSwiftPackageReference "convex-swift" */;
+			productName = ConvexMobile;
+		};
 		CF821B7ADD29BE7D7C8930AC /* KSPlayer */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = KSPlayer;
+		};
+		D3907A3551A9A8003A917297 /* LiveKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F6D91D044DF79A59DA825EF9 /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
+			productName = LiveKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -6,13 +6,16 @@ import SwiftUI
 /// Production builds do not compile this declaration.
 @main
 struct UIStateScreenshotApp: App {
+    @UIApplicationDelegateAdaptor(AppOrientationDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
+    @StateObject private var watchTogether = WatchTogetherModel()
     private let state = ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"] ?? "home-cinemeta"
 
     var body: some Scene {
         WindowGroup {
             UIStateScreenshotRoot(state: state)
                 .environmentObject(model)
+                .environmentObject(watchTogether)
                 .preferredColorScheme(.dark)
         }
     }
@@ -39,7 +42,9 @@ private struct UIStateScreenshotRoot: View {
         [
             "home-cinemeta", "home-letterboxd", "home-series", "catalog-error",
             "details-streams", "details-resume", "details-series-episodes", "episode-streams",
+            "episode-up-next",
             "details-trailer-active", "library-synced", "account-signed-in",
+            "settings-player-legacy-av",
         ].contains(state)
     }
 
@@ -72,6 +77,16 @@ private struct UIStateScreenshotRoot: View {
             NavigationStack {
                 EpisodeStreamsView(series: fixtureSeriesItem, episode: fixtureEpisodeTwo)
             }
+        case "episode-up-next":
+            NavigationStack {
+                ResolvingPlayerScreen(
+                    candidates: episodePlaybackCandidates,
+                    episodeAutoplayContext: EpisodeAutoplayContext(
+                        series: fixtureSeriesItem,
+                        episode: fixtureEpisodeOne
+                    )
+                )
+            }
         case "library-empty":
             screenTab(label: "Library", systemImage: "bookmark") {
                 NavigationStack { LibraryView() }
@@ -84,10 +99,12 @@ private struct UIStateScreenshotRoot: View {
             screenTab(label: "Add-ons", systemImage: "shippingbox") {
                 NavigationStack { AddonsView() }
             }
-        case "settings-player":
+        case "settings-player", "settings-player-legacy-av":
             screenTab(label: "Settings", systemImage: "gearshape") {
                 NavigationStack { SettingsView() }
             }
+        case "settings-subtitles":
+            NavigationStack { SubtitleStyleSettingsView() }
         case "account-signed-out":
             screenTab(label: "Account", systemImage: "person.crop.circle") {
                 NavigationStack { AccountView() }
@@ -106,6 +123,12 @@ private struct UIStateScreenshotRoot: View {
             NavigationStack {
                 ResolvingPlayerScreen(stream: invalidStream)
                     .navigationTitle("Broken stream")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
+        case "stream-failover-countdown":
+            NavigationStack {
+                ResolvingPlayerScreen(candidates: failoverCandidates)
+                    .navigationTitle("Automatic recovery")
                     .navigationBarTitleDisplayMode(.inline)
             }
         case "player-active":
@@ -157,7 +180,7 @@ private struct UIStateScreenshotRoot: View {
                 duration: 3_600
             )
             prepared = true
-        case "details-series-episodes", "episode-streams":
+        case "details-series-episodes", "episode-streams", "episode-up-next":
             await model.start()
             model.recordPlaybackProgress(
                 contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
@@ -188,15 +211,35 @@ private struct UIStateScreenshotRoot: View {
                 duration: 3_600
             )
             prepared = true
+        case "settings-player-legacy-av":
+            let defaults = UserDefaults.standard
+            defaults.set("avplayer", forKey: "preferredInternalPlayer")
+            defaults.set(true, forKey: "useAVPlayer")
+            guard StremioInternalPlayer.selected == .bunny,
+                  defaults.string(forKey: "preferredInternalPlayer") == "bunny",
+                  !defaults.bool(forKey: "useAVPlayer")
+            else {
+                fatalError("Deprecated AVPlayer preference did not migrate to Bunny")
+            }
+            prepared = true
         default:
             prepared = true
         }
 
         // Let AsyncImage, navigation chrome, and detail resolution settle before capture.
-        let detailDelay = state == "details-streams" || state == "details-resume"
-            || state == "details-series-episodes" || state == "episode-streams"
-            || state == "details-trailer-active"
-        try? await Task.sleep(for: .milliseconds(detailDelay ? 1_500 : 650))
+        // The Up Next card is presented by a child task after the player first appears,
+        // so its fixture needs an additional render turn before declaring itself ready.
+        let readinessDelayMilliseconds: Int
+        if state == "episode-up-next" {
+            readinessDelayMilliseconds = 3_000
+        } else if state == "details-streams" || state == "details-resume"
+                    || state == "details-series-episodes" || state == "episode-streams"
+                    || state == "details-trailer-active" {
+            readinessDelayMilliseconds = 1_500
+        } else {
+            readinessDelayMilliseconds = 650
+        }
+        try? await Task.sleep(for: .milliseconds(readinessDelayMilliseconds))
         let runID = ProcessInfo.processInfo.environment["UI_SCREENSHOT_RUN_ID"] ?? "manual"
         let readyMarker = FileManager.default.temporaryDirectory
             .appendingPathComponent("ui-state-\(runID).ready")
@@ -228,7 +271,11 @@ private struct UIStateScreenshotRoot: View {
             poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-portrait.png"),
             description: "A deterministic series used to verify episode playback state.",
             releaseInfo: "2024–",
-            genres: ["Drama", "Adventure"]
+            genres: ["Drama", "Adventure"],
+            videos: [fixtureEpisodeOne, fixtureEpisodeTwo],
+            trailerStreams: [
+                TrailerStream(title: "Official trailer", youtubeID: "yUQM7H4Swgw")
+            ]
         )
     }
 
@@ -238,6 +285,7 @@ private struct UIStateScreenshotRoot: View {
             title: "First Light",
             season: 1,
             episode: 1,
+            overview: "A missing signal draws the crew toward a dangerous first encounter.",
             released: "2024-01-05T00:00:00.000Z"
         )
     }
@@ -249,6 +297,7 @@ private struct UIStateScreenshotRoot: View {
             season: 1,
             episode: 2,
             thumbnail: URL(string: "http://127.0.0.1:18766/ui-states/episode-2.png"),
+            overview: "The team crosses hostile terrain while an old alliance begins to fracture.",
             released: "2024-01-12T00:00:00.000Z"
         )
     }
@@ -277,6 +326,52 @@ private struct UIStateScreenshotRoot: View {
             fileIdx: nil,
             sources: nil
         )
+    }
+
+    private var failoverCandidates: [StreamPlaybackCandidate] {
+        [
+            StreamPlaybackCandidate(
+                stream: fixtureStream,
+                providerName: "Fixture Provider",
+                contentIdentifier: "movie:tt1254207",
+                contentTitle: "Big Buck Bunny",
+                sourceID: "fixture-broken"
+            ),
+            StreamPlaybackCandidate(
+                stream: Stream(
+                    url: fixtureVideoURL,
+                    externalUrl: nil,
+                    name: "English 1080p backup",
+                    title: "1080p · Backup stream",
+                    description: nil,
+                    infoHash: nil,
+                    fileIdx: nil,
+                    sources: nil
+                ),
+                providerName: "Backup Provider",
+                contentIdentifier: "movie:tt1254207",
+                contentTitle: "Big Buck Bunny",
+                sourceID: "fixture-backup"
+            ),
+        ]
+    }
+
+    private var episodePlaybackCandidates: [StreamPlaybackCandidate] {
+        [
+            StreamPlaybackCandidate(
+                stream: fixtureStream,
+                providerName: "Cinemeta Fixture",
+                contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
+                    seriesID: fixtureSeriesItem.id,
+                    videoID: fixtureEpisodeOne.id
+                ),
+                contentTitle: EpisodePlaybackIdentity.contentTitle(
+                    seriesTitle: fixtureSeriesItem.name,
+                    video: fixtureEpisodeOne
+                ),
+                sourceID: "fixture-episode-one"
+            )
+        ]
     }
 }
 

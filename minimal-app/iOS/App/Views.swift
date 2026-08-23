@@ -6,6 +6,7 @@ private let grid = [GridItem(.adaptive(minimum: 132), spacing: 16)]
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var watchTogether: WatchTogetherModel
     @State private var selectedTab = ProcessInfo.processInfo.environment[
         "SKELETON_SELECTED_TAB"
     ] ?? "home"
@@ -27,12 +28,16 @@ struct RootView: View {
                 NavigationStack { AccountView() }
                     .tabItem { Label("Account", systemImage: "person.crop.circle") }
                     .tag("account")
+                NavigationStack { FriendsView() }
+                    .tabItem { Label("Friends", systemImage: "person.2") }
+                    .tag("friends")
                 NavigationStack { SettingsView() }
                     .tabItem { Label("Settings", systemImage: "gearshape") }
                     .tag("settings")
             }
             .tint(.orange)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .task { await watchTogether.start() }
         }
     }
 }
@@ -224,7 +229,12 @@ private struct SearchCatalogRow: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 16) {
                     ForEach(group.items) { item in
-                        NavigationLink(value: item) {
+                        NavigationLink {
+                            DetailsView(
+                                seed: item,
+                                preferredManifestURL: group.manifestURL
+                            )
+                        } label: {
                             PosterCard(item: item)
                                 .frame(width: 132)
                         }
@@ -276,10 +286,12 @@ private struct PosterArtwork: View {
 struct DetailsView: View {
     private static let allProvidersID = "all-providers"
     private static let streamBatchSize = 60
+    private let seasonSelectionStore = EpisodeSeasonSelectionStore()
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.openURL) private var openURL
     let seed: MetaItem
+    let preferredManifestURL: URL?
     @State private var item: MetaItem
     @State private var streamProviders: [StreamProviderGroup] = []
     @State private var selectedProviderID = Self.allProvidersID
@@ -290,8 +302,9 @@ struct DetailsView: View {
     @State private var isUpdatingLibrary = false
     @State private var activeTrailer: TrailerDestination?
 
-    init(seed: MetaItem) {
+    init(seed: MetaItem, preferredManifestURL: URL? = nil) {
         self.seed = seed
+        self.preferredManifestURL = preferredManifestURL
         _item = State(initialValue: seed)
     }
 
@@ -349,7 +362,7 @@ struct DetailsView: View {
                            let progress = model.resumeProgress(for: item) {
                             NavigationLink {
                                 ResolvingPlayerScreen(
-                                    candidate: resumeCandidate(for: progress),
+                                    candidates: resumeCandidates(for: progress),
                                     minimumVideoDuration: minimumVideoDuration
                                 )
                             } label: {
@@ -392,7 +405,26 @@ struct DetailsView: View {
                             .accessibilityIdentifier("resume-playback")
                         }
 
-                        if item.type == "movie", let trailerURL = item.preferredTrailerURL {
+                        if item.type == "series",
+                           let selection = model.seriesResumeSelection(for: item) {
+                            NavigationLink {
+                                EpisodeResumeResolvingScreen(
+                                    series: item,
+                                    episode: selection.episode,
+                                    progress: selection.progress
+                                )
+                            } label: {
+                                seriesResumeCard(selection)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(
+                                "Resume \(item.name), \(episodeLocation(selection.episode)), "
+                                    + "from \(formatPlaybackTime(selection.progress.position))"
+                            )
+                            .accessibilityIdentifier("resume-series")
+                        }
+
+                        if let trailerURL = item.preferredTrailerURL {
                             Button {
                                 activeTrailer = TrailerDestination(url: trailerURL)
                             } label: {
@@ -488,9 +520,9 @@ struct DetailsView: View {
                             if stream.isDirectlyPlayable || stream.isTorrent {
                                 NavigationLink {
                                     ResolvingPlayerScreen(
-                                        candidate: StreamPlaybackCandidate(
-                                            stream: stream,
-                                            providerName: presented.providerName,
+                                        candidates: orderedPlaybackCandidates(
+                                            from: rankedStreams,
+                                            startingAt: presented.id,
                                             contentIdentifier: "\(item.type):\(item.id)",
                                             contentTitle: item.name,
                                             initialPosition: 0
@@ -536,7 +568,10 @@ struct DetailsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(false)
             .task {
-                item = await model.details(for: seed)
+                item = await model.details(
+                    for: seed,
+                    preferredManifestURL: preferredManifestURL
+                )
                 if item.type == "series" {
                     configureInitialSeason()
                     isLoading = false
@@ -570,6 +605,27 @@ struct DetailsView: View {
                 )
                 .foregroundStyle(.secondary)
             } else {
+                if let selectedSeason,
+                   let selection = model.seasonResumeSelection(selectedSeason, in: item) {
+                    NavigationLink {
+                        EpisodeResumeResolvingScreen(
+                            series: item,
+                            episode: selection.episode,
+                            progress: selection.progress
+                        )
+                    } label: {
+                        seasonResumeRow(selection, season: selectedSeason)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(
+                        "Resume \(seasonLabel(selectedSeason)), "
+                            + "\(episodeLocation(selection.episode)), "
+                            + "from \(formatPlaybackTime(selection.progress.position))"
+                    )
+                    .accessibilityIdentifier("resume-season-\(selectedSeason)")
+                }
+
                 ForEach(selectedSeasonEpisodes) { episode in
                     NavigationLink {
                         EpisodeStreamsView(series: item, episode: episode)
@@ -639,9 +695,97 @@ struct DetailsView: View {
         return allEpisodes.filter { ($0.season ?? 0) == selectedSeason }
     }
 
+    private func seriesResumeCard(_ selection: EpisodeResumeSelection) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 9) {
+                Image(systemName: "play.fill")
+                    .font(.caption.bold())
+                    .frame(width: 28, height: 28)
+                    .background(Color.orange, in: Circle())
+                    .foregroundStyle(.black)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Resume Series")
+                        .font(.subheadline.weight(.semibold))
+                    Text(
+                        "\(episodeLocation(selection.episode)) · "
+                            + "\(episodeDisplayTitle(selection.episode)) · "
+                            + "\(formatPlaybackTime(selection.progress.position))"
+                    )
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+
+            if selection.progress.duration > 0 {
+                ProgressView(
+                    value: min(selection.progress.position, selection.progress.duration),
+                    total: selection.progress.duration
+                )
+                .tint(.orange)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .foregroundStyle(.orange)
+        .background(Color.orange.opacity(0.12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.orange.opacity(0.45), lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func seasonResumeRow(
+        _ selection: EpisodeResumeSelection,
+        season: Int
+    ) -> some View {
+        HStack(spacing: 11) {
+            Image(systemName: "play.fill")
+                .font(.caption.bold())
+                .foregroundStyle(.black)
+                .frame(width: 30, height: 30)
+                .background(Color.orange, in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Resume \(seasonLabel(season))")
+                    .font(.subheadline.weight(.semibold))
+                Text(
+                    "\(episodeLocation(selection.episode)) · "
+                        + "\(episodeDisplayTitle(selection.episode)) · "
+                        + "\(formatPlaybackTime(selection.progress.position))"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                if selection.progress.duration > 0 {
+                    ProgressView(
+                        value: min(selection.progress.position, selection.progress.duration),
+                        total: selection.progress.duration
+                    )
+                    .tint(.orange)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+
     private func episodeRow(_ episode: Video) -> some View {
         let isCompleted = model.isEpisodeCompleted(episode, in: item)
         let progress = model.episodeProgress(episode, in: item)
+        let accessibilityLabel = episodeAccessibilityLabel(
+            episode,
+            isCompleted: isCompleted,
+            progress: progress
+        )
 
         return HStack(alignment: .top, spacing: 12) {
             episodeArtwork(
@@ -658,6 +802,14 @@ struct DetailsView: View {
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(2)
                     Spacer(minLength: 0)
+                }
+
+                if let summary = episodeSummary(episode) {
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if isCompleted {
@@ -688,14 +840,26 @@ struct DetailsView: View {
         .padding(.vertical, 5)
         .padding(.horizontal, 8)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "\(episodeLocation(episode)), \(episodeDisplayTitle(episode)), "
-                + (isCompleted
-                    ? "watched"
-                    : progress.map {
-                        "resume at \(formatPlaybackTime($0.position))"
-                    } ?? "not watched")
-        )
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private func episodeAccessibilityLabel(
+        _ episode: Video,
+        isCompleted: Bool,
+        progress: PlaybackProgress?
+    ) -> String {
+        var components = [episodeLocation(episode), episodeDisplayTitle(episode)]
+        if let summary = episodeSummary(episode) {
+            components.append(summary)
+        }
+        if isCompleted {
+            components.append("watched")
+        } else if let progress {
+            components.append("resume at \(formatPlaybackTime(progress.position))")
+        } else {
+            components.append("not watched")
+        }
+        return components.joined(separator: ", ")
     }
 
     @ViewBuilder
@@ -789,29 +953,16 @@ struct DetailsView: View {
     }
 
     private func configureInitialSeason() {
-        guard let episode = preferredEpisode(from: allEpisodes) else {
-            selectedSeason = nil
-            return
-        }
-        selectedSeason = episode.season ?? 0
-    }
-
-    private func preferredEpisode(from episodes: [Video]) -> Video? {
-        let resumable = episodes.compactMap { episode -> (Video, PlaybackProgress)? in
-            guard let progress = model.episodeProgress(episode, in: item) else {
-                return nil
-            }
-            return (episode, progress)
-        }
-        .max { $0.1.updatedAt < $1.1.updatedAt }?.0
-        return resumable
-            ?? episodes.first { !model.isEpisodeCompleted($0, in: item) }
-            ?? episodes.first
+        selectedSeason = EpisodeSeasonSelector.initialSeason(
+            availableSeasons: availableSeasons,
+            persistedSeason: seasonSelectionStore.season(for: item.id)
+        )
     }
 
     private func selectSeason(_ season: Int) {
         guard selectedSeason != season else { return }
         selectedSeason = season
+        seasonSelectionStore.setSeason(season, for: item.id)
     }
 
     @MainActor
@@ -848,25 +999,18 @@ struct DetailsView: View {
         return title
     }
 
+    private func episodeSummary(_ episode: Video) -> String? {
+        guard let overview = episode.overview?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ), !overview.isEmpty else { return nil }
+        return overview
+    }
+
     private var visibleStreams: [PresentedStream] {
         let providers = selectedProviderID == Self.allProvidersID
             ? streamProviders
             : streamProviders.filter { $0.id == selectedProviderID }
-        return providers.flatMap { provider in
-            provider.streams.enumerated().map { index, stream in
-                PresentedStream(
-                    id: "\(provider.id)#\(index)#\(stream.id)",
-                    providerName: provider.name,
-                    stream: stream
-                )
-            }
-        }
-        .sorted {
-            if $0.playbackPriority != $1.playbackPriority {
-                return $0.playbackPriority < $1.playbackPriority
-            }
-            return $0.id < $1.id
-        }
+        return rankedPresentedStreams(from: providers)
     }
 
     private var selectedProviderName: String {
@@ -878,27 +1022,50 @@ struct DetailsView: View {
         item.type == "movie" ? 20 * 60 : 5 * 60
     }
 
-    private func resumeCandidate(for progress: PlaybackProgress) -> StreamPlaybackCandidate {
-        let refreshed = streamProviders.lazy.compactMap { provider -> (Stream, String)? in
-            guard let stream = provider.streams.first(where: {
-                $0.id == progress.stream.id
-                    || ($0.infoHash != nil
-                        && $0.infoHash == progress.stream.infoHash
-                        && $0.fileIdx == progress.stream.fileIdx)
-                    || (provider.name == progress.providerName
-                        && $0.name == progress.stream.name
-                        && $0.title == progress.stream.title)
-            }) else { return nil }
-            return (stream, provider.name)
-        }.first
+    private func resumeCandidates(for progress: PlaybackProgress) -> [StreamPlaybackCandidate] {
+        let rankedStreams = rankedPresentedStreams(from: streamProviders)
+        let refreshed = rankedStreams.first { presented in
+            let stream = presented.stream
+            return stream.id == progress.stream.id
+                || (stream.infoHash != nil
+                    && stream.infoHash == progress.stream.infoHash
+                    && stream.fileIdx == progress.stream.fileIdx)
+                || (presented.providerName == progress.providerName
+                    && stream.name == progress.stream.name
+                    && stream.title == progress.stream.title)
+        }
 
-        return StreamPlaybackCandidate(
-            stream: refreshed?.0 ?? progress.stream,
-            providerName: refreshed?.1 ?? progress.providerName,
+        if let refreshed {
+            return orderedPlaybackCandidates(
+                from: rankedStreams,
+                startingAt: refreshed.id,
+                contentIdentifier: progress.contentIdentifier,
+                contentTitle: progress.contentTitle,
+                initialPosition: progress.position
+            )
+        }
+
+        let savedCandidate = StreamPlaybackCandidate(
+            stream: progress.stream,
+            providerName: progress.providerName,
             contentIdentifier: progress.contentIdentifier,
             contentTitle: progress.contentTitle,
             initialPosition: progress.position
         )
+        let alternatives = rankedStreams.compactMap { presented -> StreamPlaybackCandidate? in
+            guard presented.stream.isDirectlyPlayable || presented.stream.isTorrent,
+                  presented.stream.id != progress.stream.id
+            else { return nil }
+            return StreamPlaybackCandidate(
+                stream: presented.stream,
+                providerName: presented.providerName,
+                contentIdentifier: progress.contentIdentifier,
+                contentTitle: progress.contentTitle,
+                initialPosition: progress.position,
+                sourceID: presented.id
+            )
+        }
+        return [savedCandidate] + alternatives
     }
 
     private func formatPlaybackTime(_ value: TimeInterval) -> String {
@@ -977,6 +1144,93 @@ struct DetailsView: View {
     }
 }
 
+private struct EpisodeResumeResolvingScreen: View {
+    @EnvironmentObject private var model: AppModel
+    let series: MetaItem
+    let episode: Video
+    let progress: PlaybackProgress
+    @State private var candidates: [StreamPlaybackCandidate] = []
+    @State private var errorMessage: String?
+
+    var body: some View {
+        Group {
+            if !candidates.isEmpty {
+                ResolvingPlayerScreen(
+                    candidates: candidates,
+                    minimumVideoDuration: 5 * 60,
+                    episodeAutoplayContext: EpisodeAutoplayContext(
+                        series: series,
+                        episode: episode
+                    )
+                )
+            } else if let errorMessage {
+                VStack(spacing: 12) {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .font(.system(size: 44))
+                    Text("Fresh stream unavailable")
+                        .font(.title3.bold())
+                    Text(errorMessage)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding()
+                .accessibilityIdentifier("episode-resume-refresh-error")
+            } else {
+                ProgressView("Refreshing episode streams…")
+                    .accessibilityIdentifier("episode-resume-refreshing")
+            }
+        }
+        .navigationTitle(progress.contentTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .tabBar)
+        .task(id: progress.updatedAt) {
+            await refreshCandidate()
+        }
+    }
+
+    @MainActor
+    private func refreshCandidate() async {
+        candidates = []
+        errorMessage = nil
+        let providers = await model.streamProviders(for: series, videoID: episode.id)
+        guard !Task.isCancelled else { return }
+
+        let playable = rankedPresentedStreams(from: providers).filter {
+            $0.stream.isDirectlyPlayable || $0.stream.isTorrent
+        }
+        let previous = progress.stream
+        let exact = playable.first { presented in
+            let stream = presented.stream
+            if stream.id == previous.id { return true }
+            if let infoHash = previous.infoHash,
+               stream.infoHash == infoHash,
+               stream.fileIdx == previous.fileIdx {
+                return true
+            }
+            let hasStableLabel = previous.name != nil || previous.title != nil
+            return hasStableLabel
+                && presented.providerName == progress.providerName
+                && stream.name == previous.name
+                && stream.title == previous.title
+        }
+        let sameProvider = playable.first { presented in
+            presented.providerName == progress.providerName
+        }
+
+        guard let refreshed = exact ?? sameProvider ?? playable.first else {
+            errorMessage = "No add-on returned a current stream. Go back and choose an episode stream."
+            return
+        }
+        candidates = orderedPlaybackCandidates(
+            from: playable,
+            startingAt: refreshed.id,
+            contentIdentifier: progress.contentIdentifier,
+            contentTitle: progress.contentTitle,
+            initialPosition: progress.position
+        )
+    }
+}
+
 struct EpisodeStreamsView: View {
     private static let allProvidersID = "all-providers"
     private static let streamBatchSize = 60
@@ -993,41 +1247,80 @@ struct EpisodeStreamsView: View {
     var body: some View {
         List {
             Section {
-                HStack(alignment: .top, spacing: 14) {
-                    episodeThumbnail
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(episodeDisplayTitle)
-                            .font(.headline)
-                            .lineLimit(2)
-                        Text(series.name)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 14) {
+                        episodeThumbnail
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(episodeDisplayTitle)
+                                .font(.headline)
+                                .lineLimit(2)
+                            Text(series.name)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
 
-                        if isCompleted {
-                            Label("Watched", systemImage: "checkmark.circle.fill")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.green)
-                        } else if let progress {
-                            Label(
-                                "Resume at \(formatPlaybackTime(progress.position))",
-                                systemImage: "play.circle.fill"
-                            )
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.orange)
-                            if progress.duration > 0 {
-                                ProgressView(
-                                    value: min(progress.position, progress.duration),
-                                    total: progress.duration
+                            if isCompleted {
+                                Label("Watched", systemImage: "checkmark.circle.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.green)
+                            } else if let progress {
+                                NavigationLink {
+                                    EpisodeResumeResolvingScreen(
+                                        series: series,
+                                        episode: episode,
+                                        progress: progress
+                                    )
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 7) {
+                                        Label(
+                                            "Resume at \(formatPlaybackTime(progress.position))",
+                                            systemImage: "play.circle.fill"
+                                        )
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.orange)
+                                        if progress.duration > 0 {
+                                            ProgressView(
+                                                value: min(progress.position, progress.duration),
+                                                total: progress.duration
+                                            )
+                                            .tint(.orange)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        Color.orange.opacity(0.10),
+                                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    )
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .stroke(Color.orange.opacity(0.25), lineWidth: 1)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.top, 2)
+                                .accessibilityLabel(
+                                    "Resume \(episodeLocation) from "
+                                        + formatPlaybackTime(progress.position)
                                 )
-                                .tint(.orange)
+                                .accessibilityIdentifier("episode-streams-resume")
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if let episodeSummary {
+                        Text(episodeSummary)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("episode-streams-summary")
+                    }
                 }
                 .padding(.vertical, 4)
-                .accessibilityElement(children: .combine)
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("episode-streams-header")
             } header: {
                 Text(episodeLocation)
@@ -1086,19 +1379,24 @@ struct EpisodeStreamsView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     } else {
-                        ForEach(Array(visibleStreams.prefix(visibleStreamLimit))) { presented in
+                        let rankedStreams = visibleStreams
+                        ForEach(Array(rankedStreams.prefix(visibleStreamLimit))) { presented in
                             let stream = presented.stream
                             if stream.isDirectlyPlayable || stream.isTorrent {
                                 NavigationLink {
                                     ResolvingPlayerScreen(
-                                        candidate: StreamPlaybackCandidate(
-                                            stream: stream,
-                                            providerName: presented.providerName,
+                                        candidates: orderedPlaybackCandidates(
+                                            from: rankedStreams,
+                                            startingAt: presented.id,
                                             contentIdentifier: contentIdentifier,
                                             contentTitle: contentTitle,
                                             initialPosition: progress?.position ?? 0
                                         ),
-                                        minimumVideoDuration: 5 * 60
+                                        minimumVideoDuration: 5 * 60,
+                                        episodeAutoplayContext: EpisodeAutoplayContext(
+                                            series: series,
+                                            episode: episode
+                                        )
                                     )
                                 } label: {
                                     streamRow(presented)
@@ -1228,25 +1526,18 @@ struct EpisodeStreamsView: View {
         return title
     }
 
+    private var episodeSummary: String? {
+        guard let overview = episode.overview?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ), !overview.isEmpty else { return nil }
+        return overview
+    }
+
     private var visibleStreams: [PresentedStream] {
         let providers = selectedProviderID == Self.allProvidersID
             ? streamProviders
             : streamProviders.filter { $0.id == selectedProviderID }
-        return providers.flatMap { provider in
-            provider.streams.enumerated().map { index, stream in
-                PresentedStream(
-                    id: "\(provider.id)#\(index)#\(stream.id)",
-                    providerName: provider.name,
-                    stream: stream
-                )
-            }
-        }
-        .sorted {
-            if $0.playbackPriority != $1.playbackPriority {
-                return $0.playbackPriority < $1.playbackPriority
-            }
-            return $0.id < $1.id
-        }
+        return rankedPresentedStreams(from: providers)
     }
 
     private var selectedProviderName: String {
@@ -1357,7 +1648,7 @@ private struct TrailerBrowser: UIViewControllerRepresentable {
     ) {}
 }
 
-private struct PresentedStream: Identifiable {
+struct PresentedStream: Identifiable {
     let id: String
     let providerName: String
     let stream: Stream
@@ -1446,6 +1737,56 @@ private struct PresentedStream: Identifiable {
     }
 }
 
+func rankedPresentedStreams(
+    from providers: [StreamProviderGroup]
+) -> [PresentedStream] {
+    providers.flatMap { provider in
+        provider.streams.enumerated().map { index, stream in
+            PresentedStream(
+                id: "\(provider.id)#\(index)#\(stream.id)",
+                providerName: provider.name,
+                stream: stream
+            )
+        }
+    }
+    .sorted {
+        if $0.playbackPriority != $1.playbackPriority {
+            return $0.playbackPriority < $1.playbackPriority
+        }
+        return $0.id < $1.id
+    }
+}
+
+/// Put the selected row first, then try every remaining ranked source once.
+/// Wrapping to higher-ranked rows before declaring exhaustion makes choosing a
+/// lower row recoverable without ever retrying the same broken link forever.
+func orderedPlaybackCandidates(
+    from streams: [PresentedStream],
+    startingAt selectedID: String,
+    contentIdentifier: String?,
+    contentTitle: String?,
+    initialPosition: TimeInterval
+) -> [StreamPlaybackCandidate] {
+    let playable = streams.filter {
+        $0.stream.isDirectlyPlayable || $0.stream.isTorrent
+    }
+    guard let selectedIndex = playable.firstIndex(where: { $0.id == selectedID }) else {
+        return []
+    }
+
+    let ordered = Array(playable[selectedIndex...]) + Array(playable[..<selectedIndex])
+    return ordered.map { presented in
+        StreamPlaybackCandidate(
+            stream: presented.stream,
+            providerName: presented.providerName,
+            contentIdentifier: contentIdentifier,
+            contentTitle: contentTitle,
+            initialPosition: initialPosition,
+            sourceID: presented.id
+        )
+    }
+}
+
 private struct StreamMetadataBadge: View {
     let text: String
     let systemImage: String
@@ -1475,13 +1816,19 @@ struct LibraryView: View {
             } else {
                 ScrollView {
                     LazyVGrid(columns: grid, spacing: 20) {
-                        ForEach(model.library) { PosterCard(item: $0) }
+                        ForEach(model.library) { item in
+                            NavigationLink(value: item) {
+                                PosterCard(item: item)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                     .padding()
                 }
             }
         }
         .navigationTitle("Library")
+        .navigationDestination(for: MetaItem.self) { DetailsView(seed: $0) }
     }
 }
 
@@ -1554,6 +1901,12 @@ struct SettingsView: View {
     @State private var selectedPlayer = StremioInternalPlayer.selected
     @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
     private var playerDebugOverlayEnabled = false
+    @AppStorage(PlaybackLanguagePreferences.preferredAudioLanguageKey)
+    private var preferredAudioLanguage = PlaybackLanguagePreferences.defaultLanguage
+    @AppStorage(PlaybackLanguagePreferences.preferredSubtitleLanguageKey)
+    private var preferredSubtitleLanguage = PlaybackLanguagePreferences.defaultLanguage
+    @AppStorage(PlaybackLanguagePreferences.subtitlesEnabledKey)
+    private var preferredSubtitlesEnabled = true
 
     var body: some View {
         Form {
@@ -1588,13 +1941,66 @@ struct SettingsView: View {
             } header: {
                 Text("Player")
             } footer: {
-                Text("Your preferred player repairs and retries the stream first. The playback bridge uses another player only after that path is exhausted.")
+                Text("Bunny keeps playback inside its Apple and custom FFmpeg engines. Other choices may use a compatibility player only after their own path is exhausted.")
             }
 
             Section("Preferred player") {
                 LabeledContent("Player", value: selectedPlayer.title)
                 LabeledContent("Controls", value: selectedPlayer.controlsSummary)
                 LabeledContent("Playback", value: "MP4 / MKV / HLS / torrent")
+            }
+
+            Section("Subtitles") {
+                NavigationLink {
+                    SubtitleStyleSettingsView()
+                } label: {
+                    Label {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Subtitle Style")
+                            Text("Size, color, weight, background, and shadow")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "captions.bubble.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .accessibilityIdentifier("subtitle-style-link")
+            }
+
+            Section {
+                LabeledContent(
+                    "Preferred Audio",
+                    value: languageName(preferredAudioLanguage)
+                )
+                .accessibilityIdentifier("preferred-audio-language")
+
+                Toggle("Use Preferred Subtitles", isOn: $preferredSubtitlesEnabled)
+                    .tint(.orange)
+                    .accessibilityIdentifier("preferred-subtitles-toggle")
+
+                if preferredSubtitlesEnabled {
+                    LabeledContent(
+                        "Preferred Subtitles",
+                        value: languageName(preferredSubtitleLanguage)
+                    )
+                    .accessibilityIdentifier("preferred-subtitle-language")
+                }
+
+                Button {
+                    preferredAudioLanguage = PlaybackLanguagePreferences.defaultLanguage
+                    preferredSubtitleLanguage = PlaybackLanguagePreferences.defaultLanguage
+                    preferredSubtitlesEnabled = true
+                } label: {
+                    Label("Prefer English for Both", systemImage: "character.book.closed.fill")
+                }
+                .foregroundStyle(.orange)
+                .accessibilityIdentifier("prefer-english-tracks")
+            } header: {
+                Text("Playback Languages")
+            } footer: {
+                Text("English is the default. Audio and subtitle choices made in a player are remembered and restored after a stream switch.")
             }
 
             Section {
@@ -1616,6 +2022,179 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .onAppear { selectedPlayer = StremioInternalPlayer.selected }
+    }
+
+    private func languageName(_ identifier: String) -> String {
+        Locale.current.localizedString(forLanguageCode: identifier)?.capitalized
+            ?? identifier.uppercased()
+    }
+}
+
+struct SubtitleStyleSettingsView: View {
+    @AppStorage(SubtitleStylePreferences.sizeKey)
+    private var sizeRawValue = SubtitleStyle.default.size.rawValue
+    @AppStorage(SubtitleStylePreferences.colorKey)
+    private var colorRawValue = SubtitleStyle.default.color.rawValue
+    @AppStorage(SubtitleStylePreferences.weightKey)
+    private var weightRawValue = SubtitleStyle.default.weight.rawValue
+    @AppStorage(SubtitleStylePreferences.backgroundOpacityKey)
+    private var backgroundOpacity = SubtitleStyle.default.backgroundOpacity
+    @AppStorage(SubtitleStylePreferences.shadowEnabledKey)
+    private var shadowEnabled = SubtitleStyle.default.shadowEnabled
+
+    var body: some View {
+        Form {
+            Section("Preview") {
+                ZStack(alignment: .bottom) {
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.08, green: 0.11, blue: 0.18),
+                            Color(red: 0.17, green: 0.10, blue: 0.12),
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    Image(systemName: "film.stack.fill")
+                        .font(.system(size: 58, weight: .light))
+                        .foregroundStyle(.white.opacity(0.10))
+                        .accessibilityHidden(true)
+
+                    StyledSubtitleText(
+                        "This is how your subtitles will look.",
+                        style: visualStyle
+                    )
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 18)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 170)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Subtitle style preview")
+                .accessibilityIdentifier("subtitle-style-preview")
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+            }
+
+            Section("Text") {
+                Picker("Size", selection: $sizeRawValue) {
+                    ForEach(SubtitleSizePreset.allCases, id: \.self) { size in
+                        Text(size.compactTitle)
+                            .tag(size.rawValue)
+                            .accessibilityLabel(size.title)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("subtitle-style-size")
+
+                LabeledContent("Color") {
+                    HStack(spacing: 11) {
+                        ForEach(SubtitleColorPreset.allCases, id: \.self) { color in
+                            Button {
+                                colorRawValue = color.rawValue
+                            } label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(SubtitleVisualStyle(
+                                            SubtitleStyle(color: color)
+                                        ).color)
+                                    Circle()
+                                        .stroke(
+                                            colorRawValue == color.rawValue
+                                                ? Color.orange : Color.secondary.opacity(0.35),
+                                            lineWidth: colorRawValue == color.rawValue ? 3 : 1
+                                        )
+                                    if colorRawValue == color.rawValue {
+                                        Image(systemName: "checkmark")
+                                            .font(.caption2.bold())
+                                            .foregroundStyle(.black.opacity(0.72))
+                                    }
+                                }
+                                .frame(width: 30, height: 30)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(color.title)
+                            .accessibilityValue(
+                                colorRawValue == color.rawValue ? "Selected" : "Not selected"
+                            )
+                            .accessibilityIdentifier("subtitle-color-\(color.rawValue)")
+                        }
+                    }
+                }
+                .accessibilityIdentifier("subtitle-style-color")
+
+                Picker("Weight", selection: $weightRawValue) {
+                    ForEach(SubtitleWeightPreset.allCases, id: \.self) { weight in
+                        Text(weight == .semibold ? "Semi" : weight.title)
+                            .tag(weight.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("subtitle-style-weight")
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack {
+                        Text("Background")
+                        Spacer()
+                        Text("\(Int((backgroundOpacity * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $backgroundOpacity, in: 0...0.9, step: 0.05)
+                        .tint(.orange)
+                        .accessibilityLabel("Subtitle background opacity")
+                }
+                .accessibilityIdentifier("subtitle-style-background-opacity")
+
+                Toggle("Text Shadow", isOn: $shadowEnabled)
+                    .tint(.orange)
+                    .accessibilityIdentifier("subtitle-style-shadow")
+            } header: {
+                Text("Readability")
+            } footer: {
+                Text("These settings are used by Bunny, KSPlayer, VLC, and AVPlayer.")
+            }
+
+            Section {
+                Button {
+                    resetToDefaults()
+                } label: {
+                    Label("Reset to Default", systemImage: "arrow.counterclockwise")
+                }
+                .foregroundStyle(.orange)
+                .accessibilityIdentifier("subtitle-style-reset")
+            }
+        }
+        .navigationTitle("Subtitle Style")
+        .navigationBarTitleDisplayMode(.inline)
+        .accessibilityIdentifier("subtitle-style-settings")
+    }
+
+    private var visualStyle: SubtitleVisualStyle {
+        SubtitleVisualStyle(
+            SubtitleStyle(
+                sizeRawValue: sizeRawValue,
+                colorRawValue: colorRawValue,
+                weightRawValue: weightRawValue,
+                backgroundOpacity: backgroundOpacity,
+                shadowEnabled: shadowEnabled
+            )
+        )
+    }
+
+    private func resetToDefaults() {
+        let fallback = SubtitleStyle.default
+        sizeRawValue = fallback.size.rawValue
+        colorRawValue = fallback.color.rawValue
+        weightRawValue = fallback.weight.rawValue
+        backgroundOpacity = fallback.backgroundOpacity
+        shadowEnabled = fallback.shadowEnabled
     }
 }
 
@@ -1641,7 +2220,9 @@ struct AccountView: View {
                         }
                     }
                     .disabled(busy)
-                    Button("Sign out", role: .destructive) { model.signOut() }
+                    Button("Sign out", role: .destructive) {
+                        Task { await model.signOut() }
+                    }
                 }
             } else {
                 Section("Sign in to Stremio") {

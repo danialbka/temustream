@@ -15,6 +15,11 @@ public enum AddonEndpointError: LocalizedError, Equatable {
 }
 
 public struct AddonEndpoint: Equatable, Sendable {
+    private struct ResourceExtra: Sendable {
+        let name: String
+        let value: String
+    }
+
     public let manifestURL: URL
     public let baseURL: URL
 
@@ -47,12 +52,12 @@ public struct AddonEndpoint: Equatable, Sendable {
         search: String? = nil,
         skip: Int? = nil
     ) throws -> URL {
-        var extra: [String] = []
+        var extra: [ResourceExtra] = []
         if let search, !search.isEmpty {
-            extra.append("search=\(search)")
+            extra.append(ResourceExtra(name: "search", value: search))
         }
         if let skip, skip > 0 {
-            extra.append("skip=\(skip)")
+            extra.append(ResourceExtra(name: "skip", value: String(skip)))
         }
         return try resourceURL(resource: "catalog", type: type, id: id, extra: extra)
     }
@@ -73,18 +78,39 @@ public struct AddonEndpoint: Equatable, Sendable {
         resource: String,
         type: String,
         id: String,
-        extra: [String] = []
+        extra: [ResourceExtra] = []
     ) throws -> URL {
-        let segments = [resource, type, id] + (extra.isEmpty ? [] : [extra.joined(separator: "&")])
         var url = baseURL
-        for segment in segments {
+        for segment in [resource, type, id] {
             url.appendPathComponent(segment)
         }
-        url.appendPathExtension("json")
-        guard URLComponents(url: url, resolvingAgainstBaseURL: false) != nil else {
+
+        guard !extra.isEmpty else {
+            url.appendPathExtension("json")
+            guard URLComponents(url: url, resolvingAgainstBaseURL: false) != nil else {
+                throw AddonEndpointError.invalidResourceURL
+            }
+            return url
+        }
+
+        let allowed = CharacterSet.alphanumerics.union(
+            CharacterSet(charactersIn: "-._~")
+        )
+        let encodedExtra = try extra.map { item -> String in
+            guard let name = item.name.addingPercentEncoding(withAllowedCharacters: allowed),
+                  let value = item.value.addingPercentEncoding(withAllowedCharacters: allowed)
+            else { throw AddonEndpointError.invalidResourceURL }
+            return "\(name)=\(value)"
+        }.joined(separator: "&")
+
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             throw AddonEndpointError.invalidResourceURL
         }
-        return url
+        components.percentEncodedPath += "/\(encodedExtra).json"
+        guard let resourceURL = components.url else {
+            throw AddonEndpointError.invalidResourceURL
+        }
+        return resourceURL
     }
 }
 

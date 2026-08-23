@@ -5,6 +5,7 @@ enum PerformanceDecoder: UInt32, Sendable {
     case avFoundation = 1
     case ffmpegVideoToolbox = 2
     case vlcVideoToolboxBridge = 3
+    case bunnyFFmpeg = 4
 }
 
 struct PlaybackPerformancePolicy: Sendable {
@@ -62,9 +63,9 @@ enum PlaybackPerformanceCore {
     ) -> PlaybackPerformancePolicy {
         let playerKind: UInt32 = switch player {
         case .performance: 0
+        case .bunny: 4
         case .ksPlayer: 1
         case .vlcKit: 2
-        case .avPlayer: 3
         }
         let raw = url.absoluteString.withCString { urlPointer in
             title.withCString { titlePointer in

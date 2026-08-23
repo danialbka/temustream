@@ -8,12 +8,14 @@ snapshot_path="${SIDELOADLY_SNAPSHOT:-$repo_root/config/sideloadly-orangeapple.s
 support_dir="${HOME}/Library/Application Support/sideloadly"
 database_path="$support_dir/installations.db"
 cache_dir="${HOME}/Library/Caches/sideloadly"
+fast_ota_support_dir="${STREMIO_FAST_OTA_SUPPORT:-${HOME}/Library/Application Support/stremio-fast-ota}"
 anisette_option_path="$support_dir/option-anisette-mode"
 zipstream_option_path="$support_dir/option-zipstream"
 chunk_option_path="$support_dir/option-custom-chunk-size"
 cli_tmp_dir=""
 queue_token=""
 silent_process_pid=""
+profile_captured=0
 
 note() {
   print -- "sideloadly-cli: $*"
@@ -29,11 +31,16 @@ usage() {
 Usage:
   ./scripts/sideloadly-cli.sh snapshot
   ./scripts/sideloadly-cli.sh doctor
+  ./scripts/sideloadly-cli.sh stage [--ipa PATH] [--dry-run]
   ./scripts/sideloadly-cli.sh update [--ipa PATH] [--skip-build] [--dry-run] [--no-launch]
 
 The update command builds the current app, updates the configured Sideloadly
 AutoRefresh record, invokes Sideloadly 0.60's internal silent queue, verifies
 the installed version with devicectl, and launches the app.
+
+The stage command only attaches an already-built IPA to AutoRefresh. It is used
+by fast-ota.sh after a direct CoreDevice install so a future scheduled refresh
+cannot downgrade the app.
 
 No Apple ID, password, session token, certificate, or private key is copied into
 the repository or printed by this command.
@@ -157,7 +164,7 @@ load_installation_record() {
 run_doctor() {
   local actual_version anisette_value zipstream_value chunk_value gui_pid
   local silent_flag_count enqueue_flag_count
-  for dependency in jq sqlite3 plutil strings xcrun ditto unzip md5 stat grep codesign cmp pgrep; do
+  for dependency in jq sqlite3 plutil strings xcrun ditto unzip md5 stat grep codesign cmp pgrep security; do
     require_command "$dependency"
   done
   [[ -x "$sideloadly_binary" ]] || fail "Sideloadly executable not found: $sideloadly_binary"
@@ -240,11 +247,15 @@ inspect_ipa() {
 }
 
 stage_ipa_for_record() {
-  local timestamp backup_dir database_backup stored_name cache_target temp_cache_target
+  local queue_for_install="${1:-1}"
+  local timestamp backup_root backup_dir database_backup stored_name cache_target temp_cache_target
   local escaped_stored_name escaped_nickname escaped_queue_token new_ipa_id
+  local enqueue_timestamp_sql enqueue_token_sql
   timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
-  backup_dir="$repo_root/build/sideloadly-cli-backups/$timestamp"
+  backup_root="$fast_ota_support_dir/sideloadly-db-backups"
+  backup_dir="$backup_root/$timestamp"
   mkdir -p "$backup_dir" "$repo_root/build/sideloadly-cli"
+  chmod 700 "$fast_ota_support_dir" "$backup_root" "$backup_dir"
   database_backup="$backup_dir/installations.db"
   sqlite3 "$database_path" ".timeout 10000" ".backup '$database_backup'"
 
@@ -260,10 +271,18 @@ stage_ipa_for_record() {
 
   escaped_stored_name="$(sql_escape "$stored_name")"
   escaped_nickname="$(sql_escape "${ipa_absolute_path:t}")"
-  queue_token="$(sqlite3 "$database_path" "SELECT lower(hex(randomblob(16)));" )"
-  [[ ${#queue_token} == 32 && "$queue_token" != *[^0-9a-f]* ]] || fail \
-    "Failed to create the one-time Sideloadly queue token"
-  escaped_queue_token="$(sql_escape "$queue_token")"
+  if (( queue_for_install == 1 )); then
+    queue_token="$(sqlite3 "$database_path" "SELECT lower(hex(randomblob(16)));" )"
+    [[ ${#queue_token} == 32 && "$queue_token" != *[^0-9a-f]* ]] || fail \
+      "Failed to create the one-time Sideloadly queue token"
+    escaped_queue_token="$(sql_escape "$queue_token")"
+    enqueue_timestamp_sql="CURRENT_TIMESTAMP"
+    enqueue_token_sql="'$escaped_queue_token'"
+  else
+    queue_token=""
+    enqueue_timestamp_sql="NULL"
+    enqueue_token_sql="NULL"
+  fi
   sqlite3 "$database_path" <<SQL
 .timeout 10000
 BEGIN IMMEDIATE;
@@ -286,8 +305,8 @@ WHERE stored_name='$escaped_stored_name';
 UPDATE installations
 SET ipa_id=(SELECT id FROM stored_files WHERE stored_name='$escaped_stored_name' AND deleted_at IS NULL LIMIT 1),
     updated_at=CURRENT_TIMESTAMP,
-    enqueued_at=CURRENT_TIMESTAMP,
-    enqueue_token='$escaped_queue_token',
+    enqueued_at=$enqueue_timestamp_sql,
+    enqueue_token=$enqueue_token_sql,
     last_error='',
     failures_count=0,
     last_failure_at=NULL
@@ -313,6 +332,7 @@ SQL
     --argjson installationID "$installation_id" \
     --argjson previousIPAID "$previous_ipa_id" \
     --argjson stagedIPAID "$new_ipa_id" \
+    --argjson queuedForInstall "$queue_for_install" \
     '{
       capturedAt: $capturedAt,
       status: "staged",
@@ -327,11 +347,58 @@ SQL
       databaseBackup: $databaseBackup,
       previousIPAID: $previousIPAID,
       previousStoredName: $previousStoredName,
-      stagedIPAID: $stagedIPAID
+      stagedIPAID: $stagedIPAID,
+      queuedForInstall: ($queuedForInstall == 1)
     }' > "$receipt_path"
   cp "$receipt_path" "$repo_root/build/sideloadly-cli/latest.json"
   note "staged: AutoRefresh record $installation_id now points to cached IPA $new_ipa_id"
   note "backup: $database_backup"
+}
+
+capture_signing_profile_from_log() {
+  local raw_install_log="$1" signed_app profile_source profile_temp profile_plist
+  local profile_bundle_id profile_has_device provisioned_device device_index
+  (( profile_captured == 0 )) || return 0
+  [[ -f "$raw_install_log" ]] || return 0
+
+  signed_app="$(sed -nE \
+    's#^((/private)?/var/folders/[^:]+/T/tmp_[^/]+/[^/]+/[^:]+\.app): Adding new Info\.plist key: ALTBundleIdentifier$#\1#p' \
+    "$raw_install_log" | tail -n 1)"
+  [[ -n "$signed_app" ]] || return 0
+  if [[ "$signed_app" != /var/folders/*/T/tmp_*/*.app \
+        && "$signed_app" != /private/var/folders/*/T/tmp_*/*.app ]]; then
+    return 0
+  fi
+  profile_source="$signed_app/embedded.mobileprovision"
+  [[ -f "$profile_source" ]] || return 0
+
+  mkdir -p "$fast_ota_support_dir"
+  profile_temp="$fast_ota_support_dir/.profile.mobileprovision.tmp.$$"
+  profile_plist="$cli_tmp_dir/captured-profile.plist"
+  ditto "$profile_source" "$profile_temp"
+  if ! security cms -D -i "$profile_temp" > "$profile_plist" 2>/dev/null; then
+    rm -f -- "$profile_temp"
+    return 0
+  fi
+  profile_bundle_id="$(plutil -extract Entitlements.application-identifier raw -o - "$profile_plist" 2>/dev/null || true)"
+  profile_has_device=0
+  device_index=0
+  while provisioned_device="$(plutil -extract "ProvisionedDevices.$device_index" raw -o - "$profile_plist" 2>/dev/null)"; do
+    if [[ "$provisioned_device" == "$device_udid" ]]; then
+      profile_has_device=1
+      break
+    fi
+    device_index=$((device_index + 1))
+  done
+  if [[ "$profile_bundle_id" != *".$installed_bundle_id" || "$profile_has_device" != "1" ]]; then
+    rm -f -- "$profile_temp"
+    return 0
+  fi
+
+  mv -f -- "$profile_temp" "$fast_ota_support_dir/profile.mobileprovision"
+  chmod 600 "$fast_ota_support_dir/profile.mobileprovision"
+  profile_captured=1
+  note "signing cache: refreshed the fast OTA provisioning profile"
 }
 
 wait_for_silent_install() {
@@ -351,6 +418,7 @@ wait_for_silent_install() {
   queue_completed=0
   queue_failed=0
   while kill -0 "$silent_process_pid" 2>/dev/null; do
+    capture_signing_profile_from_log "$raw_install_log"
     queue_state="$(sqlite3 -noheader -separator $'\t' "$database_path" \
       "SELECT COALESCE(last_updated,''), length(COALESCE(last_error,'')), CASE WHEN enqueue_token IS NULL OR enqueue_token='' THEN 0 ELSE 1 END FROM installations WHERE id=$installation_id;")"
     IFS=$'\t' read -r current_last_updated current_error_length queue_marker_present <<< "$queue_state"
@@ -372,6 +440,7 @@ wait_for_silent_install() {
   exit_status=$?
   silent_process_pid=""
   set -e
+  capture_signing_profile_from_log "$raw_install_log"
   redact_sideloadly_log < "$raw_install_log" > "$install_log"
 
   if (( queue_completed == 0 )); then
@@ -463,6 +532,37 @@ case "$command_name" in
   doctor)
     run_doctor
     ;;
+  stage)
+    ipa_path="$repo_root/$(json_value '.app.defaultIPA')"
+    dry_run=0
+    while (( $# > 0 )); do
+      case "$1" in
+        --ipa)
+          (( $# >= 2 )) || fail "--ipa requires a path"
+          ipa_path="$2"
+          shift 2
+          ;;
+        --dry-run)
+          dry_run=1
+          shift
+          ;;
+        *)
+          fail "Unknown stage option: $1"
+          ;;
+      esac
+    done
+
+    run_doctor
+    inspect_ipa "$ipa_path"
+    if (( dry_run == 1 )); then
+      note "dry-run: settings, device, AutoRefresh record, IPA, and entitlement are valid"
+      exit 0
+    fi
+    if pgrep -f "${sideloadly_binary}$" >/dev/null 2>&1; then
+      fail "Quit the visible Sideloadly window before changing its AutoRefresh record"
+    fi
+    stage_ipa_for_record 0
+    ;;
   update)
     ipa_path="$repo_root/$(json_value '.app.defaultIPA')"
     skip_build=0
@@ -506,7 +606,7 @@ case "$command_name" in
     if pgrep -f "${sideloadly_binary}$" >/dev/null 2>&1; then
       fail "Quit the visible Sideloadly window before using the headless update command"
     fi
-    stage_ipa_for_record
+    stage_ipa_for_record 1
     wait_for_silent_install
     verify_and_launch
     ;;

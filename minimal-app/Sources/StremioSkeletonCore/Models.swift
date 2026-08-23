@@ -219,6 +219,7 @@ public struct Video: Codable, Equatable, Identifiable, Hashable, Sendable {
     public let season: Int?
     public let episode: Int?
     public let thumbnail: URL?
+    public let overview: String?
     public let released: String?
 
     public init(
@@ -227,6 +228,7 @@ public struct Video: Codable, Equatable, Identifiable, Hashable, Sendable {
         season: Int? = nil,
         episode: Int? = nil,
         thumbnail: URL? = nil,
+        overview: String? = nil,
         released: String? = nil
     ) {
         self.id = id
@@ -234,6 +236,7 @@ public struct Video: Codable, Equatable, Identifiable, Hashable, Sendable {
         self.season = season
         self.episode = episode
         self.thumbnail = thumbnail
+        self.overview = overview
         self.released = released
     }
 }
@@ -249,7 +252,14 @@ public struct Stream: Codable, Equatable, Identifiable, Hashable, Sendable {
     public let sources: [String]?
 
     public var id: String {
-        [url?.absoluteString, externalUrl?.absoluteString, infoHash, name, title]
+        [
+            url?.absoluteString,
+            externalUrl?.absoluteString,
+            infoHash,
+            fileIdx.map(String.init),
+            name,
+            title,
+        ]
             .compactMap { $0 }
             .joined(separator: "|")
     }

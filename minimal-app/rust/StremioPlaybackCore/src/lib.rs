@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
     ffi::{CStr, c_char},
+    sync::Mutex,
+    time::Instant,
 };
 
 const ABI_VERSION: u32 = 1;
@@ -15,11 +17,13 @@ const DECODER_AUTOMATIC: u32 = 0;
 const DECODER_AVFOUNDATION: u32 = 1;
 const DECODER_FFMPEG_VIDEOTOOLBOX: u32 = 2;
 const DECODER_VLC_VIDEOTOOLBOX_BRIDGE: u32 = 3;
+const DECODER_BUNNY_FFMPEG: u32 = 4;
 
 const PLAYER_PERFORMANCE: u32 = 0;
 const PLAYER_KSPLAYER: u32 = 1;
 const PLAYER_VLC: u32 = 2;
 const PLAYER_AVPLAYER: u32 = 3;
+const PLAYER_BUNNY: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +125,13 @@ fn policy(url: &str, title: &str, player_kind: u32) -> StremioPlaybackPolicy {
 
     let decoder_kind = match player_kind {
         PLAYER_AVPLAYER => DECODER_AVFOUNDATION,
+        PLAYER_BUNNY => {
+            if apple_native {
+                DECODER_AVFOUNDATION
+            } else {
+                DECODER_BUNNY_FFMPEG
+            }
+        }
         PLAYER_VLC => DECODER_VLC_VIDEOTOOLBOX_BRIDGE,
         PLAYER_KSPLAYER => {
             if apple_native {
@@ -169,6 +180,117 @@ pub extern "C" fn stremio_playback_policy(
     player_kind: u32,
 ) -> StremioPlaybackPolicy {
     policy(&text(url), &text(title), player_kind)
+}
+
+#[derive(Debug)]
+struct BunnyClockState {
+    media_time_us: i64,
+    rate: f64,
+    updated_at: Instant,
+}
+
+/// Opaque, thread-safe media clock shared with Bunny's Objective-C decoder.
+/// Apple's audio renderer remains the physical A/V clock; this clock owns the
+/// deterministic rate/seek state used for UI and bounded queue decisions.
+pub struct StremioBunnyClock {
+    state: Mutex<BunnyClockState>,
+}
+
+fn clock_position_us(state: &BunnyClockState, now: Instant) -> i64 {
+    if state.rate <= 0.0 {
+        return state.media_time_us.max(0);
+    }
+    let elapsed_us = now
+        .saturating_duration_since(state.updated_at)
+        .as_micros()
+        .min(i64::MAX as u128) as f64;
+    state
+        .media_time_us
+        .saturating_add((elapsed_us * state.rate).round() as i64)
+        .max(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn stremio_bunny_clock_create() -> *mut StremioBunnyClock {
+    Box::into_raw(Box::new(StremioBunnyClock {
+        state: Mutex::new(BunnyClockState {
+            media_time_us: 0,
+            rate: 0.0,
+            updated_at: Instant::now(),
+        }),
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stremio_bunny_clock_destroy(clock: *mut StremioBunnyClock) {
+    if !clock.is_null() {
+        // SAFETY: The caller transfers the unique pointer returned by create
+        // and must destroy it exactly once.
+        drop(unsafe { Box::from_raw(clock) });
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stremio_bunny_clock_seek(
+    clock: *mut StremioBunnyClock,
+    media_time_us: i64,
+) {
+    // SAFETY: Null is a no-op; non-null pointers must originate from create.
+    let Some(clock) = (unsafe { clock.as_ref() }) else {
+        return;
+    };
+    let mut state = clock
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    state.media_time_us = media_time_us.max(0);
+    state.updated_at = Instant::now();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stremio_bunny_clock_set_rate(clock: *mut StremioBunnyClock, rate: f64) {
+    // SAFETY: See stremio_bunny_clock_seek.
+    let Some(clock) = (unsafe { clock.as_ref() }) else {
+        return;
+    };
+    let now = Instant::now();
+    let mut state = clock
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    state.media_time_us = clock_position_us(&state, now);
+    state.rate = rate.clamp(0.0, 2.0);
+    state.updated_at = now;
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stremio_bunny_clock_observe(
+    clock: *mut StremioBunnyClock,
+    media_time_us: i64,
+) {
+    // SAFETY: See stremio_bunny_clock_seek.
+    let Some(clock) = (unsafe { clock.as_ref() }) else {
+        return;
+    };
+    let mut state = clock
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    state.media_time_us = media_time_us.max(0);
+    state.updated_at = Instant::now();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stremio_bunny_clock_position_us(clock: *const StremioBunnyClock) -> i64 {
+    // SAFETY: See stremio_bunny_clock_seek.
+    let Some(clock) = (unsafe { clock.as_ref() }) else {
+        return 0;
+    };
+    let state = clock
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    clock_position_us(&state, Instant::now())
 }
 
 #[derive(Clone, Copy)]
@@ -470,5 +592,39 @@ mod tests {
     fn asks_avplayer_for_compatibility_on_non_native_sources() {
         let result = policy("https://example.test/file", "AV1 FLAC", PLAYER_AVPLAYER);
         assert_eq!(result.prefer_compatibility_stream, 1);
+    }
+
+    #[test]
+    fn routes_bunny_native_and_uncommon_sources_inside_bunny() {
+        let native = policy("https://example.test/video.mp4", "H264 AAC", PLAYER_BUNNY);
+        let uncommon = policy("https://example.test/video.mkv", "AV1 FLAC", PLAYER_BUNNY);
+        assert_eq!(native.decoder_kind, DECODER_AVFOUNDATION);
+        assert_eq!(uncommon.decoder_kind, DECODER_BUNNY_FFMPEG);
+        assert_eq!(uncommon.prefer_compatibility_stream, 0);
+    }
+
+    #[test]
+    fn keeps_bunny_selected_across_the_custom_format_matrix() {
+        for (url, title) in [
+            ("https://example.test/video.webm", "VP9 Opus"),
+            ("https://example.test/video.avi", "MPEG4 MP3"),
+            ("https://example.test/video.mkv", "HEVC TrueHD"),
+            ("https://example.test/download", "H264 DTS Matroska"),
+        ] {
+            let result = policy(url, title, PLAYER_BUNNY);
+            assert_eq!(result.decoder_kind, DECODER_BUNNY_FFMPEG, "{url} {title}");
+            assert_eq!(result.prefer_compatibility_stream, 0, "{url} {title}");
+        }
+    }
+
+    #[test]
+    fn bunny_clock_preserves_seek_position_while_paused() {
+        let clock = stremio_bunny_clock_create();
+        unsafe {
+            stremio_bunny_clock_seek(clock, 42_500_000);
+            stremio_bunny_clock_set_rate(clock, 0.0);
+            assert_eq!(stremio_bunny_clock_position_us(clock), 42_500_000);
+            stremio_bunny_clock_destroy(clock);
+        }
     }
 }

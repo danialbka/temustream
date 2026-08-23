@@ -89,6 +89,28 @@ final class AddonClientTests: XCTestCase {
         )
     }
 
+    func testSeriesTrailerAndMetadataFallbackResolveToPlayableURLs() throws {
+        let seriesJSON = #"{"id":"tt-series","type":"series","name":"Series","trailerStreams":[{"title":"Official trailer","ytId":"series_trailer_123"}]}"#
+        let fallback = try JSONDecoder().decode(MetaItem.self, from: Data(seriesJSON.utf8))
+        let providerDetail = MetaItem(
+            id: "tt-series",
+            type: "series",
+            name: "Series",
+            description: "Provider description",
+            videos: [Video(id: "tt-series:1:1", title: "Pilot", season: 1, episode: 1)]
+        )
+
+        let enriched = providerDetail.fillingTrailerMetadata(from: fallback)
+
+        XCTAssertEqual(enriched.type, "series")
+        XCTAssertEqual(enriched.description, "Provider description")
+        XCTAssertEqual(enriched.videos?.first?.title, "Pilot")
+        XCTAssertEqual(
+            enriched.preferredTrailerURL?.absoluteString,
+            "https://www.youtube.com/watch?v=series_trailer_123"
+        )
+    }
+
     func testDecodesEpisodeThumbnailFromSeriesMetadata() throws {
         let json = #"""
         {
@@ -97,6 +119,7 @@ final class AddonClientTests: XCTestCase {
             "season":1,
             "episode":1,
             "thumbnail":"https://episodes.metahub.space/tt9288030/1/1/w780.jpg",
+            "overview":"Jack Reacher investigates a small-town murder with unexpected ties.",
             "released":"2022-02-04T00:00:00.000Z"
         }
         """#
@@ -108,6 +131,10 @@ final class AddonClientTests: XCTestCase {
         XCTAssertEqual(
             video.thumbnail?.absoluteString,
             "https://episodes.metahub.space/tt9288030/1/1/w780.jpg"
+        )
+        XCTAssertEqual(
+            video.overview,
+            "Jack Reacher investigates a small-town murder with unexpected ties."
         )
     }
 }

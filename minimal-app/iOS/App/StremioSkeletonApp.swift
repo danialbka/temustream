@@ -4,10 +4,12 @@ import SwiftUI
 struct StremioSkeletonApp: App {
     @UIApplicationDelegateAdaptor(AppOrientationDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
+    @StateObject private var watchTogether = WatchTogetherModel()
 
     var body: some Scene {
         WindowGroup {
             appContent
+            .environmentObject(watchTogether)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .preferredColorScheme(.dark)
         }
@@ -49,6 +51,7 @@ struct StremioSkeletonApp: App {
         RootView()
             .environmentObject(model)
             .task { await model.start() }
+            .task { await watchTogether.start() }
     }
 
     private var playerStressURL: URL? {
@@ -76,7 +79,10 @@ struct StremioSkeletonApp: App {
         return PlaybackPlan(
             primaryURL: primaryURL,
             fallbackURL: compatibilityURL,
-            requiresCompatibilityPlayback: compatibilityURL != nil
+            requiresCompatibilityPlayback: compatibilityURL != nil,
+            detectedMIMEType: ProcessInfo.processInfo.environment[
+                "SKELETON_PLAYER_FIXTURE_MIME_TYPE"
+            ]
         )
         #else
         return nil
