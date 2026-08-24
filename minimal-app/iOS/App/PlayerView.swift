@@ -583,21 +583,11 @@ final class AppOrientationDelegate: NSObject, UIApplicationDelegate {
 @MainActor
 private enum PlayerPresentation {
     static func prepareAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .moviePlayback)
-            try session.setActive(true)
-        } catch {
-            // Playback can still proceed without background audio; the active
-            // player engine will report a media error if it is unavailable.
-        }
+        PlaybackAudioSession.beginPlayback()
     }
 
     static func endAudioSession() {
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
+        PlaybackAudioSession.endPlayback()
     }
 
     static func toggleOrientation() {
@@ -839,7 +829,7 @@ struct KSPlayerScreen: View {
         VStack(spacing: 14) {
             Image(systemName: "play.slash")
                 .font(.system(size: 44))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.appAccent)
             Text("Playback unavailable").font(.title3.bold())
             Text(message)
                 .foregroundStyle(.secondary)
@@ -851,7 +841,7 @@ struct KSPlayerScreen: View {
                 attemptRevision += 1
             }
             .buttonStyle(.borderedProminent)
-            .tint(.orange)
+            .tint(Color.appAccent)
         }
         .padding(28)
         .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 22))
@@ -1009,7 +999,7 @@ private struct KSPlaybackAttempt: View {
                 VStack(spacing: 14) {
                     Image(systemName: "waveform.circle.fill")
                         .font(.system(size: 68))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.appAccent)
                     Text("Audio playback")
                         .font(.headline)
                     Text(title)
@@ -1028,7 +1018,7 @@ private struct KSPlaybackAttempt: View {
                 VStack(spacing: 12) {
                     ProgressView()
                         .controlSize(.large)
-                        .tint(.orange)
+                        .tint(Color.appAccent)
                     Text("Starting video…")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
@@ -2198,7 +2188,7 @@ private struct PlayerTimeline: View {
                     }
                 }
             )
-            .tint(.orange)
+            .tint(Color.appAccent)
             .disabled(!isReady || !(coordinator.playerLayer?.player.seekable ?? false))
             .accessibilityIdentifier("player-timeline")
             Text(isReady ? formatted(model.totalTime) : "--:--")
@@ -2625,7 +2615,7 @@ struct AVPlayerScreen: View {
                 playbackFailure(message: failureMessage)
             } else if !statusMessage.isEmpty {
                 VStack(spacing: 12) {
-                    ProgressView().tint(.orange)
+                    ProgressView().tint(Color.appAccent)
                     Text(statusMessage).foregroundStyle(.secondary)
                 }
                 .padding(24)
@@ -2744,7 +2734,7 @@ struct AVPlayerScreen: View {
         VStack(spacing: 14) {
             Image(systemName: "play.slash")
                 .font(.system(size: 44))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.appAccent)
             Text("Playback unavailable").font(.title3.bold())
             Text(message)
                 .foregroundStyle(.secondary)
@@ -2756,7 +2746,7 @@ struct AVPlayerScreen: View {
                 attemptRevision += 1
             }
             .buttonStyle(.borderedProminent)
-            .tint(.orange)
+            .tint(Color.appAccent)
         }
         .padding(28)
         .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 22))
@@ -3890,7 +3880,7 @@ private struct VLCCompatibilityPlayerScreen: View {
 
             if !model.isReady, model.failureMessage == nil {
                 VStack(spacing: 12) {
-                    ProgressView().tint(.orange)
+                    ProgressView().tint(Color.appAccent)
                     Text("Starting video…")
                         .font(.subheadline.weight(.semibold))
                 }
@@ -4129,7 +4119,7 @@ private struct VLCCompatibilityPlayerScreen: View {
                     }
                 }
             )
-            .tint(.orange)
+            .tint(Color.appAccent)
             .disabled(model.duration <= 0 || !model.player.isSeekable)
             .accessibilityIdentifier("player-timeline")
 
@@ -4323,7 +4313,7 @@ private struct VLCCompatibilityPlayerScreen: View {
         VStack(spacing: 14) {
             Image(systemName: "play.slash")
                 .font(.system(size: 44))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.appAccent)
             Text("Playback unavailable").font(.title3.bold())
             Text(message)
                 .foregroundStyle(.secondary)
@@ -4333,7 +4323,7 @@ private struct VLCCompatibilityPlayerScreen: View {
                 attemptRevision += 1
             }
             .buttonStyle(.borderedProminent)
-            .tint(.orange)
+            .tint(Color.appAccent)
         }
         .padding(28)
         .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 22))
@@ -4679,6 +4669,7 @@ struct PlayerScreen: View {
     @State private var progressReference: PlaybackProgressReference
     @State private var didRunSimulatorPlayerSwitch = false
     @State private var playerChromeVisible = true
+    @State private var watchRoomPresented = false
     @StateObject private var watchChannel = WatchPlaybackControlChannel()
 
     init(
@@ -4747,7 +4738,8 @@ struct PlayerScreen: View {
                         WatchRoomPlayerButton(
                             contentKey: contentKey,
                             contentType: contentType,
-                            contentTitle: watchContentTitle
+                            contentTitle: watchContentTitle,
+                            showsRoom: $watchRoomPresented
                         )
                     }
                     Spacer()
@@ -4773,6 +4765,12 @@ struct PlayerScreen: View {
         .task {
             await runSimulatorPlayerSwitchIfRequested()
         }
+        .watchTogetherRoomSheet(
+            isPresented: $watchRoomPresented,
+            contentKey: contentKey,
+            contentType: contentType,
+            contentTitle: watchContentTitle
+        )
     }
 
     private var activePlayer: StremioInternalPlayer {
@@ -4857,7 +4855,7 @@ struct PlayerScreen: View {
         VStack(spacing: 14) {
             Image(systemName: "play.slash")
                 .font(.system(size: 44))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.appAccent)
             Text("Playback unavailable").font(.title3.bold())
             Text(message)
                 .foregroundStyle(.secondary)
@@ -4869,7 +4867,7 @@ struct PlayerScreen: View {
                 bridgeRevision += 1
             }
             .buttonStyle(.borderedProminent)
-            .tint(.orange)
+            .tint(Color.appAccent)
         }
         .padding(28)
         .background(.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 22))
@@ -5004,6 +5002,7 @@ struct StreamPlaybackCandidate: Identifiable {
     let contentIdentifier: String?
     let contentTitle: String?
     let initialPosition: TimeInterval
+    let mediaMetadata: PlaybackMediaMetadata?
 
     init(
         stream: Stream,
@@ -5011,6 +5010,7 @@ struct StreamPlaybackCandidate: Identifiable {
         contentIdentifier: String? = nil,
         contentTitle: String? = nil,
         initialPosition: TimeInterval = 0,
+        mediaMetadata: PlaybackMediaMetadata? = nil,
         sourceID: String? = nil
     ) {
         id = sourceID ?? "\(providerName ?? "unknown")#\(stream.id)"
@@ -5019,6 +5019,7 @@ struct StreamPlaybackCandidate: Identifiable {
         self.contentIdentifier = contentIdentifier
         self.contentTitle = contentTitle
         self.initialPosition = max(initialPosition, 0)
+        self.mediaMetadata = mediaMetadata
     }
 }
 
@@ -5196,7 +5197,7 @@ struct ResolvingPlayerScreen: View {
                     Text("UP NEXT")
                         .font(.caption2.weight(.black))
                         .tracking(0.8)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.appAccent)
                     Text(episodeLabel(pending.episode))
                         .font(.headline)
                     if let title = pending.episode.title,
@@ -5241,7 +5242,7 @@ struct ResolvingPlayerScreen: View {
                     )
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.orange)
+                .tint(Color.appAccent)
                 .foregroundStyle(.black)
                 .disabled(nextEpisodeLoadError != nil)
             }
@@ -5253,7 +5254,7 @@ struct ResolvingPlayerScreen: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
         .overlay {
             RoundedRectangle(cornerRadius: 18)
-                .stroke(Color.orange.opacity(0.32), lineWidth: 1)
+                .stroke(Color.appAccent.opacity(0.32), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.48), radius: 18, y: 8)
         .padding(18)
@@ -5306,7 +5307,7 @@ struct ResolvingPlayerScreen: View {
                                 / CGFloat(failoverCountdownSeconds)
                         )
                         .stroke(
-                            Color.orange,
+                            Color.appAccent,
                             style: StrokeStyle(lineWidth: 5, lineCap: .round)
                         )
                         .rotationEffect(.degrees(-90))
@@ -5320,7 +5321,7 @@ struct ResolvingPlayerScreen: View {
                     .font(.title3.bold())
                 Text("Trying the next stream in \(countdownRemaining)s")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Color.appAccent)
                     .accessibilityIdentifier("stream-failover-countdown")
                 Text(pending.nextTitle)
                     .font(.caption)
@@ -5337,7 +5338,7 @@ struct ResolvingPlayerScreen: View {
                         .padding(.vertical, 11)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.orange)
+                .tint(Color.appAccent)
                 .foregroundStyle(.black)
                 .accessibilityIdentifier("stream-failover-continue")
             }
@@ -5348,7 +5349,7 @@ struct ResolvingPlayerScreen: View {
             .background(.black.opacity(0.9), in: RoundedRectangle(cornerRadius: 22))
             .overlay {
                 RoundedRectangle(cornerRadius: 22)
-                    .stroke(Color.orange.opacity(0.32), lineWidth: 1)
+                    .stroke(Color.appAccent.opacity(0.32), lineWidth: 1)
             }
             .padding()
         }
@@ -5414,6 +5415,7 @@ struct ResolvingPlayerScreen: View {
             providerName: activeCandidate.providerName,
             position: position,
             duration: duration,
+            mediaMetadata: activeCandidate.mediaMetadata,
             updateKind: updateKind
         )
         if EpisodeAutoplayPresentationPolicy.shouldPresent(
@@ -5479,7 +5481,11 @@ struct ResolvingPlayerScreen: View {
                 seriesTitle: context.series.name,
                 video: pending.episode
             ),
-            initialPosition: 0
+            initialPosition: 0,
+            mediaMetadata: .episode(
+                series: context.series,
+                episode: pending.episode
+            )
         )
         isLoadingNextEpisode = false
         NSLog(

@@ -71,10 +71,101 @@ final class PlaybackProgressStoreTests: XCTestCase {
         XCTAssertTrue(items.isEmpty)
     }
 
+    func testContinueWatchingKeepsLatestEpisodePerSeriesAndSortsByRecency() {
+        let firstEpisode = progress(
+            identifier: "series:show:episode:s1e1",
+            position: 300,
+            updatedAt: Date(timeIntervalSince1970: 10),
+            mediaMetadata: PlaybackMediaMetadata(
+                mediaID: "show",
+                mediaType: "series",
+                mediaTitle: "Show",
+                episodeID: "s1e1",
+                season: 1,
+                episode: 1
+            )
+        )
+        let movie = progress(
+            identifier: "movie:movie",
+            position: 600,
+            updatedAt: Date(timeIntervalSince1970: 20),
+            mediaMetadata: PlaybackMediaMetadata(
+                mediaID: "movie",
+                mediaType: "movie",
+                mediaTitle: "Movie"
+            )
+        )
+        let latestEpisode = progress(
+            identifier: "series:show:episode:s1e2",
+            position: 900,
+            updatedAt: Date(timeIntervalSince1970: 30),
+            mediaMetadata: PlaybackMediaMetadata(
+                mediaID: "show",
+                mediaType: "series",
+                mediaTitle: "Show",
+                episodeID: "s1e2",
+                season: 1,
+                episode: 2
+            )
+        )
+
+        XCTAssertEqual(
+            ContinueWatchingSelector.latest(
+                from: [firstEpisode, movie, latestEpisode]
+            ).map(\.contentIdentifier),
+            [latestEpisode.contentIdentifier, movie.contentIdentifier]
+        )
+    }
+
+    func testContinueWatchingGroupsLegacyEpisodeIdentifiersWithoutMetadata() {
+        let first = progress(
+            identifier: "series:show:episode:show:1:1",
+            position: 300,
+            updatedAt: Date(timeIntervalSince1970: 10)
+        )
+        let latest = progress(
+            identifier: "series:show:episode:show:1:2",
+            position: 600,
+            updatedAt: Date(timeIntervalSince1970: 20)
+        )
+
+        XCTAssertEqual(
+            ContinueWatchingSelector.latest(from: [first, latest]),
+            [latest]
+        )
+    }
+
+    func testPlaybackMediaMetadataPersistsWithProgress() async throws {
+        let storeURL = temporaryStoreURL()
+        let store = PlaybackProgressStore(fileURL: storeURL)
+        let metadata = PlaybackMediaMetadata(
+            mediaID: "show",
+            mediaType: "series",
+            mediaTitle: "Show",
+            posterURL: URL(string: "https://example.test/poster.jpg"),
+            episodeID: "s1e2",
+            episodeTitle: "Second Episode",
+            season: 1,
+            episode: 2,
+            episodeThumbnailURL: URL(string: "https://example.test/episode.jpg")
+        )
+        _ = try await store.record(
+            progress(
+                identifier: "series:show:episode:s1e2",
+                position: 600,
+                mediaMetadata: metadata
+            )
+        )
+
+        let reloaded = try await PlaybackProgressStore(fileURL: storeURL).items()
+        XCTAssertEqual(reloaded.first?.mediaMetadata, metadata)
+    }
+
     private func progress(
         identifier: String,
         position: TimeInterval,
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        mediaMetadata: PlaybackMediaMetadata? = nil
     ) -> PlaybackProgress {
         PlaybackProgress(
             contentIdentifier: identifier,
@@ -83,7 +174,8 @@ final class PlaybackProgressStoreTests: XCTestCase {
             providerName: "Provider",
             position: position,
             duration: 3_600,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            mediaMetadata: mediaMetadata
         )
     }
 

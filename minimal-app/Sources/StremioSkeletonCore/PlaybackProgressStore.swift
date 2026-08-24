@@ -1,5 +1,62 @@
 import Foundation
 
+public struct PlaybackMediaMetadata: Codable, Equatable, Sendable {
+    public let mediaID: String
+    public let mediaType: String
+    public let mediaTitle: String
+    public let posterURL: URL?
+    public let episodeID: String?
+    public let episodeTitle: String?
+    public let season: Int?
+    public let episode: Int?
+    public let episodeThumbnailURL: URL?
+
+    public init(
+        mediaID: String,
+        mediaType: String,
+        mediaTitle: String,
+        posterURL: URL? = nil,
+        episodeID: String? = nil,
+        episodeTitle: String? = nil,
+        season: Int? = nil,
+        episode: Int? = nil,
+        episodeThumbnailURL: URL? = nil
+    ) {
+        self.mediaID = mediaID
+        self.mediaType = mediaType
+        self.mediaTitle = mediaTitle
+        self.posterURL = posterURL
+        self.episodeID = episodeID
+        self.episodeTitle = episodeTitle
+        self.season = season
+        self.episode = episode
+        self.episodeThumbnailURL = episodeThumbnailURL
+    }
+
+    public static func movie(_ item: MetaItem) -> Self {
+        Self(
+            mediaID: item.id,
+            mediaType: item.type,
+            mediaTitle: item.name,
+            posterURL: item.poster
+        )
+    }
+
+    public static func episode(series: MetaItem, episode: Video) -> Self {
+        Self(
+            mediaID: series.id,
+            mediaType: series.type,
+            mediaTitle: series.name,
+            posterURL: series.poster,
+            episodeID: episode.id,
+            episodeTitle: episode.title,
+            season: episode.season,
+            episode: episode.episode,
+            episodeThumbnailURL: episode.thumbnail
+        )
+    }
+}
+
 public struct PlaybackProgress: Codable, Equatable, Identifiable, Sendable {
     public static let minimumResumePosition: TimeInterval = 10
     public static let completionFraction = 0.95
@@ -13,6 +70,7 @@ public struct PlaybackProgress: Codable, Equatable, Identifiable, Sendable {
     public let position: TimeInterval
     public let duration: TimeInterval
     public let updatedAt: Date
+    public let mediaMetadata: PlaybackMediaMetadata?
 
     public var id: String { contentIdentifier }
 
@@ -23,7 +81,8 @@ public struct PlaybackProgress: Codable, Equatable, Identifiable, Sendable {
         providerName: String? = nil,
         position: TimeInterval,
         duration: TimeInterval,
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        mediaMetadata: PlaybackMediaMetadata? = nil
     ) {
         self.contentIdentifier = contentIdentifier
         self.contentTitle = contentTitle
@@ -32,6 +91,7 @@ public struct PlaybackProgress: Codable, Equatable, Identifiable, Sendable {
         self.position = position
         self.duration = duration
         self.updatedAt = updatedAt
+        self.mediaMetadata = mediaMetadata
     }
 
     public static func shouldSave(position: TimeInterval, duration: TimeInterval) -> Bool {
@@ -52,6 +112,35 @@ public struct PlaybackProgress: Codable, Equatable, Identifiable, Sendable {
               position >= minimumResumePosition, duration > 0
         else { return false }
         return !shouldSave(position: position, duration: duration)
+    }
+}
+
+public enum ContinueWatchingSelector {
+    /// Keeps only the newest unfinished item for each movie or series. A
+    /// series with several partially watched episodes therefore occupies one
+    /// card and resumes its most recently watched episode.
+    public static func latest(
+        from progress: [PlaybackProgress],
+        limit: Int = 12
+    ) -> [PlaybackProgress] {
+        guard limit > 0 else { return [] }
+        var seenMedia = Set<String>()
+        return progress
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .filter { seenMedia.insert(groupingIdentifier(for: $0)).inserted }
+            .prefix(limit)
+            .map { $0 }
+    }
+
+    public static func groupingIdentifier(for progress: PlaybackProgress) -> String {
+        if let metadata = progress.mediaMetadata {
+            return "\(metadata.mediaType):\(metadata.mediaID)"
+        }
+        if progress.contentIdentifier.hasPrefix("series:"),
+           let marker = progress.contentIdentifier.range(of: ":episode:") {
+            return String(progress.contentIdentifier[..<marker.lowerBound])
+        }
+        return progress.contentIdentifier
     }
 }
 

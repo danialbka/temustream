@@ -71,7 +71,9 @@ typedef NS_ENUM(NSInteger, BunnyFFmpegTrackKind) {
 @property(nonatomic, copy, nullable) void (^onEnded)(void);
 @property(nonatomic, copy, nullable) void (^onFailure)(NSError *error);
 
-- (instancetype)initWithURL:(NSURL *)URL NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithURL:(NSURL *)URL;
+- (instancetype)initWithURL:(NSURL *)URL
+    preferHardwareVideoDecoding:(BOOL)preferHardwareVideoDecoding NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
 /// Starts one serial, bounded demux/decode worker. Calling more than once is a no-op.
@@ -87,10 +89,16 @@ typedef NS_ENUM(NSInteger, BunnyFFmpegTrackKind) {
 @property(nonatomic, readonly) float rate;
 /// True only after libavcodec returns an actual VideoToolbox CVPixelBuffer.
 @property(nonatomic, readonly) BOOL hardwareVideoDecode;
+/// True when libavcodec opened a VideoToolbox context, before the first frame arrives.
+@property(nonatomic, readonly) BOOL hardwareVideoDecoderNegotiated;
+/// Whether this decoder instance may negotiate VideoToolbox before software decode.
+@property(nonatomic, readonly) BOOL prefersHardwareVideoDecoding;
 @property(nonatomic, getter=isMuted) BOOL muted;
 
 @end
 
 FOUNDATION_EXPORT NSString *const BunnyFFmpegDecoderErrorDomain;
+/// NSError user-info flag indicating that reopening with software video decode may recover.
+FOUNDATION_EXPORT NSString *const BunnyFFmpegDecoderSoftwareRetryKey;
 
 NS_ASSUME_NONNULL_END

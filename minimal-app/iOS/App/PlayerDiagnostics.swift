@@ -1300,7 +1300,7 @@ struct ProviderPlayerAuditScreen: View {
                 VStack(spacing: 12) {
                     Image(systemName: "play.slash")
                         .font(.system(size: 44))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.appAccent)
                     Text("Provider stream unavailable").font(.title3.bold())
                     Text(failureMessage)
                         .foregroundStyle(.secondary)

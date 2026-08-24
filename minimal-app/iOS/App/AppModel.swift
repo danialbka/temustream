@@ -74,6 +74,21 @@ enum PlaybackProgressUpdateKind: Sendable, Equatable {
     case final
 }
 
+struct ContinueWatchingEntry: Identifiable, Equatable, Sendable {
+    let progress: PlaybackProgress
+    let item: MetaItem
+    let episode: Video?
+
+    var id: String { progress.contentIdentifier }
+
+    var mediaMetadata: PlaybackMediaMetadata {
+        if let episode {
+            return .episode(series: item, episode: episode)
+        }
+        return .movie(item)
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var manifest: AddonManifest?
@@ -124,6 +139,23 @@ final class AppModel: ObservableObject {
 
     var selectedCatalogSource: CatalogSource? {
         catalogSources.first { $0.id == selectedCatalogSourceID }
+    }
+
+    var continueWatching: [ContinueWatchingEntry] {
+        var knownItemsByIdentifier: [String: MetaItem] = [:]
+        let knownItems = catalog + library + searchCatalogs.flatMap(\.items)
+        for item in knownItems {
+            knownItemsByIdentifier["\(item.type):\(item.id)"] = item
+        }
+
+        return ContinueWatchingSelector.latest(
+            from: Array(playbackProgress.values)
+        ).map { progress in
+            continueWatchingEntry(
+                for: progress,
+                knownItemsByIdentifier: knownItemsByIdentifier
+            )
+        }
     }
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -687,6 +719,7 @@ final class AppModel: ObservableObject {
         providerName: String?,
         position: TimeInterval,
         duration: TimeInterval,
+        mediaMetadata: PlaybackMediaMetadata? = nil,
         updateKind: PlaybackProgressUpdateKind = .final
     ) {
         guard let contentIdentifier, !contentIdentifier.isEmpty,
@@ -701,7 +734,8 @@ final class AppModel: ObservableObject {
             stream: stream,
             providerName: providerName,
             position: position,
-            duration: duration
+            duration: duration,
+            mediaMetadata: mediaMetadata
         )
         let isCompleted = PlaybackProgress.isCompleted(
             position: position,
@@ -762,6 +796,94 @@ final class AppModel: ObservableObject {
                 NSLog("PLAYBACK_PROGRESS save_failed=%@", error.localizedDescription)
             }
         }
+    }
+
+    private func continueWatchingEntry(
+        for progress: PlaybackProgress,
+        knownItemsByIdentifier: [String: MetaItem]
+    ) -> ContinueWatchingEntry {
+        if let metadata = progress.mediaMetadata {
+            let key = "\(metadata.mediaType):\(metadata.mediaID)"
+            let knownItem = knownItemsByIdentifier[key]
+            let fallbackEpisode = metadata.episodeID.map { episodeID in
+                Video(
+                    id: episodeID,
+                    title: metadata.episodeTitle,
+                    season: metadata.season,
+                    episode: metadata.episode,
+                    thumbnail: metadata.episodeThumbnailURL
+                )
+            }
+            let episode = metadata.episodeID.flatMap { episodeID in
+                knownItem?.videos?.first { $0.id == episodeID }
+            } ?? fallbackEpisode
+            let item = knownItem ?? MetaItem(
+                id: metadata.mediaID,
+                type: metadata.mediaType,
+                name: metadata.mediaTitle,
+                poster: metadata.posterURL,
+                videos: episode.map { [$0] }
+            )
+            return ContinueWatchingEntry(
+                progress: progress,
+                item: item,
+                episode: episode
+            )
+        }
+
+        if let identity = Self.legacyEpisodeIdentity(progress.contentIdentifier) {
+            let key = "series:\(identity.seriesID)"
+            let knownItem = knownItemsByIdentifier[key]
+            let episode = knownItem?.videos?.first { $0.id == identity.videoID }
+                ?? Video(id: identity.videoID)
+            let fallbackTitle = progress.contentTitle
+                .components(separatedBy: " • ")
+                .first?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let seriesTitle = fallbackTitle.flatMap { $0.isEmpty ? nil : $0 }
+                ?? progress.contentTitle
+            let item = knownItem ?? MetaItem(
+                id: identity.seriesID,
+                type: "series",
+                name: seriesTitle,
+                videos: [episode]
+            )
+            return ContinueWatchingEntry(
+                progress: progress,
+                item: item,
+                episode: episode
+            )
+        }
+
+        let identity = progress.contentIdentifier.split(
+            separator: ":",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        let type = identity.first.map(String.init) ?? "movie"
+        let mediaID = identity.count > 1 ? String(identity[1]) : progress.contentIdentifier
+        let item = knownItemsByIdentifier["\(type):\(mediaID)"] ?? MetaItem(
+            id: mediaID,
+            type: type,
+            name: progress.contentTitle
+        )
+        return ContinueWatchingEntry(progress: progress, item: item, episode: nil)
+    }
+
+    private nonisolated static func legacyEpisodeIdentity(
+        _ contentIdentifier: String
+    ) -> (seriesID: String, videoID: String)? {
+        guard contentIdentifier.hasPrefix("series:"),
+              let marker = contentIdentifier.range(of: ":episode:")
+        else { return nil }
+        let seriesStart = contentIdentifier.index(
+            contentIdentifier.startIndex,
+            offsetBy: "series:".count
+        )
+        let seriesID = String(contentIdentifier[seriesStart..<marker.lowerBound])
+        let videoID = String(contentIdentifier[marker.upperBound...])
+        guard !seriesID.isEmpty, !videoID.isEmpty else { return nil }
+        return (seriesID, videoID)
     }
 
     func installAddon(_ input: String) async throws {

@@ -77,7 +77,9 @@ struct BunnyPlayerScreen: View {
                 .onTapGesture { toggleControls() }
                 .accessibilityIdentifier("bunny-player-video")
 
-                BunnySubtitleOverlay(lines: model.captionLines)
+                if !model.captionLines.isEmpty {
+                    BunnySubtitleOverlay(lines: model.captionLines)
+                }
 
                 if model.isPreparing, model.failureMessage == nil {
                     startupOverlay
@@ -110,7 +112,9 @@ struct BunnyPlayerScreen: View {
                         .accessibilityIdentifier("player-show-controls")
                 }
 
-                if debugOverlayEnabled, model.failureMessage == nil {
+                if debugOverlayEnabled,
+                   model.failureMessage == nil,
+                   !trackPickerPresented {
                     BunnyDebugOverlay(snapshot: model.debugSnapshot)
                 }
 
@@ -180,10 +184,28 @@ struct BunnyPlayerScreen: View {
         ) { notification in
             model.handleAudioInterruption(notification)
         }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .playbackVoiceCaptureDidChange)
+        ) { _ in
+            model.handleAudioSessionReconfiguration()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
+        ) { _ in
+            model.applicationWillResignActive()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
+        ) { _ in
+            model.applicationDidBecomeActive()
+        }
         .onDisappear {
             if let watchRegistrationID { watchChannel?.unregister(watchRegistrationID) }
             reportProgress(updateKind: .final)
             model.stop()
+            #if targetEnvironment(simulator)
+            PlaybackAudioSession.stopMicrophoneAuditIfNeeded()
+            #endif
             BunnyPresentation.endAudioSession()
         }
     }
@@ -221,7 +243,7 @@ struct BunnyPlayerScreen: View {
         VStack(spacing: 12) {
             ProgressView()
                 .controlSize(.large)
-                .tint(.orange)
+                .tint(Color.appAccent)
             Text(model.statusMessage)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
@@ -238,7 +260,7 @@ struct BunnyPlayerScreen: View {
         VStack(spacing: 14) {
             Image(systemName: "hare.fill")
                 .font(.system(size: 44))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.appAccent)
             Text("Bunny couldn’t play this stream")
                 .font(.title3.bold())
             Text(message)
@@ -252,7 +274,7 @@ struct BunnyPlayerScreen: View {
                 retryRevision += 1
             }
             .buttonStyle(.borderedProminent)
-            .tint(.orange)
+            .tint(Color.appAccent)
         }
         .padding(28)
         .background(.black.opacity(0.9), in: RoundedRectangle(cornerRadius: 22))
@@ -265,11 +287,17 @@ struct BunnyPlayerScreen: View {
         do {
             try await model.prepare()
             guard !Task.isCancelled else { return }
+            #if targetEnvironment(simulator)
+            await PlaybackAudioSession.startMicrophoneAuditIfRequested()
+            #endif
             scheduleControlsAutoHide()
             try await model.monitor(onProgress: onProgress)
         } catch is CancellationError {
             return
         } catch {
+            while !Task.isCancelled, !model.acceptsRuntimeFailure {
+                try? await Task.sleep(for: .milliseconds(250))
+            }
             guard !Task.isCancelled, !didReportExhaustion else { return }
             if scheduleRuntimeRecovery(after: error) { return }
             didReportExhaustion = true
@@ -334,6 +362,13 @@ struct BunnyPlayerScreen: View {
 
     private func handleRuntimeFailure(_ error: Error) {
         guard !didReportExhaustion else { return }
+        guard model.acceptsRuntimeFailure else {
+            NSLog(
+                "BUNNY_PLAYER deferred_failure lifecycle=inactive error=%@",
+                error.localizedDescription
+            )
+            return
+        }
         if scheduleRuntimeRecovery(after: error) { return }
         didReportExhaustion = true
         if let onExhausted {
@@ -460,7 +495,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private var customMetricsSampleFrames = 0
     private var customLastDecodedAt = 0.0
     private var customRecoveryAttempts = 0
+    private var softwareDecodeURLs: Set<URL> = []
     private var captionRevision = 0
+    private var applicationIsActive = true
+    private var applicationLifecycleRevision = 0
 
     init(
         plan: PlaybackPlan,
@@ -497,6 +535,8 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     var canRecoverFromRuntimeFailure: Bool {
         !isPreparing && (currentTime >= 1 || customFirstFrame)
     }
+
+    var acceptsRuntimeFailure: Bool { applicationIsActive }
 
     func attach(playerLayer: AVPlayerLayer) {
         self.playerLayer = playerLayer
@@ -536,7 +576,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                     case .native:
                         try await prepareNativeCandidate(candidate)
                     case .customFFmpeg:
-                        try await prepareCustomCandidate(candidate)
+                        try await prepareCustomCandidate(
+                            candidate,
+                            preferHardwareVideoDecoding: !softwareDecodeURLs.contains(candidate)
+                        )
                     }
                     return
                 } catch is CancellationError {
@@ -682,7 +725,52 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         throw CancellationError()
     }
 
-    private func prepareCustomCandidate(_ url: URL) async throws {
+    private func prepareCustomCandidate(
+        _ url: URL,
+        preferHardwareVideoDecoding: Bool
+    ) async throws {
+        do {
+            try await prepareCustomDecoder(
+                url,
+                preferHardwareVideoDecoding: preferHardwareVideoDecoding
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let decoderError = error as NSError
+            let explicitlyRetryable = decoderError.userInfo[
+                BunnyFFmpegDecoderSoftwareRetryKey
+            ] as? Bool == true
+            let openedHardwareWithoutFrame = customOpenComplete
+                && customMediaInfo?.hasVideo == true
+                && !customFirstFrame
+                && customDecoder?.hardwareVideoDecoderNegotiated == true
+            guard preferHardwareVideoDecoding,
+                  explicitlyRetryable || openedHardwareWithoutFrame
+            else {
+                throw error
+            }
+
+            softwareDecodeURLs.insert(url)
+            cleanupCurrentEngineForNextAttempt()
+            didRestorePosition = resumePosition <= 0
+            statusMessage = "Retrying with Bunny software decoder…"
+            NSLog(
+                "BUNNY_PLAYER decoder_fallback from=videotoolbox to=software host=%@ error=%@",
+                url.host ?? "local",
+                error.localizedDescription
+            )
+            try await prepareCustomDecoder(
+                url,
+                preferHardwareVideoDecoding: false
+            )
+        }
+    }
+
+    private func prepareCustomDecoder(
+        _ url: URL,
+        preferHardwareVideoDecoding: Bool
+    ) async throws {
         let startedAt = ProcessInfo.processInfo.systemUptime
         activeEngine = .customFFmpeg
         usesCustomDecoder = true
@@ -690,7 +778,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         player.replaceCurrentItem(with: nil)
         clearMediaOutputs()
 
-        let decoder = BunnyFFmpegDecoder(url: url)
+        let decoder = BunnyFFmpegDecoder(
+            url: url,
+            preferHardwareVideoDecoding: preferHardwareVideoDecoding
+        )
         customDecoder = decoder
         customOpenComplete = false
         customFirstFrame = false
@@ -791,6 +882,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         }
         decoder.onFailure = { [weak self, weak decoder] error in
             guard let self, let decoder, self.customDecoder === decoder else { return }
+            if preferHardwareVideoDecoding,
+               (error as NSError).userInfo[BunnyFFmpegDecoderSoftwareRetryKey] as? Bool == true {
+                self.softwareDecodeURLs.insert(url)
+            }
             self.customFailure = error
         }
         decoder.start()
@@ -824,9 +919,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                 statusMessage = ""
                 refreshPlaybackState()
                 NSLog(
-                    "BUNNY_PLAYER ready_ms=%.1f engine=custom_ffmpeg hardware=%@ container=%@ source=%@",
+                    "BUNNY_PLAYER ready_ms=%.1f engine=custom_ffmpeg hardware=%@ requested=%@ container=%@ source=%@",
                     (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
                     decoder.hardwareVideoDecode ? "videotoolbox" : "software",
+                    preferHardwareVideoDecoding ? "hardware-first" : "software-only",
                     customMediaInfo?.containerName ?? "unknown",
                     url.host ?? "local"
                 )
@@ -858,11 +954,21 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         var lastDecodedFrames = customDecodedFrames
         var lastDecodeAt = lastAdvanceAt
         var nativeRecoveryAttempts = 0
+        var observedLifecycleRevision = applicationLifecycleRevision
 
         while !Task.isCancelled, hasActivePlayback {
             refreshPlaybackState()
             let now = ProcessInfo.processInfo.systemUptime
             let sampledTime = currentTime
+            if observedLifecycleRevision != applicationLifecycleRevision
+                || !applicationIsActive {
+                observedLifecycleRevision = applicationLifecycleRevision
+                if sampledTime.isFinite { lastPosition = sampledTime }
+                lastAdvanceAt = now
+                lastDecodeAt = now
+                try await Task.sleep(for: .milliseconds(250))
+                continue
+            }
             if !wantsPlayback || isScrubbing || isSeeking {
                 if sampledTime.isFinite { lastPosition = sampledTime }
                 lastAdvanceAt = now
@@ -1281,6 +1387,37 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         @unknown default:
             break
         }
+    }
+
+    func handleAudioSessionReconfiguration() {
+        PlaybackAudioSession.reactivatePlayback()
+        guard wantsPlayback, !isPreparing else { return }
+        if activeEngine == .customFFmpeg {
+            customDecoder?.play(atRate: playbackRate)
+        } else {
+            resumePlayback()
+        }
+        refreshPlaybackState()
+    }
+
+    func applicationWillResignActive() {
+        applicationIsActive = false
+        applicationLifecycleRevision &+= 1
+        NSLog("BUNNY_PLAYER lifecycle=inactive position=%.1f", currentTime)
+    }
+
+    func applicationDidBecomeActive() {
+        applicationIsActive = true
+        applicationLifecycleRevision &+= 1
+        PlaybackAudioSession.reactivatePlayback()
+        guard wantsPlayback, !isPreparing else { return }
+        if activeEngine == .customFFmpeg {
+            customDecoder?.play(atRate: playbackRate)
+        } else {
+            resumePlayback()
+        }
+        refreshPlaybackState()
+        NSLog("BUNNY_PLAYER lifecycle=active position=%.1f", currentTime)
     }
 
     func presentFailure(_ error: Error) {
@@ -2346,7 +2483,7 @@ private struct BunnyTimeline: View {
                 in: 0...upperBound,
                 onEditingChanged: editingChanged
             )
-            .tint(.orange)
+            .tint(Color.appAccent)
             .disabled(model.duration <= 0 || model.isPreparing)
             .accessibilityIdentifier("player-timeline")
             Text(formatted(model.duration))
@@ -2661,20 +2798,11 @@ private struct BunnyOverlayButtonStyle: ButtonStyle {
 @MainActor
 private enum BunnyPresentation {
     static func prepareAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .moviePlayback)
-            try session.setActive(true)
-        } catch {
-            NSLog("BUNNY_PLAYER audio_session_error=%@", error.localizedDescription)
-        }
+        PlaybackAudioSession.beginPlayback()
     }
 
     static func endAudioSession() {
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
+        PlaybackAudioSession.endPlayback()
     }
 
     static func toggleOrientation() {

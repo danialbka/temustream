@@ -6,6 +6,7 @@ struct FriendsView: View {
     @State private var displayName = ""
     @State private var friendCode = ""
     @State private var roomCode = ""
+    @FocusState private var profileNameFocused: Bool
 
     var body: some View {
         Form {
@@ -47,10 +48,36 @@ struct FriendsView: View {
         Section("Create your profile") {
             TextField("Display name", text: $displayName)
                 .textInputAutocapitalization(.words)
-            Button("Get friend code") {
-                Task { await watch.createProfile(displayName: displayName) }
+                .focused($profileNameFocused)
+                .submitLabel(.done)
+                .onSubmit(createProfile)
+                .accessibilityIdentifier("friends-profile-display-name")
+            Button(action: createProfile) {
+                profileCreationLabel("Get friend code")
             }
-            .disabled(displayName.trimmingCharacters(in: .whitespaces).count < 2 || !watch.isConfigured)
+            .disabled(
+                displayName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2
+                    || watch.isCreatingProfile
+            )
+            .accessibilityIdentifier("friends-profile-create")
+        }
+    }
+
+    private func createProfile() {
+        profileNameFocused = false
+        let name = displayName
+        Task { await watch.createProfile(displayName: name) }
+    }
+
+    @ViewBuilder
+    private func profileCreationLabel(_ title: String) -> some View {
+        if watch.isCreatingProfile {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Creating profile…")
+            }
+        } else {
+            Text(title)
         }
     }
 
@@ -97,7 +124,7 @@ struct FriendsView: View {
                         Button("Decline") { Task { await watch.respondToFriendRequest(request, accept: false) } }
                             .tint(.secondary)
                         Button("Accept") { Task { await watch.respondToFriendRequest(request, accept: true) } }
-                            .tint(.orange)
+                            .tint(Color.appAccent)
                     }
                 }
             }
@@ -181,7 +208,7 @@ struct WatchRoomPlayerButton: View {
     let contentKey: String
     let contentType: String
     let contentTitle: String
-    @State private var showsRoom = false
+    @Binding var showsRoom: Bool
 
     var body: some View {
         Button { showsRoom = true } label: {
@@ -198,10 +225,23 @@ struct WatchRoomPlayerButton: View {
             .overlay { Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1) }
         }
         .buttonStyle(.plain)
-        .foregroundStyle(watch.liveKitConnected ? .orange : .white)
+        .foregroundStyle(watch.liveKitConnected ? Color.appAccent : .white)
         .accessibilityLabel("Watch Together")
         .accessibilityIdentifier("watch-together-player-button")
-        .sheet(isPresented: $showsRoom) {
+    }
+}
+
+extension View {
+    /// Presents from the stable player root instead of the auto-hiding control.
+    /// Removing a sheet's presenting control from the hierarchy dismisses it,
+    /// which previously made Watch Together close as soon as playback chrome hid.
+    func watchTogetherRoomSheet(
+        isPresented: Binding<Bool>,
+        contentKey: String,
+        contentType: String,
+        contentTitle: String
+    ) -> some View {
+        sheet(isPresented: isPresented) {
             NavigationStack {
                 WatchRoomPlayerSheet(
                     contentKey: contentKey,
@@ -265,6 +305,7 @@ private struct WatchRoomPlayerSheet: View {
     let contentTitle: String
     @State private var displayName = ""
     @State private var roomCode = ""
+    @FocusState private var profileNameFocused: Bool
 
     var body: some View {
         Form {
@@ -278,8 +319,26 @@ private struct WatchRoomPlayerSheet: View {
             if watch.profile == nil {
                 Section("Your profile") {
                     TextField("Display name", text: $displayName)
-                    Button("Create profile") { Task { await watch.createProfile(displayName: displayName) } }
-                        .disabled(displayName.trimmingCharacters(in: .whitespaces).count < 2)
+                        .textInputAutocapitalization(.words)
+                        .focused($profileNameFocused)
+                        .submitLabel(.done)
+                        .onSubmit(createProfile)
+                        .accessibilityIdentifier("watch-profile-display-name")
+                    Button(action: createProfile) {
+                        if watch.isCreatingProfile {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Creating profile…")
+                            }
+                        } else {
+                            Text("Create profile")
+                        }
+                    }
+                    .disabled(
+                        displayName.trimmingCharacters(in: .whitespacesAndNewlines).count < 2
+                            || watch.isCreatingProfile
+                    )
+                    .accessibilityIdentifier("watch-profile-create")
                 }
             } else if let room = watch.activeRoom, room.contentKey == contentKey {
                 Section("Room \(room.code)") {
@@ -323,5 +382,12 @@ private struct WatchRoomPlayerSheet: View {
         }
         .navigationTitle("Watch Together")
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        .accessibilityIdentifier("watch-together-sheet")
+    }
+
+    private func createProfile() {
+        profileNameFocused = false
+        let name = displayName
+        Task { await watch.createProfile(displayName: name) }
     }
 }

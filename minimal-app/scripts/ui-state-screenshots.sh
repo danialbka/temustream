@@ -43,6 +43,7 @@ fi
 SOURCES="$(find "$ROOT_DIR/Sources/StremioSkeletonCore" "$ROOT_DIR/iOS/App" \
   -name '*.swift' ! -name 'StremioSkeletonApp.swift' \
   ! -name 'BunnyPlayerView.swift' \
+  ! -name 'PlaybackAudioSession.swift' \
   ! -name 'WatchTogetherModel.swift' \
   ! -name 'WatchTogetherViews.swift' -print)"
 
@@ -106,7 +107,7 @@ trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT INT TERM
 ATTEMPT=0
 while ! curl -fsS "http://127.0.0.1:$PORT/ui-states/cinemeta/manifest.json" >/dev/null 2>&1; do
   ATTEMPT=$((ATTEMPT + 1))
-  if [ "$ATTEMPT" -ge 30 ]; then
+  if [ "$ATTEMPT" -ge 100 ]; then
     echo "UI-state fixture server did not start" >&2
     exit 1
   fi
@@ -141,6 +142,18 @@ for STATE in $STATES; do
     LAUNCH_ARGS="-selectedCatalogSource cinemeta-series"
   fi
 
+  APPEARANCE_MODE="dark"
+  ACCENT_PRESET="orange"
+  CUSTOM_ACCENT_HEX="FF9500"
+  if [ "$STATE" = "settings-appearance-light" ]; then
+    APPEARANCE_MODE="light"
+    ACCENT_PRESET="blue"
+  elif [ "$STATE" = "home-light-custom-theme" ]; then
+    APPEARANCE_MODE="light"
+    ACCENT_PRESET="custom"
+    CUSTOM_ACCENT_HEX="7C4DFF"
+  fi
+
   BRIDGE_FAILURES=""
   FAILOVER_COUNTDOWN_SECONDS=""
   if [ "$STATE" = "stream-failover-countdown" ]; then
@@ -159,6 +172,9 @@ for STATE in $STATES; do
   SIMCTL_CHILD_SKELETON_LETTERBOXD_CATALOG_ID="letterboxd-popular" \
   SIMCTL_CHILD_SKELETON_API_URL="http://127.0.0.1:$PORT" \
   SIMCTL_CHILD_SKELETON_STREAMING_SERVER_URL="http://127.0.0.1:$PORT" \
+  SIMCTL_CHILD_SKELETON_APPEARANCE_MODE="$APPEARANCE_MODE" \
+  SIMCTL_CHILD_SKELETON_ACCENT_PRESET="$ACCENT_PRESET" \
+  SIMCTL_CHILD_SKELETON_CUSTOM_ACCENT_HEX="$CUSTOM_ACCENT_HEX" \
   SIMCTL_CHILD_SKELETON_PLAYER_BRIDGE_FAIL="$BRIDGE_FAILURES" \
   SIMCTL_CHILD_SKELETON_FAILOVER_TEST_COUNTDOWN_SECONDS="$FAILOVER_COUNTDOWN_SECONDS" \
   xcrun simctl launch --terminate-running-process \

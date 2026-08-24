@@ -35,7 +35,6 @@ struct RootView: View {
                     .tabItem { Label("Settings", systemImage: "gearshape") }
                     .tag("settings")
             }
-            .tint(.orange)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .task { await watchTogether.start() }
         }
@@ -70,11 +69,11 @@ struct HomeView: View {
             }
             .padding(.horizontal, 14)
             .frame(height: 46)
-            .background(Color.white.opacity(0.09))
+            .background(Color.appFieldBackground)
             .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    .stroke(Color.appHairline, lineWidth: 0.5)
             }
             .padding(.horizontal, 16)
             .accessibilityIdentifier("catalog-search-field")
@@ -82,37 +81,8 @@ struct HomeView: View {
                 Group {
                     if !trimmedSearch.isEmpty {
                         searchContent
-                    } else if model.isLoading && model.catalog.isEmpty {
-                        ProgressView("Loading catalog…")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if let error = model.errorMessage, model.catalog.isEmpty {
-                        EmptyStateView(
-                            title: "Catalog unavailable",
-                            systemImage: "wifi.exclamationmark",
-                            message: error
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        ScrollView {
-                            LazyVGrid(columns: grid, spacing: 20) {
-                                ForEach(model.catalog) { item in
-                                    NavigationLink(value: item) { PosterCard(item: item) }
-                                        .buttonStyle(.plain)
-                                        .onAppear {
-                                            Task { await model.loadNextPageIfNeeded(currentItem: item) }
-                                        }
-                                }
-                                if model.isLoadingNextPage {
-                                    ProgressView()
-                                        .frame(maxWidth: .infinity)
-                                        .padding()
-                                        .accessibilityLabel("Loading more recommendations")
-                                }
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.top, 2)
-                            .padding(.bottom, 96)
-                        }
+                        browseContent
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -174,7 +144,7 @@ struct HomeView: View {
                 Image(systemName: "chevron.down")
                     .font(.caption.bold())
             }
-            .foregroundStyle(.orange)
+            .foregroundStyle(Color.appAccent)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -184,6 +154,73 @@ struct HomeView: View {
 
     private var trimmedSearch: String {
         search.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var browseContent: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 20) {
+                if !model.continueWatching.isEmpty {
+                    continueWatchingSection
+                }
+
+                if model.isLoading && model.catalog.isEmpty {
+                    ProgressView("Loading catalog…")
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, model.continueWatching.isEmpty ? 120 : 28)
+                } else if let error = model.errorMessage, model.catalog.isEmpty {
+                    EmptyStateView(
+                        title: "Catalog unavailable",
+                        systemImage: "wifi.exclamationmark",
+                        message: error
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 32)
+                } else {
+                    LazyVGrid(columns: grid, spacing: 20) {
+                        ForEach(model.catalog) { item in
+                            NavigationLink(value: item) { PosterCard(item: item) }
+                                .buttonStyle(.plain)
+                                .onAppear {
+                                    Task { await model.loadNextPageIfNeeded(currentItem: item) }
+                                }
+                        }
+                        if model.isLoadingNextPage {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .accessibilityLabel("Loading more recommendations")
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 96)
+        }
+    }
+
+    private var continueWatchingSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Continue Watching")
+                .font(.headline)
+                .padding(.horizontal, 16)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 12) {
+                    ForEach(model.continueWatching) { entry in
+                        NavigationLink {
+                            ContinueWatchingDestination(entry: entry)
+                        } label: {
+                            ContinueWatchingCard(entry: entry)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("continue-watching-\(entry.id)")
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+        .accessibilityIdentifier("continue-watching-row")
     }
 
     @ViewBuilder
@@ -209,6 +246,169 @@ struct HomeView: View {
             }
             .accessibilityIdentifier("global-search-results")
         }
+    }
+}
+
+private struct ContinueWatchingCard: View {
+    let entry: ContinueWatchingEntry
+
+    var body: some View {
+        ZStack {
+            poster
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.05), .black.opacity(0.48)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            Image(systemName: "play.fill")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(.white)
+                .offset(x: 1)
+                .frame(width: 48, height: 48)
+                .background(.black.opacity(0.72), in: Circle())
+                .overlay {
+                    Circle().stroke(Color.white.opacity(0.82), lineWidth: 1.5)
+                }
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 3)
+
+            VStack(alignment: .leading, spacing: 0) {
+                if let episodeLabel {
+                    Text(episodeLabel)
+                        .font(.caption2.monospacedDigit().weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.74), in: Capsule())
+                        .padding(8)
+                }
+                Spacer(minLength: 0)
+                progressEdge
+                    .padding(.horizontal, 7)
+                    .padding(.bottom, 7)
+            }
+        }
+        .frame(width: 112, height: 168)
+        .background(Color.appPlaceholderBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.appHairline, lineWidth: 0.5)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityHint("Resumes playback")
+    }
+
+    @ViewBuilder
+    private var poster: some View {
+        if let posterURL = entry.item.poster {
+            AsyncImage(url: posterURL, transaction: Transaction(animation: nil)) { phase in
+                switch phase {
+                case let .success(image):
+                    image.resizable().scaledToFill()
+                case .empty:
+                    posterPlaceholder.overlay { ProgressView().controlSize(.small) }
+                case .failure:
+                    posterPlaceholder
+                @unknown default:
+                    posterPlaceholder
+                }
+            }
+        } else {
+            posterPlaceholder
+        }
+    }
+
+    private var posterPlaceholder: some View {
+        Rectangle()
+            .fill(Color.appPlaceholderBackground)
+            .overlay {
+                Image(systemName: "film")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+            }
+    }
+
+    private var progressEdge: some View {
+        DotMatrixProgressBar(
+            value: entry.progress.position,
+            total: entry.progress.duration,
+            trackColor: .white.opacity(0.24)
+        )
+    }
+
+    private var episodeLabel: String? {
+        guard let episode = entry.episode else { return nil }
+        if let season = episode.season, let number = episode.episode {
+            return "S\(season) E\(number)"
+        }
+        if let number = episode.episode { return "E\(number)" }
+        return "EPISODE"
+    }
+
+    private var accessibilityLabel: String {
+        var label = "Continue \(entry.item.name)"
+        if let episodeLabel { label += ", \(episodeLabel)" }
+        return label + ", from \(formattedTime(entry.progress.position))"
+    }
+
+    private func formattedTime(_ value: TimeInterval) -> String {
+        guard value.isFinite, value >= 0 else { return "0:00" }
+        let total = Int(value.rounded(.down))
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private struct ContinueWatchingDestination: View {
+    @EnvironmentObject private var model: AppModel
+    let entry: ContinueWatchingEntry
+    @State private var resolvedSeries: MetaItem?
+    @State private var resolvedEpisode: Video?
+
+    var body: some View {
+        Group {
+            if let fallbackEpisode = entry.episode {
+                if let resolvedSeries, let resolvedEpisode {
+                    EpisodeResumeResolvingScreen(
+                        series: resolvedSeries,
+                        episode: resolvedEpisode,
+                        progress: entry.progress
+                    )
+                } else {
+                    ProgressView("Refreshing episode…")
+                        .accessibilityIdentifier("continue-watching-episode-refreshing")
+                        .task(id: entry.progress.updatedAt) {
+                            let details = await model.details(for: entry.item)
+                            guard !Task.isCancelled else { return }
+                            resolvedSeries = details
+                            resolvedEpisode = details.videos?.first {
+                                $0.id == fallbackEpisode.id
+                            } ?? fallbackEpisode
+                        }
+                }
+            } else {
+                ResolvingPlayerScreen(
+                    candidate: StreamPlaybackCandidate(
+                        stream: entry.progress.stream,
+                        providerName: entry.progress.providerName,
+                        contentIdentifier: entry.progress.contentIdentifier,
+                        contentTitle: entry.progress.contentTitle,
+                        initialPosition: entry.progress.position,
+                        mediaMetadata: entry.progress.mediaMetadata ?? entry.mediaMetadata
+                    ),
+                    minimumVideoDuration: entry.item.type == "movie" ? 20 * 60 : 5 * 60
+                )
+            }
+        }
+        .navigationTitle(entry.item.name)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -272,13 +472,13 @@ private struct PosterArtwork: View {
             image.resizable().scaledToFit()
         } placeholder: {
             ZStack {
-                Color.white.opacity(0.06)
+                Color.appPlaceholderBackground
                 Image(systemName: "film").font(.largeTitle).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity)
         .frame(height: 198)
-        .background(Color.white.opacity(0.04))
+        .background(Color.appPlaceholderBackground)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
@@ -329,7 +529,11 @@ struct DetailsView: View {
                                 if isUpdatingLibrary {
                                     ProgressView()
                                         .controlSize(.small)
-                                        .tint(model.isInLibrary(item) ? .orange : .black)
+                                        .tint(
+                                            model.isInLibrary(item)
+                                                ? Color.appAccent
+                                                : Color.appOnAccent
+                                        )
                                 } else {
                                     Image(systemName: model.isInLibrary(item) ? "bookmark.fill" : "bookmark")
                                 }
@@ -340,16 +544,20 @@ struct DetailsView: View {
                             .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
-                            .foregroundStyle(model.isInLibrary(item) ? Color.orange : Color.black)
+                            .foregroundStyle(
+                                model.isInLibrary(item)
+                                    ? Color.appAccent
+                                    : Color.appOnAccent
+                            )
                             .background(
                                 model.isInLibrary(item)
-                                    ? Color.orange.opacity(0.14)
-                                    : Color.orange
+                                    ? Color.appAccent.opacity(0.14)
+                                    : Color.appAccent
                             )
                             .overlay {
                                 if model.isInLibrary(item) {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .stroke(Color.orange.opacity(0.55), lineWidth: 1)
+                                        .stroke(Color.appAccent.opacity(0.55), lineWidth: 1)
                                 }
                             }
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -380,21 +588,20 @@ struct DetailsView: View {
                                     .font(.subheadline.weight(.semibold))
 
                                     if progress.duration > 0 {
-                                        ProgressView(
+                                        DotMatrixProgressBar(
                                             value: min(progress.position, progress.duration),
                                             total: progress.duration
                                         )
-                                        .tint(.orange)
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 10)
-                                .foregroundStyle(.orange)
-                                .background(Color.orange.opacity(0.12))
+                                .foregroundStyle(Color.appAccent)
+                                .background(Color.appAccent.opacity(0.12))
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .stroke(Color.orange.opacity(0.45), lineWidth: 1)
+                                        .stroke(Color.appAccent.opacity(0.45), lineWidth: 1)
                                 }
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             }
@@ -439,11 +646,11 @@ struct DetailsView: View {
                                 .frame(maxWidth: .infinity)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 10)
-                                .foregroundStyle(.orange)
-                                .background(Color.orange.opacity(0.12))
+                                .foregroundStyle(Color.appAccent)
+                                .background(Color.appAccent.opacity(0.12))
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .stroke(Color.orange.opacity(0.45), lineWidth: 1)
+                                        .stroke(Color.appAccent.opacity(0.45), lineWidth: 1)
                                 }
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             }
@@ -466,7 +673,7 @@ struct DetailsView: View {
                     HStack(spacing: 12) {
                         ProgressView()
                             .controlSize(.regular)
-                            .tint(.orange)
+                            .tint(Color.appAccent)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Resolving add-ons…")
@@ -525,7 +732,8 @@ struct DetailsView: View {
                                             startingAt: presented.id,
                                             contentIdentifier: "\(item.type):\(item.id)",
                                             contentTitle: item.name,
-                                            initialPosition: 0
+                                            initialPosition: 0,
+                                            mediaMetadata: .movie(item)
                                         ),
                                         minimumVideoDuration: minimumVideoDuration
                                     )
@@ -553,7 +761,7 @@ struct DetailsView: View {
                                 .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.bordered)
-                            .tint(.orange)
+                            .tint(Color.appAccent)
                             .accessibilityIdentifier("show-more-streams")
                         }
                     }
@@ -659,7 +867,7 @@ struct DetailsView: View {
                     } label: {
                         Label(seasonLabel(selectedSeason), systemImage: "chevron.down")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Color.appAccent)
                     }
                     .textCase(nil)
                     .accessibilityIdentifier("season-selector")
@@ -701,8 +909,8 @@ struct DetailsView: View {
                 Image(systemName: "play.fill")
                     .font(.caption.bold())
                     .frame(width: 28, height: 28)
-                    .background(Color.orange, in: Circle())
-                    .foregroundStyle(.black)
+                    .background(Color.appAccent, in: Circle())
+                    .foregroundStyle(Color.appOnAccent)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Resume Series")
@@ -720,21 +928,20 @@ struct DetailsView: View {
             }
 
             if selection.progress.duration > 0 {
-                ProgressView(
+                DotMatrixProgressBar(
                     value: min(selection.progress.position, selection.progress.duration),
                     total: selection.progress.duration
                 )
-                .tint(.orange)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .foregroundStyle(.orange)
-        .background(Color.orange.opacity(0.12))
+        .foregroundStyle(Color.appAccent)
+        .background(Color.appAccent.opacity(0.12))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.orange.opacity(0.45), lineWidth: 1)
+                .stroke(Color.appAccent.opacity(0.45), lineWidth: 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
@@ -746,9 +953,9 @@ struct DetailsView: View {
         HStack(spacing: 11) {
             Image(systemName: "play.fill")
                 .font(.caption.bold())
-                .foregroundStyle(.black)
+                .foregroundStyle(Color.appOnAccent)
                 .frame(width: 30, height: 30)
-                .background(Color.orange, in: Circle())
+                .background(Color.appAccent, in: Circle())
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Resume \(seasonLabel(season))")
@@ -762,11 +969,10 @@ struct DetailsView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 if selection.progress.duration > 0 {
-                    ProgressView(
+                    DotMatrixProgressBar(
                         value: min(selection.progress.position, selection.progress.duration),
                         total: selection.progress.duration
                     )
-                    .tint(.orange)
                 }
             }
             Spacer(minLength: 0)
@@ -774,7 +980,7 @@ struct DetailsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08))
+        .background(Color.appAccent.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
 
@@ -787,53 +993,51 @@ struct DetailsView: View {
             progress: progress
         )
 
-        return HStack(alignment: .top, spacing: 12) {
-            episodeArtwork(
-                episode,
-                isCompleted: isCompleted
-            )
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 12) {
+                episodeArtwork(
+                    episode,
+                    isCompleted: isCompleted
+                )
 
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .firstTextBaseline, spacing: 7) {
-                    Text(episodeLocation(episode))
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(episodeDisplayTitle(episode))
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(2)
-                    Spacer(minLength: 0)
-                }
-
-                if let summary = episodeSummary(episode) {
-                    Text(summary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if isCompleted {
-                    Text("Watched")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.green)
-                } else if let progress {
-                    Text("Resume at \(formatPlaybackTime(progress.position))")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.orange)
-                    if progress.duration > 0 {
-                        ProgressView(
-                            value: min(progress.position, progress.duration),
-                            total: progress.duration
-                        )
-                        .tint(.orange)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        Text(episodeLocation(episode))
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(episodeDisplayTitle(episode))
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(2)
+                        Spacer(minLength: 0)
                     }
-                } else if let released = episode.released, !released.isEmpty {
-                    Text(String(released.prefix(10)))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+
+                    if let summary = episodeSummary(episode) {
+                        Text(summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if isCompleted {
+                        Text("Watched")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.green)
+                    } else if let released = episode.released, !released.isEmpty {
+                        Text(String(released.prefix(10)))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
+            if !isCompleted, let progress, progress.duration > 0 {
+                EpisodeDotMatrixTimeline(
+                    position: progress.position,
+                    duration: progress.duration
+                )
+                .accessibilityIdentifier("episode-progress-\(episode.id)")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -940,7 +1144,7 @@ struct DetailsView: View {
                 .fill(
                     isCompleted
                         ? Color.green.opacity(0.18)
-                        : Color.orange.opacity(0.10)
+                        : Color.appAccent.opacity(0.10)
                 )
             Image(
                 systemName: isCompleted
@@ -948,7 +1152,7 @@ struct DetailsView: View {
                     : "play"
             )
             .font(.caption.bold())
-            .foregroundStyle(isCompleted ? .green : .orange)
+            .foregroundStyle(isCompleted ? Color.green : Color.appAccent)
         }
     }
 
@@ -1041,7 +1245,8 @@ struct DetailsView: View {
                 startingAt: refreshed.id,
                 contentIdentifier: progress.contentIdentifier,
                 contentTitle: progress.contentTitle,
-                initialPosition: progress.position
+                initialPosition: progress.position,
+                mediaMetadata: progress.mediaMetadata ?? .movie(item)
             )
         }
 
@@ -1050,7 +1255,8 @@ struct DetailsView: View {
             providerName: progress.providerName,
             contentIdentifier: progress.contentIdentifier,
             contentTitle: progress.contentTitle,
-            initialPosition: progress.position
+            initialPosition: progress.position,
+            mediaMetadata: progress.mediaMetadata ?? .movie(item)
         )
         let alternatives = rankedStreams.compactMap { presented -> StreamPlaybackCandidate? in
             guard presented.stream.isDirectlyPlayable || presented.stream.isTorrent,
@@ -1062,6 +1268,7 @@ struct DetailsView: View {
                 contentIdentifier: progress.contentIdentifier,
                 contentTitle: progress.contentTitle,
                 initialPosition: progress.position,
+                mediaMetadata: progress.mediaMetadata ?? .movie(item),
                 sourceID: presented.id
             )
         }
@@ -1090,16 +1297,20 @@ struct DetailsView: View {
                     .font(.caption2.monospacedDigit())
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(isSelected ? Color.black.opacity(0.18) : Color.orange.opacity(0.12))
+                    .background(
+                        isSelected
+                            ? Color.appOnAccent.opacity(0.18)
+                            : Color.appAccent.opacity(0.12)
+                    )
                     .clipShape(Capsule())
             }
             .font(.caption.weight(.semibold))
-            .foregroundStyle(isSelected ? Color.black : Color.orange)
+            .foregroundStyle(isSelected ? Color.appOnAccent : Color.appAccent)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(isSelected ? Color.orange : Color.orange.opacity(0.10))
+            .background(isSelected ? Color.appAccent : Color.appAccent.opacity(0.10))
             .overlay {
-                Capsule().stroke(Color.orange.opacity(isSelected ? 0 : 0.45), lineWidth: 1)
+                Capsule().stroke(Color.appAccent.opacity(isSelected ? 0 : 0.45), lineWidth: 1)
             }
             .clipShape(Capsule())
         }
@@ -1114,7 +1325,7 @@ struct DetailsView: View {
     ) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: systemImage ?? (presented.stream.isTorrent ? "arrow.down.circle" : "play.circle"))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.appAccent)
             VStack(alignment: .leading, spacing: 4) {
                 Text(presented.stream.displayName)
                     .font(.subheadline)
@@ -1132,7 +1343,7 @@ struct DetailsView: View {
                 }
                 Text(presented.providerName)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Color.appAccent)
                 if let description = presented.stream.description, !description.isEmpty {
                     Text(description)
                         .font(.caption)
@@ -1141,6 +1352,80 @@ struct DetailsView: View {
                 }
             }
         }
+    }
+}
+
+private struct EpisodeDotMatrixTimeline: View {
+    let position: TimeInterval
+    let duration: TimeInterval
+
+    var body: some View {
+        VStack(spacing: 5) {
+            HStack {
+                Text(formattedTime(position))
+                    .foregroundStyle(Color.appAccent)
+                Spacer(minLength: 8)
+                Text(formattedTime(duration))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption2.monospacedDigit().weight(.semibold))
+
+            DotMatrixProgressBar(value: position, total: duration)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "Watched \(formattedTime(position)) of \(formattedTime(duration))"
+        )
+    }
+
+    private func formattedTime(_ value: TimeInterval) -> String {
+        guard value.isFinite, value >= 0 else { return "0:00" }
+        let total = Int(value.rounded(.down))
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private struct DotMatrixProgressBar: View {
+    let value: Double
+    let total: Double
+    var trackColor: Color = .appProgressTrack
+
+    var body: some View {
+        GeometryReader { proxy in
+            let dotSize: CGFloat = 4
+            let spacing: CGFloat = 3
+            let dotCount = max(
+                Int((proxy.size.width + spacing) / (dotSize + spacing)),
+                1
+            )
+            let rawFilled = Int(ceil(completionFraction * Double(dotCount)))
+            let filledDots = completionFraction > 0 ? max(rawFilled, 1) : 0
+
+            HStack(spacing: spacing) {
+                ForEach(0..<dotCount, id: \.self) { index in
+                    Circle()
+                        .fill(
+                            index < filledDots
+                                ? Color.appAccent
+                                : trackColor
+                        )
+                        .frame(width: dotSize, height: dotSize)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(height: 4)
+        .accessibilityHidden(true)
+    }
+
+    private var completionFraction: Double {
+        guard value.isFinite, total.isFinite, total > 0 else { return 0 }
+        return min(max(value / total, 0), 1)
     }
 }
 
@@ -1226,7 +1511,11 @@ private struct EpisodeResumeResolvingScreen: View {
             startingAt: refreshed.id,
             contentIdentifier: progress.contentIdentifier,
             contentTitle: progress.contentTitle,
-            initialPosition: progress.position
+            initialPosition: progress.position,
+            mediaMetadata: progress.mediaMetadata ?? .episode(
+                series: series,
+                episode: episode
+            )
         )
     }
 }
@@ -1277,25 +1566,24 @@ struct EpisodeStreamsView: View {
                                             systemImage: "play.circle.fill"
                                         )
                                         .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.orange)
+                                        .foregroundStyle(Color.appAccent)
                                         if progress.duration > 0 {
-                                            ProgressView(
+                                            DotMatrixProgressBar(
                                                 value: min(progress.position, progress.duration),
                                                 total: progress.duration
                                             )
-                                            .tint(.orange)
                                         }
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 8)
                                     .background(
-                                        Color.orange.opacity(0.10),
+                                        Color.appAccent.opacity(0.10),
                                         in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                                     )
                                     .overlay {
                                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .stroke(Color.orange.opacity(0.25), lineWidth: 1)
+                                            .stroke(Color.appAccent.opacity(0.25), lineWidth: 1)
                                     }
                                     .contentShape(Rectangle())
                                 }
@@ -1331,7 +1619,7 @@ struct EpisodeStreamsView: View {
                     HStack(spacing: 12) {
                         ProgressView()
                             .controlSize(.regular)
-                            .tint(.orange)
+                            .tint(Color.appAccent)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Resolving add-ons…")
@@ -1390,7 +1678,11 @@ struct EpisodeStreamsView: View {
                                             startingAt: presented.id,
                                             contentIdentifier: contentIdentifier,
                                             contentTitle: contentTitle,
-                                            initialPosition: progress?.position ?? 0
+                                            initialPosition: progress?.position ?? 0,
+                                            mediaMetadata: .episode(
+                                                series: series,
+                                                episode: episode
+                                            )
                                         ),
                                         minimumVideoDuration: 5 * 60,
                                         episodeAutoplayContext: EpisodeAutoplayContext(
@@ -1429,7 +1721,7 @@ struct EpisodeStreamsView: View {
                                 .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.bordered)
-                            .tint(.orange)
+                            .tint(Color.appAccent)
                             .accessibilityIdentifier("show-more-streams")
                         }
                     }
@@ -1557,16 +1849,20 @@ struct EpisodeStreamsView: View {
                     .font(.caption2.monospacedDigit())
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(isSelected ? Color.black.opacity(0.18) : Color.orange.opacity(0.12))
+                    .background(
+                        isSelected
+                            ? Color.appOnAccent.opacity(0.18)
+                            : Color.appAccent.opacity(0.12)
+                    )
                     .clipShape(Capsule())
             }
             .font(.caption.weight(.semibold))
-            .foregroundStyle(isSelected ? Color.black : Color.orange)
+            .foregroundStyle(isSelected ? Color.appOnAccent : Color.appAccent)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(isSelected ? Color.orange : Color.orange.opacity(0.10))
+            .background(isSelected ? Color.appAccent : Color.appAccent.opacity(0.10))
             .overlay {
-                Capsule().stroke(Color.orange.opacity(isSelected ? 0 : 0.45), lineWidth: 1)
+                Capsule().stroke(Color.appAccent.opacity(isSelected ? 0 : 0.45), lineWidth: 1)
             }
             .clipShape(Capsule())
         }
@@ -1584,7 +1880,7 @@ struct EpisodeStreamsView: View {
                 systemName: systemImage
                     ?? (presented.stream.isTorrent ? "arrow.down.circle" : "play.circle")
             )
-            .foregroundStyle(.orange)
+            .foregroundStyle(Color.appAccent)
             VStack(alignment: .leading, spacing: 4) {
                 Text(presented.stream.displayName)
                     .font(.subheadline)
@@ -1602,7 +1898,7 @@ struct EpisodeStreamsView: View {
                 }
                 Text(presented.providerName)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Color.appAccent)
                 if let description = presented.stream.description, !description.isEmpty {
                     Text(description)
                         .font(.caption)
@@ -1765,7 +2061,8 @@ func orderedPlaybackCandidates(
     startingAt selectedID: String,
     contentIdentifier: String?,
     contentTitle: String?,
-    initialPosition: TimeInterval
+    initialPosition: TimeInterval,
+    mediaMetadata: PlaybackMediaMetadata? = nil
 ) -> [StreamPlaybackCandidate] {
     let playable = streams.filter {
         $0.stream.isDirectlyPlayable || $0.stream.isTorrent
@@ -1782,6 +2079,7 @@ func orderedPlaybackCandidates(
             contentIdentifier: contentIdentifier,
             contentTitle: contentTitle,
             initialPosition: initialPosition,
+            mediaMetadata: mediaMetadata,
             sourceID: presented.id
         )
     }
@@ -1794,11 +2092,11 @@ private struct StreamMetadataBadge: View {
     var body: some View {
         Label(text, systemImage: systemImage)
             .font(.caption2.weight(.semibold).monospacedDigit())
-            .foregroundStyle(.orange)
+            .foregroundStyle(Color.appAccent)
             .padding(.horizontal, 7)
             .padding(.vertical, 4)
-            .background(Color.orange.opacity(0.12), in: Capsule())
-            .overlay { Capsule().stroke(Color.orange.opacity(0.35), lineWidth: 1) }
+            .background(Color.appAccent.opacity(0.12), in: Capsule())
+            .overlay { Capsule().stroke(Color.appAccent.opacity(0.35), lineWidth: 1) }
     }
 }
 
@@ -1899,6 +2197,12 @@ struct AddonsView: View {
 
 struct SettingsView: View {
     @State private var selectedPlayer = StremioInternalPlayer.selected
+    @AppStorage(AppearancePreferences.modeKey)
+    private var appearanceModeRawValue = AppAppearanceMode.defaultMode.rawValue
+    @AppStorage(AppearancePreferences.accentPresetKey)
+    private var accentPresetRawValue = AppAccentPreset.defaultPreset.rawValue
+    @AppStorage(AppearancePreferences.customAccentHexKey)
+    private var customAccentHex = AppearancePreferences.defaultCustomAccentHex
     @AppStorage(PlayerDebugPreferences.overlayEnabledKey)
     private var playerDebugOverlayEnabled = false
     @AppStorage(PlaybackLanguagePreferences.preferredAudioLanguageKey)
@@ -1910,6 +2214,119 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("Colour mode", selection: $appearanceModeRawValue) {
+                    ForEach(AppAppearanceMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("appearance-mode-picker")
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Accent Colour")
+                        .font(.subheadline.weight(.semibold))
+
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 54), spacing: 12)],
+                        spacing: 12
+                    ) {
+                        ForEach(AppAccentPreset.selectablePresets) { preset in
+                            Button {
+                                accentPresetRawValue = preset.rawValue
+                            } label: {
+                                VStack(spacing: 6) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(preset.color)
+                                        Circle()
+                                            .stroke(
+                                                presetIsSelected(preset)
+                                                    ? Color.primary
+                                                    : Color.secondary.opacity(0.25),
+                                                lineWidth: presetIsSelected(preset) ? 3 : 1
+                                            )
+                                        if presetIsSelected(preset) {
+                                            Image(systemName: "checkmark")
+                                                .font(.caption.bold())
+                                                .foregroundStyle(
+                                                    preset.referenceRGB.prefersDarkForeground
+                                                        ? Color.black
+                                                        : Color.white
+                                                )
+                                        }
+                                    }
+                                    .frame(width: 34, height: 34)
+                                    Text(preset.title)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("\(preset.title) accent")
+                            .accessibilityValue(
+                                presetIsSelected(preset) ? "Selected" : "Not selected"
+                            )
+                            .accessibilityIdentifier("appearance-accent-\(preset.rawValue)")
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+
+                ColorPicker(
+                    "Custom Colour",
+                    selection: customAccentBinding,
+                    supportsOpacity: false
+                )
+                .accessibilityValue(customAccentHex)
+                .accessibilityIdentifier("appearance-custom-color")
+
+                HStack(spacing: 12) {
+                    Image(systemName: "hare.fill")
+                        .font(.title2)
+                        .foregroundStyle(Color.appAccent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Theme preview")
+                            .font(.subheadline.weight(.semibold))
+                        Text(selectedAppearanceSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: "checkmark")
+                        .font(.caption.bold())
+                        .foregroundStyle(Color.appOnAccent)
+                        .frame(width: 30, height: 30)
+                        .background(Color.appAccent, in: Circle())
+                }
+                .padding(12)
+                .background(Color.appCardBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(Color.appHairline, lineWidth: 0.5)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("appearance-preview")
+
+                Button {
+                    AppearancePreferences.reset()
+                    appearanceModeRawValue = AppAppearanceMode.defaultMode.rawValue
+                    accentPresetRawValue = AppAccentPreset.defaultPreset.rawValue
+                    customAccentHex = AppearancePreferences.defaultCustomAccentHex
+                } label: {
+                    Label("Reset Appearance", systemImage: "arrow.counterclockwise")
+                }
+                .foregroundStyle(Color.appAccent)
+                .accessibilityIdentifier("appearance-reset")
+            } header: {
+                Text("Appearance")
+            } footer: {
+                Text("System follows your iPhone. Your colour and mode are saved for future launches.")
+            }
+
             Section {
                 ForEach(StremioInternalPlayer.allCases) { player in
                     Button {
@@ -1928,7 +2345,7 @@ struct SettingsView: View {
                             if selectedPlayer == player {
                                 Image(systemName: "checkmark")
                                     .font(.body.weight(.semibold))
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(Color.appAccent)
                                     .accessibilityHidden(true)
                             }
                         }
@@ -1963,7 +2380,7 @@ struct SettingsView: View {
                         }
                     } icon: {
                         Image(systemName: "captions.bubble.fill")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Color.appAccent)
                     }
                 }
                 .accessibilityIdentifier("subtitle-style-link")
@@ -1977,7 +2394,7 @@ struct SettingsView: View {
                 .accessibilityIdentifier("preferred-audio-language")
 
                 Toggle("Use Preferred Subtitles", isOn: $preferredSubtitlesEnabled)
-                    .tint(.orange)
+                    .tint(Color.appAccent)
                     .accessibilityIdentifier("preferred-subtitles-toggle")
 
                 if preferredSubtitlesEnabled {
@@ -1995,7 +2412,7 @@ struct SettingsView: View {
                 } label: {
                     Label("Prefer English for Both", systemImage: "character.book.closed.fill")
                 }
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.appAccent)
                 .accessibilityIdentifier("prefer-english-tracks")
             } header: {
                 Text("Playback Languages")
@@ -2012,7 +2429,7 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .tint(.orange)
+                .tint(Color.appAccent)
                 .accessibilityIdentifier("player-debug-toggle")
             } header: {
                 Text("Diagnostics")
@@ -2022,6 +2439,42 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .onAppear { selectedPlayer = StremioInternalPlayer.selected }
+    }
+
+    private var customAccentBinding: Binding<Color> {
+        Binding(
+            get: {
+                let rgb = AppearancePreferences.customAccent()
+                return Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
+            },
+            set: { newColor in
+                let resolved = UIColor(newColor)
+                var red: CGFloat = 0
+                var green: CGFloat = 0
+                var blue: CGFloat = 0
+                var alpha: CGFloat = 0
+                guard resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
+                    return
+                }
+                customAccentHex = AppThemeRGB(
+                    red: Double(red),
+                    green: Double(green),
+                    blue: Double(blue)
+                ).hexString
+                accentPresetRawValue = AppAccentPreset.custom.rawValue
+            }
+        )
+    }
+
+    private var selectedAppearanceSummary: String {
+        let mode = AppAppearanceMode(rawValue: appearanceModeRawValue) ?? .defaultMode
+        let preset = AppAccentPreset(rawValue: accentPresetRawValue) ?? .defaultPreset
+        let colour = preset == .custom ? "Custom \(customAccentHex)" : preset.title
+        return "\(mode.title) mode · \(colour)"
+    }
+
+    private func presetIsSelected(_ preset: AppAccentPreset) -> Bool {
+        accentPresetRawValue == preset.rawValue
     }
 
     private func languageName(_ identifier: String) -> String {
@@ -2105,7 +2558,7 @@ struct SubtitleStyleSettingsView: View {
                                     Circle()
                                         .stroke(
                                             colorRawValue == color.rawValue
-                                                ? Color.orange : Color.secondary.opacity(0.35),
+                                                ? Color.appAccent : Color.secondary.opacity(0.35),
                                             lineWidth: colorRawValue == color.rawValue ? 3 : 1
                                         )
                                     if colorRawValue == color.rawValue {
@@ -2147,13 +2600,13 @@ struct SubtitleStyleSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     Slider(value: $backgroundOpacity, in: 0...0.9, step: 0.05)
-                        .tint(.orange)
+                        .tint(Color.appAccent)
                         .accessibilityLabel("Subtitle background opacity")
                 }
                 .accessibilityIdentifier("subtitle-style-background-opacity")
 
                 Toggle("Text Shadow", isOn: $shadowEnabled)
-                    .tint(.orange)
+                    .tint(Color.appAccent)
                     .accessibilityIdentifier("subtitle-style-shadow")
             } header: {
                 Text("Readability")
@@ -2167,7 +2620,7 @@ struct SubtitleStyleSettingsView: View {
                 } label: {
                     Label("Reset to Default", systemImage: "arrow.counterclockwise")
                 }
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.appAccent)
                 .accessibilityIdentifier("subtitle-style-reset")
             }
         }
@@ -2264,7 +2717,7 @@ struct E2EStatusView: View {
         VStack(spacing: 18) {
             Image(systemName: model.e2eResult == nil ? "waveform" : "checkmark.circle.fill")
                 .font(.system(size: 58))
-                .foregroundStyle(model.e2eResult == nil ? .orange : .green)
+                .foregroundStyle(model.e2eResult == nil ? Color.appAccent : .green)
             if let result = model.e2eResult {
                 Text("E2E PASS").font(.largeTitle.bold()).foregroundStyle(.green)
                 resultRow("Manifest", result.manifest)

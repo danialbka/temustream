@@ -125,13 +125,10 @@ fn policy(url: &str, title: &str, player_kind: u32) -> StremioPlaybackPolicy {
 
     let decoder_kind = match player_kind {
         PLAYER_AVPLAYER => DECODER_AVFOUNDATION,
-        PLAYER_BUNNY => {
-            if apple_native {
-                DECODER_AVFOUNDATION
-            } else {
-                DECODER_BUNNY_FFMPEG
-            }
-        }
+        // Bunny owns its full demux/decode/render pipeline. Keep even MP4 and
+        // HLS inside Bunny so an AVFoundation capability rejection cannot
+        // bypass FFmpeg's much broader codec and container support.
+        PLAYER_BUNNY => DECODER_BUNNY_FFMPEG,
         PLAYER_VLC => DECODER_VLC_VIDEOTOOLBOX_BRIDGE,
         PLAYER_KSPLAYER => {
             if apple_native {
@@ -595,11 +592,13 @@ mod tests {
     }
 
     #[test]
-    fn routes_bunny_native_and_uncommon_sources_inside_bunny() {
+    fn routes_every_source_inside_bunny_decoder() {
         let native = policy("https://example.test/video.mp4", "H264 AAC", PLAYER_BUNNY);
         let uncommon = policy("https://example.test/video.mkv", "AV1 FLAC", PLAYER_BUNNY);
-        assert_eq!(native.decoder_kind, DECODER_AVFOUNDATION);
+        let hls = policy("https://example.test/master.m3u8", "HLS", PLAYER_BUNNY);
+        assert_eq!(native.decoder_kind, DECODER_BUNNY_FFMPEG);
         assert_eq!(uncommon.decoder_kind, DECODER_BUNNY_FFMPEG);
+        assert_eq!(hls.decoder_kind, DECODER_BUNNY_FFMPEG);
         assert_eq!(uncommon.prefer_compatibility_stream, 0);
     }
 

@@ -13,23 +13,37 @@
 #import <Libavutil/frame.h>
 #import <Libavutil/hwcontext.h>
 #import <Libavutil/imgutils.h>
+#import <Libavutil/log.h>
 #import <Libavutil/mathematics.h>
 #import <Libavutil/pixdesc.h>
 #import <Libavutil/pixfmt.h>
 #import <Libavutil/rational.h>
 #import <Libswresample/swresample.h>
 #import <Libswscale/swscale.h>
+#import <TargetConditionals.h>
 #import <UIKit/UIKit.h>
 #import <stdatomic.h>
+#import <stdlib.h>
 #import <unistd.h>
 
 NSString *const BunnyFFmpegDecoderErrorDomain = @"BunnyFFmpegDecoder";
+NSString *const BunnyFFmpegDecoderSoftwareRetryKey = @"BunnyFFmpegDecoderSoftwareRetry";
 
 static const NSTimeInterval BunnyDecoderMaximumQueueDuration = 2.0;
 static const NSTimeInterval BunnyDecoderLateFrameTolerance = 0.100;
 static const NSUInteger BunnyDecoderMaximumCompressedPacketCount = 8192;
 static const NSInteger BunnyDecoderNoSelectionRequest = NSIntegerMin;
 static void *BunnyDecoderQueueKey = &BunnyDecoderQueueKey;
+
+static void BunnyFreeAudioPCMBlock(
+    void *refCon,
+    void *memoryBlock,
+    size_t sizeInBytes
+) {
+    (void)refCon;
+    (void)sizeInBytes;
+    free(memoryBlock);
+}
 
 static BOOL BunnyIs4KDimensions(int width, int height) {
     // Cinema encodes are commonly 3840x1600 or 4096x1716 after removing
@@ -146,6 +160,9 @@ static BOOL BunnyIs4KDimensions(int width, int height) {
     enum AVSampleFormat _resampleInputFormat;
     int _resampleInputChannels;
     atomic_bool _hardwareVideoDecode;
+    atomic_bool _hardwareVideoDecoderNegotiated;
+    BOOL _preferHardwareVideoDecoding;
+    BOOL _isAdaptiveInput;
     BOOL _hasVideo;
     BOOL _hasAudio;
     BOOL _firstFrameEmitted;
@@ -154,7 +171,20 @@ static BOOL BunnyIs4KDimensions(int width, int height) {
     NSInteger _renderedAudioFrames;
     NSInteger _rebufferCount;
     BOOL _audioFailureReported;
+    BOOL _audioRenderTimelineInitialized;
+    NSUInteger _audioTimingDiscontinuityLogCount;
+    NSError *_fatalDecodeError;
+    NSInteger _consecutiveVideoDecodeFailures;
+    NSInteger _consecutiveVideoOutputFailures;
+#if TARGET_OS_SIMULATOR
+    BOOL _didInjectHardwareDecodeFailure;
+    BOOL _audioPCMAuditEnabled;
+    BOOL _hasLastAuditedPCMSample;
+    float _lastAuditedPCMSample[2];
+    NSUInteger _audioPCMAnomalyLogCount;
+#endif
     NSTimeInterval _lastMetricsAt;
+    NSTimeInterval _lastPrerollLogAt;
 }
 @property(nonatomic, strong, readwrite) AVSampleBufferDisplayLayer *videoLayer;
 @property(nonatomic, strong, readwrite) AVSampleBufferAudioRenderer *audioRenderer;
@@ -173,10 +203,20 @@ static BOOL BunnyIs4KDimensions(int width, int height) {
 - (NSTimeInterval)prerollDuration;
 - (void)enqueueCompressedPacket:(AVPacket *)packet;
 - (AVPacket * _Nullable)dequeueCompressedPacket;
+- (AVPacket * _Nullable)dequeueCompressedPacketForStreamIndex:(NSInteger)streamIndex;
+- (AVPacket * _Nullable)dequeueCompressedPacketForLaggingTrackIfNeeded;
 - (void)clearCompressedPackets;
 - (BOOL)compressedPacketBufferIsFull;
 - (NSUInteger)compressedPacketCount;
 - (void)decodeSelectedPacket:(AVPacket *)packet;
+- (NSInteger)bestDecodableStreamOfType:(enum AVMediaType)type
+                          relatedStream:(NSInteger)relatedStream;
+- (NSInteger)bestDecodableAdaptiveVideoStream;
+- (NSInteger)bestDecodableAudioStreamForAdaptiveVideo:(NSInteger)videoStreamIndex;
+- (BOOL)isSelectableAdaptiveAudioStreamIndex:(NSInteger)streamIndex;
+- (void)recordFatalVideoDecodeFailure:(int)code operation:(NSString *)operation;
+- (void)recordVideoCodecFailureAtStage:(NSString *)stage code:(int)code;
+- (void)recordVideoOutputFailureAtStage:(NSString *)stage;
 @end
 
 static enum AVPixelFormat BunnyGetHardwarePixelFormat(
@@ -194,12 +234,22 @@ static enum AVPixelFormat BunnyGetHardwarePixelFormat(
             return *format;
         }
     }
+    enum AVPixelFormat fallback = formats[0];
+    for (const enum AVPixelFormat *format = formats;
+         *format != AV_PIX_FMT_NONE;
+         format++) {
+        const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(*format);
+        if (descriptor != NULL && !(descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+            fallback = *format;
+            break;
+        }
+    }
     NSLog(
         @"BUNNY_DECODER hardware_format codec=%s selected=%s reason=videotoolbox-unavailable",
         context->codec ? context->codec->name : "unknown",
-        formats[0] != AV_PIX_FMT_NONE ? av_get_pix_fmt_name(formats[0]) : "none"
+        fallback != AV_PIX_FMT_NONE ? av_get_pix_fmt_name(fallback) : "none"
     );
-    return formats[0];
+    return fallback;
 }
 
 static int BunnyInterruptCallback(void *opaque) {
@@ -235,12 +285,25 @@ static NSError *BunnyError(int code, NSString *operation) {
                            }];
 }
 
+static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
+    NSError *base = BunnyError(code, operation);
+    NSMutableDictionary *userInfo = [base.userInfo mutableCopy];
+    userInfo[BunnyFFmpegDecoderSoftwareRetryKey] = @YES;
+    return [NSError errorWithDomain:base.domain code:base.code userInfo:userInfo];
+}
+
 @implementation BunnyFFmpegDecoder
 
 - (instancetype)initWithURL:(NSURL *)URL {
+    return [self initWithURL:URL preferHardwareVideoDecoding:YES];
+}
+
+- (instancetype)initWithURL:(NSURL *)URL
+    preferHardwareVideoDecoding:(BOOL)preferHardwareVideoDecoding {
     self = [super init];
     if (self) {
         _URL = URL;
+        _preferHardwareVideoDecoding = preferHardwareVideoDecoding;
         dispatch_queue_attr_t decodeAttributes = dispatch_queue_attr_make_with_qos_class(
             DISPATCH_QUEUE_SERIAL,
             QOS_CLASS_USER_INITIATED,
@@ -283,6 +346,7 @@ static NSError *BunnyError(int code, NSString *operation) {
         atomic_init(&_stopRequested, false);
         atomic_init(&_seekInterrupt, false);
         atomic_init(&_hardwareVideoDecode, false);
+        atomic_init(&_hardwareVideoDecoderNegotiated, false);
         _rustClock = stremio_bunny_clock_create();
         _pendingSeek = NAN;
         _requestedAudioIndex = BunnyDecoderNoSelectionRequest;
@@ -304,6 +368,12 @@ static NSError *BunnyError(int code, NSString *operation) {
         _resampleInputRate = 0;
         _resampleInputFormat = AV_SAMPLE_FMT_NONE;
         _resampleInputChannels = 0;
+        _audioRenderTimelineInitialized = NO;
+#if TARGET_OS_SIMULATOR
+        _audioPCMAuditEnabled = [NSProcessInfo.processInfo.environment[
+            @"SKELETON_BUNNY_PCM_AUDIT"
+        ] isEqualToString:@"1"];
+#endif
 
         _videoLayer = [AVSampleBufferDisplayLayer layer];
         _videoLayer.backgroundColor = UIColor.blackColor.CGColor;
@@ -439,6 +509,14 @@ static NSError *BunnyError(int code, NSString *operation) {
     return atomic_load(&_hardwareVideoDecode);
 }
 
+- (BOOL)hardwareVideoDecoderNegotiated {
+    return atomic_load(&_hardwareVideoDecoderNegotiated);
+}
+
+- (BOOL)prefersHardwareVideoDecoding {
+    return _preferHardwareVideoDecoding;
+}
+
 - (BOOL)shouldInterruptFFmpeg {
     return atomic_load(&_stopRequested) || atomic_load(&_seekInterrupt);
 }
@@ -467,6 +545,10 @@ static NSError *BunnyError(int code, NSString *operation) {
     BOOL decodersDrained = NO;
     BOOL completedPlayback = NO;
     while (!atomic_load(&_stopRequested)) {
+        if (_fatalDecodeError) {
+            error = _fatalDecodeError;
+            break;
+        }
         BOOL hadControlRequest = atomic_load(&_seekInterrupt);
         if ([self processControlRequests]) {
             // A successful seek after EOF starts a fresh demux/decode pass.
@@ -481,6 +563,19 @@ static NSError *BunnyError(int code, NSString *operation) {
         }
         if (atomic_load(&_stopRequested)) {
             break;
+        }
+        // Some fragmented MP4/HLS and provider MKVs store a long run of one
+        // track before its companion. If that leading track fills its decoded
+        // queue while playback is paused for preroll, strict FIFO decoding
+        // deadlocks even though the lagging packets are already buffered.
+        AVPacket *balancingPacket = [self dequeueCompressedPacketForLaggingTrackIfNeeded];
+        if (balancingPacket != NULL) {
+            [self decodeSelectedPacket:balancingPacket];
+            av_packet_free(&balancingPacket);
+            [self resumeAfterPrerollIfReady];
+            [self publishFirstFrameIfNeeded];
+            [self publishMetricsIfNeeded];
+            continue;
         }
         if (reachedEnd) {
             if ([self compressedPacketCount] > 0 && ![self queueIsFull]) {
@@ -502,6 +597,10 @@ static NSError *BunnyError(int code, NSString *operation) {
             if (!decodersDrained) {
                 [self drainDecoders];
                 decodersDrained = YES;
+                if (_fatalDecodeError) {
+                    error = _fatalDecodeError;
+                    break;
+                }
             }
 
             // FFmpeg can reach EOF while the bounded render queues still hold
@@ -598,6 +697,11 @@ static NSError *BunnyError(int code, NSString *operation) {
     static dispatch_once_t networkOnce;
     dispatch_once(&networkOnce, ^{
         avformat_network_init();
+        // Some valid provider and HLS sources repeat recoverable timestamp
+        // warnings for every packet. Printing those messages can itself steal
+        // time from the decode queue, so Bunny reports only FFmpeg errors and
+        // keeps its own structured playback diagnostics for everything else.
+        av_log_set_level(AV_LOG_ERROR);
     });
 
     _formatContext = avformat_alloc_context();
@@ -622,9 +726,12 @@ static NSError *BunnyError(int code, NSString *operation) {
     // provider files. This remains compressed data, so a few MiB is cheap and
     // prevents a short radio/CDN pause from starving VideoToolbox.
     av_dict_set(&options, "buffer_size", "4194304", 0);
-    BOOL isDASH = [_URL.pathExtension.lowercaseString isEqualToString:@"mpd"];
-    av_dict_set(&options, "probesize", isDASH ? "1000000" : "5000000", 0);
-    av_dict_set(&options, "analyzeduration", isDASH ? "1000000" : "5000000", 0);
+    NSString *extension = _URL.pathExtension.lowercaseString;
+    _isAdaptiveInput = [extension isEqualToString:@"mpd"]
+        || [extension isEqualToString:@"m3u8"];
+    av_dict_set(&options, "probesize", _isAdaptiveInput ? "1000000" : "8000000", 0);
+    av_dict_set(&options, "analyzeduration", _isAdaptiveInput ? "1000000" : "8000000", 0);
+    av_dict_set(&options, "scan_all_pmts", "1", 0);
     av_dict_set(&options, "user_agent", "Bunny/1.0 TemuStream iOS", 0);
 
     NSString *input = _URL.isFileURL ? _URL.path : _URL.absoluteString;
@@ -650,22 +757,13 @@ static NSError *BunnyError(int code, NSString *operation) {
         return NO;
     }
 
-    _videoStreamIndex = av_find_best_stream(
-        _formatContext,
-        AVMEDIA_TYPE_VIDEO,
-        -1,
-        -1,
-        NULL,
-        0
-    );
-    _audioStreamIndex = av_find_best_stream(
-        _formatContext,
-        AVMEDIA_TYPE_AUDIO,
-        -1,
-        (int)_videoStreamIndex,
-        NULL,
-        0
-    );
+    _videoStreamIndex = _isAdaptiveInput
+        ? [self bestDecodableAdaptiveVideoStream]
+        : [self bestDecodableStreamOfType:AVMEDIA_TYPE_VIDEO relatedStream:-1];
+    _audioStreamIndex = _isAdaptiveInput
+        ? [self bestDecodableAudioStreamForAdaptiveVideo:_videoStreamIndex]
+        : [self bestDecodableStreamOfType:AVMEDIA_TYPE_AUDIO
+                              relatedStream:_videoStreamIndex];
     _subtitleStreamIndex = -1;
     _hasVideo = _videoStreamIndex >= 0;
     _hasAudio = _audioStreamIndex >= 0;
@@ -703,11 +801,15 @@ static NSError *BunnyError(int code, NSString *operation) {
     if (_hasVideo) {
         _videoCodecContext = [self openCodecForStreamIndex:_videoStreamIndex
                                                     video:YES
-                                         hardwareEnabled:YES
+                                         hardwareEnabled:_preferHardwareVideoDecoding
                                                     error:errorOut];
         if (_videoCodecContext == NULL) {
             return NO;
         }
+        atomic_store(
+            &_hardwareVideoDecoderNegotiated,
+            _videoCodecContext->hw_device_ctx != NULL
+        );
     }
     if (_hasAudio) {
         _audioCodecContext = [self openCodecForStreamIndex:_audioStreamIndex
@@ -724,6 +826,198 @@ static NSError *BunnyError(int code, NSString *operation) {
         ? (double)_formatContext->duration / AV_TIME_BASE
         : 0;
     return YES;
+}
+
+- (NSInteger)bestDecodableStreamOfType:(enum AVMediaType)type
+                          relatedStream:(NSInteger)relatedStream {
+    const AVCodec *decoder = NULL;
+    int best = av_find_best_stream(
+        _formatContext,
+        type,
+        -1,
+        (int)relatedStream,
+        &decoder,
+        0
+    );
+    if (best >= 0 && decoder != NULL) {
+        AVStream *stream = _formatContext->streams[best];
+        if (type != AVMEDIA_TYPE_VIDEO
+            || !(stream->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+            return best;
+        }
+    }
+
+    // Metadata and cover-art streams occasionally win FFmpeg's normal ranking.
+    // Prefer any real, decodable media track over failing the whole source.
+    NSInteger fallback = -1;
+    NSInteger fallbackScore = NSIntegerMin;
+    for (unsigned int index = 0; index < _formatContext->nb_streams; index++) {
+        AVStream *stream = _formatContext->streams[index];
+        if (stream->codecpar->codec_type != type
+            || avcodec_find_decoder(stream->codecpar->codec_id) == NULL) {
+            continue;
+        }
+        BOOL attachedPicture = (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0;
+        NSInteger score = (stream->disposition & AV_DISPOSITION_DEFAULT) ? 100 : 0;
+        if (type == AVMEDIA_TYPE_VIDEO) {
+            score += attachedPicture ? -1000 : 1000;
+            score += stream->codecpar->width > 0 && stream->codecpar->height > 0 ? 10 : 0;
+        }
+        if (score > fallbackScore) {
+            fallback = index;
+            fallbackScore = score;
+        }
+    }
+    return fallback;
+}
+
+- (NSInteger)bestDecodableAdaptiveVideoStream {
+    NSInteger best = -1;
+    int64_t bestPixels = -1;
+    int64_t bestBitrate = -1;
+    NSInteger smallestOversized = -1;
+    int64_t smallestOversizedPixels = INT64_MAX;
+    // VideoToolbox is available on physical iPhones, but the simulator can
+    // advertise the format and then fall back to software frames. Decoding a
+    // 1080p60 segment from its preceding HLS keyframe makes a simple scrub take
+    // 4-7 seconds there. Keep device quality unchanged while selecting the
+    // 720p rendition for simulator-only decoder/UI verification.
+#if TARGET_OS_SIMULATOR
+    const int64_t maximumPerformancePixels = 1280LL * 720LL;
+#else
+    const int64_t maximumPerformancePixels = 4096LL * 2160LL;
+#endif
+
+    for (unsigned int index = 0; index < _formatContext->nb_streams; index++) {
+        AVStream *stream = _formatContext->streams[index];
+        AVCodecParameters *parameters = stream->codecpar;
+        if (parameters->codec_type != AVMEDIA_TYPE_VIDEO
+            || (stream->disposition & AV_DISPOSITION_ATTACHED_PIC)
+            || avcodec_find_decoder(parameters->codec_id) == NULL
+            || parameters->width <= 0
+            || parameters->height <= 0) {
+            continue;
+        }
+
+        int64_t pixels = (int64_t)parameters->width * parameters->height;
+        if (pixels > maximumPerformancePixels) {
+            if (pixels < smallestOversizedPixels) {
+                smallestOversized = (NSInteger)index;
+                smallestOversizedPixels = pixels;
+            }
+            continue;
+        }
+
+        int64_t bitrate = parameters->bit_rate;
+        AVDictionaryEntry *variantBitrate = av_dict_get(
+            stream->metadata,
+            "variant_bitrate",
+            NULL,
+            0
+        );
+        if (variantBitrate != NULL && variantBitrate->value != NULL) {
+            bitrate = MAX(bitrate, strtoll(variantBitrate->value, NULL, 10));
+        }
+        if (pixels > bestPixels || (pixels == bestPixels && bitrate > bestBitrate)) {
+            best = (NSInteger)index;
+            bestPixels = pixels;
+            bestBitrate = bitrate;
+        }
+    }
+
+    if (best >= 0) {
+        return best;
+    }
+    if (smallestOversized >= 0) {
+        return smallestOversized;
+    }
+    return [self bestDecodableStreamOfType:AVMEDIA_TYPE_VIDEO relatedStream:-1];
+}
+
+- (NSInteger)bestDecodableAudioStreamForAdaptiveVideo:(NSInteger)videoStreamIndex {
+    if (videoStreamIndex < 0) {
+        return [self bestDecodableStreamOfType:AVMEDIA_TYPE_AUDIO relatedStream:-1];
+    }
+
+    for (unsigned int programIndex = 0;
+         programIndex < _formatContext->nb_programs;
+         programIndex++) {
+        AVProgram *program = _formatContext->programs[programIndex];
+        BOOL containsSelectedVideo = NO;
+        for (unsigned int streamOffset = 0;
+             streamOffset < program->nb_stream_indexes;
+             streamOffset++) {
+            if ((NSInteger)program->stream_index[streamOffset] == videoStreamIndex) {
+                containsSelectedVideo = YES;
+                break;
+            }
+        }
+        if (!containsSelectedVideo) {
+            continue;
+        }
+
+        NSInteger bestAudio = -1;
+        NSInteger bestScore = NSIntegerMin;
+        for (unsigned int streamOffset = 0;
+             streamOffset < program->nb_stream_indexes;
+             streamOffset++) {
+            unsigned int streamIndex = program->stream_index[streamOffset];
+            if (streamIndex >= _formatContext->nb_streams) {
+                continue;
+            }
+            AVStream *stream = _formatContext->streams[streamIndex];
+            if (stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO
+                || avcodec_find_decoder(stream->codecpar->codec_id) == NULL) {
+                continue;
+            }
+            NSInteger score = (stream->disposition & AV_DISPOSITION_DEFAULT) ? 100 : 0;
+            if (score > bestScore) {
+                bestAudio = (NSInteger)streamIndex;
+                bestScore = score;
+            }
+        }
+        if (bestAudio >= 0) {
+            return bestAudio;
+        }
+    }
+
+    return [self bestDecodableStreamOfType:AVMEDIA_TYPE_AUDIO
+                              relatedStream:videoStreamIndex];
+}
+
+- (BOOL)isSelectableAdaptiveAudioStreamIndex:(NSInteger)streamIndex {
+    if (!_isAdaptiveInput || _videoStreamIndex < 0) {
+        return YES;
+    }
+
+    NSUInteger programMemberships = 0;
+    BOOL sharesSelectedVideoProgram = NO;
+    for (unsigned int programIndex = 0;
+         programIndex < _formatContext->nb_programs;
+         programIndex++) {
+        AVProgram *program = _formatContext->programs[programIndex];
+        BOOL containsAudio = NO;
+        BOOL containsSelectedVideo = NO;
+        for (unsigned int offset = 0;
+             offset < program->nb_stream_indexes;
+             offset++) {
+            NSInteger candidate = (NSInteger)program->stream_index[offset];
+            containsAudio |= candidate == streamIndex;
+            containsSelectedVideo |= candidate == _videoStreamIndex;
+        }
+        if (containsAudio) {
+            programMemberships++;
+            sharesSelectedVideoProgram |= containsSelectedVideo;
+        }
+    }
+
+    // In a muxed HLS master, each quality variant exposes its own copy of the
+    // same audio stream. Those are not user-selectable tracks: crossing program
+    // boundaries forces a second rendition download and can cause a long audio
+    // rebuild. Real alternate renditions are either shared by several programs
+    // (common for AAC/AC3/EAC3 groups) or explicitly belong to the selected
+    // video's program.
+    return sharesSelectedVideoProgram || programMemberships > 1;
 }
 
 - (AVCodecContext *)openCodecForStreamIndex:(NSInteger)streamIndex
@@ -851,6 +1145,13 @@ static NSError *BunnyError(int code, NSString *operation) {
         if (type != AVMEDIA_TYPE_AUDIO && type != AVMEDIA_TYPE_SUBTITLE) {
             continue;
         }
+        if (type == AVMEDIA_TYPE_AUDIO
+            && ![self isSelectableAdaptiveAudioStreamIndex:index]) {
+            continue;
+        }
+        if (avcodec_find_decoder(stream->codecpar->codec_id) == NULL) {
+            continue;
+        }
         NSString *language = BunnyDictionaryString(stream->metadata, "language");
         NSString *metadataTitle = BunnyDictionaryString(stream->metadata, "title");
         const AVCodecDescriptor *descriptor = avcodec_descriptor_get(stream->codecpar->codec_id);
@@ -911,6 +1212,18 @@ static NSError *BunnyError(int code, NSString *operation) {
         const AVCodecDescriptor *descriptor = avcodec_descriptor_get(stream->codecpar->codec_id);
         info.audioCodecName = descriptor ? BunnyString(descriptor->name) : @"unknown";
     }
+
+    BOOL negotiatedHardware = _videoCodecContext != NULL
+        && _videoCodecContext->hw_device_ctx != NULL;
+    NSLog(
+        @"BUNNY_DECODER opened container=%@ video=%@ audio=%@ video_path=%@ size=%.0fx%.0f",
+        info.containerName,
+        info.videoCodecName ?: @"none",
+        info.audioCodecName ?: @"none",
+        negotiatedHardware ? @"videotoolbox" : @"software",
+        info.presentationSize.width,
+        info.presentationSize.height
+    );
 
     void (^handler)(BunnyFFmpegMediaInfo *) = self.onOpen;
     if (handler) {
@@ -1011,6 +1324,7 @@ static NSError *BunnyError(int code, NSString *operation) {
         _lastAudioPTS = NAN;
         _lastVideoEnd = time;
         _lastAudioEnd = time;
+        _audioRenderTimelineInitialized = NO;
         [_synchronizer setRate:0 time:CMTimeMakeWithSeconds(time, 60000)];
     } else {
         [_controlLock lock];
@@ -1057,6 +1371,7 @@ static NSError *BunnyError(int code, NSString *operation) {
     _resampleInputRate = 0;
     _resampleInputFormat = AV_SAMPLE_FMT_NONE;
     _resampleInputChannels = 0;
+    _audioRenderTimelineInitialized = NO;
     [_pendingSampleLock lock];
     [_pendingAudioSamples removeAllObjects];
     [_pendingSampleLock unlock];
@@ -1179,6 +1494,49 @@ static NSError *BunnyError(int code, NSString *operation) {
     return packet;
 }
 
+- (AVPacket *)dequeueCompressedPacketForStreamIndex:(NSInteger)streamIndex {
+    if (streamIndex < 0 || [self compressedPacketCount] == 0) {
+        return NULL;
+    }
+    for (NSUInteger index = _compressedPacketReadIndex;
+         index < _pendingCompressedPackets.count;
+         index++) {
+        AVPacket *packet = _pendingCompressedPackets[index].pointerValue;
+        if (packet == NULL || packet->stream_index != streamIndex) {
+            continue;
+        }
+        if (index == _compressedPacketReadIndex) {
+            return [self dequeueCompressedPacket];
+        }
+        [_pendingCompressedPackets removeObjectAtIndex:index];
+        size_t packetBytes = (size_t)MAX(packet->size, 0);
+        _pendingCompressedPacketBytes = packetBytes <= _pendingCompressedPacketBytes
+            ? _pendingCompressedPacketBytes - packetBytes
+            : 0;
+        return packet;
+    }
+    return NULL;
+}
+
+- (AVPacket *)dequeueCompressedPacketForLaggingTrackIfNeeded {
+    if (!_hasVideo || !_hasAudio || [self compressedPacketCount] == 0) {
+        return NULL;
+    }
+    double playhead = self.currentTime;
+    double videoAhead = fmax(_lastVideoEnd - playhead, 0);
+    double audioAhead = fmax(_lastAudioEnd - playhead, 0);
+    NSTimeInterval target = [self decodedQueueDuration];
+    double videoHardCap = fmax(target + 0.35, 1.20);
+
+    if (videoAhead >= videoHardCap && audioAhead < target) {
+        return [self dequeueCompressedPacketForStreamIndex:_audioStreamIndex];
+    }
+    if (audioAhead >= 8.0 && videoAhead < target) {
+        return [self dequeueCompressedPacketForStreamIndex:_videoStreamIndex];
+    }
+    return NULL;
+}
+
 - (void)clearCompressedPackets {
     for (NSUInteger index = _compressedPacketReadIndex;
          index < _pendingCompressedPackets.count;
@@ -1233,6 +1591,18 @@ static NSError *BunnyError(int code, NSString *operation) {
     if (_videoCodecContext == NULL) {
         return;
     }
+#if TARGET_OS_SIMULATOR
+    if (_preferHardwareVideoDecoding
+        && !_didInjectHardwareDecodeFailure
+        && [NSProcessInfo.processInfo.environment[
+            @"SKELETON_BUNNY_FORCE_HARDWARE_DECODE_FAILURE"
+        ] isEqualToString:@"1"]) {
+        _didInjectHardwareDecodeFailure = YES;
+        [self recordFatalVideoDecodeFailure:AVERROR(EINVAL)
+                                  operation:@"The hardware video decoder rejected this stream"];
+        return;
+    }
+#endif
     int result = avcodec_send_packet(_videoCodecContext, packet);
     if (result == AVERROR(EAGAIN)) {
         [self receiveVideoFrames];
@@ -1240,18 +1610,31 @@ static NSError *BunnyError(int code, NSString *operation) {
     }
     if (result >= 0) {
         [self receiveVideoFrames];
+    } else if (result != AVERROR_EOF) {
+        [self recordVideoCodecFailureAtStage:@"codec_send" code:result];
+    } else {
+        [self recordFatalVideoDecodeFailure:result
+                                  operation:@"The video decoder stopped unexpectedly"];
     }
 }
 
 - (void)receiveVideoFrames {
     AVFrame *frame = av_frame_alloc();
     if (frame == NULL) {
+        [self recordFatalVideoDecodeFailure:AVERROR(ENOMEM)
+                                  operation:@"Could not allocate a decoded video frame"];
         return;
     }
+    int result = 0;
     while (!atomic_load(&_stopRequested)
-           && avcodec_receive_frame(_videoCodecContext, frame) >= 0) {
+           && _fatalDecodeError == nil
+           && (result = avcodec_receive_frame(_videoCodecContext, frame)) >= 0) {
+        _consecutiveVideoDecodeFailures = 0;
         [self emitVideoFrame:frame];
         av_frame_unref(frame);
+    }
+    if (result < 0 && result != AVERROR(EAGAIN) && result != AVERROR_EOF) {
+        [self recordVideoCodecFailureAtStage:@"codec_receive" code:result];
     }
     av_frame_free(&frame);
 }
@@ -1296,6 +1679,7 @@ static NSError *BunnyError(int code, NSString *operation) {
         [_pendingSampleLock lock];
         _droppedVideoFrames++;
         [_pendingSampleLock unlock];
+        [self recordVideoOutputFailureAtStage:@"pixel_buffer"];
         return;
     }
     CMSampleBufferRef sampleBuffer = [self videoSampleBufferForPixelBuffer:pixelBuffer
@@ -1306,8 +1690,10 @@ static NSError *BunnyError(int code, NSString *operation) {
         [_pendingSampleLock lock];
         _droppedVideoFrames++;
         [_pendingSampleLock unlock];
+        [self recordVideoOutputFailureAtStage:@"sample_buffer"];
         return;
     }
+    _consecutiveVideoOutputFailures = 0;
 
     // A seek can be serviced while backpressure is holding this sample. Do not
     // let that pre-seek frame flash after the renderers have been flushed.
@@ -1326,6 +1712,50 @@ static NSError *BunnyError(int code, NSString *operation) {
         }
     }
     CFRelease(sampleBuffer);
+}
+
+- (void)recordVideoCodecFailureAtStage:(NSString *)stage code:(int)code {
+    if (_fatalDecodeError) {
+        return;
+    }
+    _consecutiveVideoDecodeFailures++;
+    NSLog(
+        @"BUNNY_DECODER video_decode_warning stage=%@ code=%d consecutive=%ld",
+        stage,
+        code,
+        (long)_consecutiveVideoDecodeFailures
+    );
+    if (_consecutiveVideoDecodeFailures >= 3) {
+        [self recordFatalVideoDecodeFailure:code
+                                  operation:@"The active video decoder rejected this stream"];
+    }
+}
+
+- (void)recordVideoOutputFailureAtStage:(NSString *)stage {
+    if (_fatalDecodeError) {
+        return;
+    }
+    _consecutiveVideoOutputFailures++;
+    NSLog(
+        @"BUNNY_DECODER video_output_warning stage=%@ consecutive=%ld",
+        stage,
+        (long)_consecutiveVideoOutputFailures
+    );
+    if (_consecutiveVideoOutputFailures >= 3) {
+        [self recordFatalVideoDecodeFailure:AVERROR(EINVAL)
+                                  operation:@"Bunny could not render the decoded video format"];
+    }
+}
+
+- (void)recordFatalVideoDecodeFailure:(int)code operation:(NSString *)operation {
+    if (_fatalDecodeError) {
+        return;
+    }
+    _fatalDecodeError = BunnyVideoDecodeError(code, operation);
+    NSLog(
+        @"BUNNY_DECODER video_decode_failure software_retry=yes error=%@",
+        _fatalDecodeError.localizedDescription
+    );
 }
 
 - (CVPixelBufferRef)pixelBufferForFrame:(AVFrame *)frame CF_RETURNS_RETAINED {
@@ -1549,36 +1979,10 @@ static NSError *BunnyError(int code, NSString *operation) {
         return;
     }
     const size_t bytesPerFrame = sizeof(float) * 2;
-    CMBlockBufferRef blockBuffer = NULL;
     size_t capacityBytes = (size_t)outputCapacity * bytesPerFrame;
-    OSStatus blockResult = CMBlockBufferCreateWithMemoryBlock(
-            kCFAllocatorDefault,
-            NULL,
-            capacityBytes,
-            kCFAllocatorDefault,
-            NULL,
-            0,
-            capacityBytes,
-            kCMBlockBufferAssureMemoryNowFlag,
-            &blockBuffer
-        );
-    if (blockResult != kCMBlockBufferNoErr) {
-        [self reportAudioFailureAtStage:@"block_buffer_create" code:blockResult];
-        return;
-    }
-    char *memory = NULL;
-    size_t lengthAtOffset = 0;
-    size_t totalLength = 0;
-    OSStatus pointerResult = CMBlockBufferGetDataPointer(
-            blockBuffer,
-            0,
-            &lengthAtOffset,
-            &totalLength,
-            &memory
-        );
-    if (pointerResult != kCMBlockBufferNoErr || memory == NULL) {
-        [self reportAudioFailureAtStage:@"block_buffer_pointer" code:pointerResult];
-        CFRelease(blockBuffer);
+    void *memory = malloc(capacityBytes);
+    if (memory == NULL) {
+        [self reportAudioFailureAtStage:@"audio_memory_allocate" code:ENOMEM];
         return;
     }
     uint8_t *output[] = { (uint8_t *)memory, NULL };
@@ -1591,7 +1995,74 @@ static NSError *BunnyError(int code, NSString *operation) {
     );
     if (outputSamples <= 0) {
         [self reportAudioFailureAtStage:@"resample" code:outputSamples];
-        CFRelease(blockBuffer);
+        free(memory);
+        return;
+    }
+
+#if TARGET_OS_SIMULATOR
+    if (_audioPCMAuditEnabled) {
+        float *pcm = (float *)memory;
+        NSUInteger nonFiniteSamples = 0;
+        NSUInteger outOfRangeSamples = 0;
+        NSUInteger largeJumps = 0;
+        float maximumMagnitude = 0;
+        for (int sampleIndex = 0; sampleIndex < outputSamples; sampleIndex++) {
+            for (int channel = 0; channel < 2; channel++) {
+                float value = pcm[sampleIndex * 2 + channel];
+                if (!isfinite(value)) {
+                    nonFiniteSamples++;
+                    continue;
+                }
+                maximumMagnitude = fmaxf(maximumMagnitude, fabsf(value));
+                if (fabsf(value) > 1.0f) {
+                    outOfRangeSamples++;
+                }
+                if ((_hasLastAuditedPCMSample || sampleIndex > 0)
+                    && fabsf(value - _lastAuditedPCMSample[channel]) > 0.5f) {
+                    largeJumps++;
+                }
+                _lastAuditedPCMSample[channel] = value;
+            }
+            _hasLastAuditedPCMSample = YES;
+        }
+        if ((nonFiniteSamples > 0 || outOfRangeSamples > 0 || largeJumps > 0)
+            && _audioPCMAnomalyLogCount < 20) {
+            _audioPCMAnomalyLogCount++;
+            NSLog(
+                @"BUNNY_DECODER audio_pcm_anomaly nonfinite=%lu out_of_range=%lu large_jumps=%lu peak=%.6f samples=%d",
+                (unsigned long)nonFiniteSamples,
+                (unsigned long)outOfRangeSamples,
+                (unsigned long)largeJumps,
+                maximumMagnitude,
+                outputSamples
+            );
+        }
+    }
+#endif
+
+    // swr_get_delay() intentionally over-allocates the destination. Expose
+    // only the frames swr_convert() actually initialized; handing CoreMedia
+    // the capacity as data length lets its audio buffer list include an
+    // uninitialized tail, which becomes full-scale crackle under load.
+    size_t audioDataBytes = (size_t)outputSamples * bytesPerFrame;
+    CMBlockBufferCustomBlockSource blockSource = {0};
+    blockSource.version = kCMBlockBufferCustomBlockSourceVersion;
+    blockSource.FreeBlock = BunnyFreeAudioPCMBlock;
+    CMBlockBufferRef blockBuffer = NULL;
+    OSStatus blockResult = CMBlockBufferCreateWithMemoryBlock(
+        kCFAllocatorDefault,
+        memory,
+        capacityBytes,
+        NULL,
+        &blockSource,
+        0,
+        audioDataBytes,
+        0,
+        &blockBuffer
+    );
+    if (blockResult != kCMBlockBufferNoErr || blockBuffer == NULL) {
+        free(memory);
+        [self reportAudioFailureAtStage:@"block_buffer_create" code:blockResult];
         return;
     }
 
@@ -1599,17 +2070,38 @@ static NSError *BunnyError(int code, NSString *operation) {
     int64_t timestamp = frame->best_effort_timestamp != AV_NOPTS_VALUE
         ? frame->best_effort_timestamp
         : frame->pts;
-    double presentationTime = timestamp != AV_NOPTS_VALUE
+    double sourcePresentationTime = timestamp != AV_NOPTS_VALUE
         ? timestamp * av_q2d(stream->time_base) - _timelineOrigin
         : (isfinite(_lastAudioPTS)
                ? _lastAudioPTS + (double)frame->nb_samples / inputRate
                : self.currentTime);
-    presentationTime = fmax(presentationTime, 0);
-    _lastAudioPTS = presentationTime;
+    sourcePresentationTime = fmax(sourcePresentationTime, 0);
+    _lastAudioPTS = sourcePresentationTime;
     double frameDuration = (double)outputSamples / 48000.0;
-    if (presentationTime + frameDuration < _discardBefore) {
+    if (sourcePresentationTime + frameDuration < _discardBefore) {
         CFRelease(blockBuffer);
         return;
+    }
+
+    // AAC commonly uses a 44.1 kHz clock while Bunny renders 48 kHz PCM.
+    // Rounding every packet's source PTS independently creates alternating
+    // one-sample gaps/overlaps at CoreMedia. AVSampleBufferAudioRenderer can
+    // turn those discontinuities into full-scale clicks. Once a continuous
+    // run begins, schedule near-adjacent buffers from the exact prior PCM end.
+    double presentationTime = sourcePresentationTime;
+    if (_audioRenderTimelineInitialized) {
+        double timingDelta = sourcePresentationTime - _lastAudioEnd;
+        if (fabs(timingDelta) <= 0.005) {
+            presentationTime = _lastAudioEnd;
+        } else if (_audioTimingDiscontinuityLogCount < 8) {
+            _audioTimingDiscontinuityLogCount++;
+            NSLog(
+                @"BUNNY_DECODER audio_timeline_discontinuity delta_ms=%.3f source=%.6f expected=%.6f",
+                timingDelta * 1000.0,
+                sourcePresentationTime,
+                _lastAudioEnd
+            );
+        }
     }
 
     CMSampleTimingInfo timing = {
@@ -1648,6 +2140,7 @@ static NSError *BunnyError(int code, NSString *operation) {
             });
         }
         _lastAudioEnd = presentationTime + frameDuration;
+        _audioRenderTimelineInitialized = YES;
     }
     CFRelease(sampleBuffer);
 }
@@ -1696,6 +2189,7 @@ static NSError *BunnyError(int code, NSString *operation) {
     _resampleInputRate = inputRate;
     _resampleInputFormat = inputFormat;
     _resampleInputChannels = inputChannels;
+    _audioRenderTimelineInitialized = NO;
 
     if (_audioFormatDescription == NULL) {
         AudioStreamBasicDescription description = {
@@ -1776,9 +2270,10 @@ static NSError *BunnyError(int code, NSString *operation) {
         if (isFirstAudio) {
             NSLog(@"BUNNY_DECODER audio_renderer_started samples=%ld", (long)renderedSamples);
         }
-        if (!_hasVideo) {
-            [self publishFirstFrameIfNeeded];
-        }
+        // Startup requires evidence from both renderers. With non-interleaved
+        // sources, audio can become the final missing renderer after the
+        // decode queue has already reached its bounded preroll target.
+        [self publishFirstFrameIfNeeded];
     }
 }
 
@@ -2095,9 +2590,24 @@ static NSError *BunnyError(int code, NSString *operation) {
     NSInteger decoded = _decodedVideoFrames;
     NSInteger dropped = _droppedVideoFrames;
     NSInteger renderedAudio = _renderedAudioFrames;
+    NSUInteger pendingVideo = _pendingVideoSamples.count;
+    NSUInteger pendingAudio = _pendingAudioSamples.count;
     [_pendingSampleLock unlock];
     double videoQueueEnd = _hasVideo ? _lastVideoEnd : NAN;
     double audioQueueEnd = _hasAudio ? _lastAudioEnd : NAN;
+    if (!_firstFrameEmitted && now - _lastPrerollLogAt >= 1) {
+        _lastPrerollLogAt = now;
+        NSLog(
+            @"BUNNY_DECODER preroll video_end=%.3f audio_end=%.3f video_rendered=%ld audio_rendered=%ld pending_video=%lu pending_audio=%lu compressed=%lu",
+            videoQueueEnd,
+            audioQueueEnd,
+            (long)decoded,
+            (long)renderedAudio,
+            (unsigned long)pendingVideo,
+            (unsigned long)pendingAudio,
+            (unsigned long)[self compressedPacketCount]
+        );
+    }
     void (^handler)(NSInteger, NSInteger, NSInteger, NSTimeInterval, NSTimeInterval,
                     NSTimeInterval) = self.onMetrics;
     if (handler) {

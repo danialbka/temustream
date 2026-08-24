@@ -11,12 +11,27 @@ struct UIStateScreenshotApp: App {
     @StateObject private var watchTogether = WatchTogetherModel()
     private let state = ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"] ?? "home-cinemeta"
 
+    init() {
+        let environment = ProcessInfo.processInfo.environment
+        let defaults = UserDefaults.standard
+        if let mode = environment["SKELETON_APPEARANCE_MODE"] {
+            defaults.set(mode, forKey: AppearancePreferences.modeKey)
+        }
+        if let preset = environment["SKELETON_ACCENT_PRESET"] {
+            defaults.set(preset, forKey: AppearancePreferences.accentPresetKey)
+        }
+        if let customHex = environment["SKELETON_CUSTOM_ACCENT_HEX"] {
+            defaults.set(customHex, forKey: AppearancePreferences.customAccentHexKey)
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
-            UIStateScreenshotRoot(state: state)
-                .environmentObject(model)
-                .environmentObject(watchTogether)
-                .preferredColorScheme(.dark)
+            AppThemeHost {
+                UIStateScreenshotRoot(state: state)
+                    .environmentObject(model)
+                    .environmentObject(watchTogether)
+            }
         }
     }
 }
@@ -34,13 +49,13 @@ private struct UIStateScreenshotRoot: View {
                 content
             }
         }
-        .tint(.orange)
         .task { await prepare() }
     }
 
     private var needsPreparation: Bool {
         [
-            "home-cinemeta", "home-letterboxd", "home-series", "catalog-error",
+            "home-cinemeta", "home-letterboxd", "home-series",
+            "home-light-custom-theme", "catalog-error",
             "details-streams", "details-resume", "details-series-episodes", "episode-streams",
             "episode-up-next",
             "details-trailer-active", "library-synced", "account-signed-in",
@@ -53,7 +68,8 @@ private struct UIStateScreenshotRoot: View {
         switch state {
         case "catalog-loading":
             loadingCatalog
-        case "catalog-error", "home-cinemeta", "home-letterboxd", "home-series":
+        case "catalog-error", "home-cinemeta", "home-letterboxd", "home-series",
+             "home-light-custom-theme":
             screenTab(label: "Home", systemImage: "rectangle.grid.2x2") {
                 NavigationStack { HomeView() }
             }
@@ -99,7 +115,7 @@ private struct UIStateScreenshotRoot: View {
             screenTab(label: "Add-ons", systemImage: "shippingbox") {
                 NavigationStack { AddonsView() }
             }
-        case "settings-player", "settings-player-legacy-av":
+        case "settings-player", "settings-player-legacy-av", "settings-appearance-light":
             screenTab(label: "Settings", systemImage: "gearshape") {
                 NavigationStack { SettingsView() }
             }
@@ -165,9 +181,30 @@ private struct UIStateScreenshotRoot: View {
 
     private func prepare() async {
         switch state {
-        case "home-cinemeta", "home-letterboxd", "home-series", "catalog-error",
+        case "home-cinemeta", "home-letterboxd", "home-series",
+             "home-light-custom-theme", "catalog-error",
              "details-streams", "details-trailer-active":
             await model.start()
+            if state == "home-series" {
+                model.recordPlaybackProgress(
+                    contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
+                        seriesID: fixtureSeriesItem.id,
+                        videoID: fixtureEpisodeTwo.id
+                    ),
+                    contentTitle: EpisodePlaybackIdentity.contentTitle(
+                        seriesTitle: fixtureSeriesItem.name,
+                        video: fixtureEpisodeTwo
+                    ),
+                    stream: fixtureStream,
+                    providerName: "Cinemeta Fixture",
+                    position: 1_200,
+                    duration: 3_600,
+                    mediaMetadata: .episode(
+                        series: fixtureSeriesItem,
+                        episode: fixtureEpisodeTwo
+                    )
+                )
+            }
             prepared = true
         case "details-resume":
             await model.start()
@@ -194,7 +231,11 @@ private struct UIStateScreenshotRoot: View {
                 stream: fixtureStream,
                 providerName: "Cinemeta Fixture",
                 position: 3_590,
-                duration: 3_600
+                duration: 3_600,
+                mediaMetadata: .episode(
+                    series: fixtureSeriesItem,
+                    episode: fixtureEpisodeOne
+                )
             )
             model.recordPlaybackProgress(
                 contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
@@ -208,7 +249,11 @@ private struct UIStateScreenshotRoot: View {
                 stream: fixtureStream,
                 providerName: "Cinemeta Fixture",
                 position: 1_200,
-                duration: 3_600
+                duration: 3_600,
+                mediaMetadata: .episode(
+                    series: fixtureSeriesItem,
+                    episode: fixtureEpisodeTwo
+                )
             )
             prepared = true
         case "settings-player-legacy-av":

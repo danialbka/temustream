@@ -5,17 +5,19 @@
 | `catalog-loading.png` | Initial network loading |
 | `home-cinemeta.png` | Loaded Cinemeta catalog and source dropdown |
 | `home-letterboxd.png` | Loaded Letterboxd Recommendations selection |
-| `home-series.png` | TV Series selected from the catalog dropdown |
+| `home-series.png` | TV Series selected with the horizontal Continue Watching poster row and dot-matrix progress |
+| `home-light-custom-theme.png` | Light catalog using a persisted custom purple accent and adaptive surfaces |
 | `catalog-error.png` | Catalog network or protocol failure |
 | `details-streams.png` | Metadata, trailer action, and direct/torrent stream choices |
-| `details-resume.png` | Persisted resume and trailer actions below Add to Library |
-| `details-series-episodes.png` | Series trailer action, full-width episode routes, season picker, resume state, and completed tick |
-| `episode-streams.png` | Dedicated episode route with thumbnail, summary, progress, provider filters, and streams |
+| `details-resume.png` | Persisted resume with dot-matrix progress and trailer actions below Add to Library |
+| `details-series-episodes.png` | Series trailer action, full-width episode routes, season picker, dot-matrix resume and episode progress, and completed tick |
+| `episode-streams.png` | Dedicated episode route with thumbnail, summary, dot-matrix resume progress, provider filters, and streams |
 | `episode-up-next.png` | Compact next-episode thumbnail, episode number, countdown, and immediate playback action |
 | `library-empty.png` | Empty saved library |
 | `library-synced.png` | Account-synchronized saved title |
 | `addons-offline.png` | Add-on management and offline torrent server |
 | `settings-subtitles.png` | Persisted subtitle size, color, weight, background, shadow, and live preview |
+| `settings-appearance-light.png` | System/Light/Dark controls, accent presets, custom colour picker, and live theme preview |
 | `account-signed-out.png` | Sign-in form |
 | `account-signed-in.png` | Synced account summary |
 | `torrent-starting.png` | Torrent resolution progress |

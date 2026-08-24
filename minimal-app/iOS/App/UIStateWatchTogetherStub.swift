@@ -36,13 +36,30 @@ struct WatchRoomPlayerButton: View {
     let contentKey: String
     let contentType: String
     let contentTitle: String
+    @Binding var showsRoom: Bool
 
     var body: some View { EmptyView() }
+}
+
+extension View {
+    func watchTogetherRoomSheet(
+        isPresented: Binding<Bool>,
+        contentKey: String,
+        contentType: String,
+        contentTitle: String
+    ) -> some View {
+        self
+    }
 }
 
 struct WatchRoomVoiceButton: View {
     let contentKey: String
 
     var body: some View { EmptyView() }
+}
+
+enum PlaybackAudioSession {
+    static func beginPlayback() {}
+    static func endPlayback() {}
 }
 #endif

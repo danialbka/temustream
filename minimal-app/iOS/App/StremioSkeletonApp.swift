@@ -8,10 +8,11 @@ struct StremioSkeletonApp: App {
 
     var body: some Scene {
         WindowGroup {
-            appContent
-            .environmentObject(watchTogether)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .preferredColorScheme(.dark)
+            AppThemeHost {
+                appContent
+                    .environmentObject(watchTogether)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 

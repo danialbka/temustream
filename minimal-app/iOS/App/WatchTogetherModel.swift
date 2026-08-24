@@ -193,6 +193,7 @@ final class WatchTogetherModel: ObservableObject {
     @Published private(set) var liveKitConnected = false
     @Published private(set) var liveParticipantCount = 0
     @Published private(set) var voiceState = WatchVoiceControlState.off
+    @Published private(set) var isCreatingProfile = false
     @Published private(set) var statusMessage = "Watch Together is not configured"
     @Published var errorMessage: String?
 
@@ -254,17 +255,35 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     func createProfile(displayName: String) async {
-        guard let client else { return }
+        let normalizedName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedName.count >= 2 else {
+            errorMessage = "Enter a display name with at least 2 characters."
+            return
+        }
+        guard let client else {
+            statusMessage = "Watch Together is not configured"
+            errorMessage = "Watch Together isn’t configured in this build."
+            return
+        }
+        guard !isCreatingProfile else { return }
+
+        isCreatingProfile = true
+        statusMessage = "Creating your profile…"
+        errorMessage = nil
+        defer { isCreatingProfile = false }
         do {
             let value: WatchProfile = try await client.mutation(
                 "profiles:bootstrap",
-                with: ["deviceSecret": deviceSecret, "displayName": displayName]
+                with: ["deviceSecret": deviceSecret, "displayName": normalizedName]
             )
             profile = value
             statusMessage = "Friends connected"
             errorMessage = nil
             subscribeToFriends()
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            statusMessage = "Couldn’t create your profile"
+            errorMessage = "Couldn’t create profile: \(error.localizedDescription)"
+        }
     }
 
     func sendFriendRequest(code: String) async {
@@ -352,6 +371,7 @@ final class WatchTogetherModel: ObservableObject {
             voiceState = .unavailable
             return
         }
+        guard voiceState != .enabling else { return }
         if voiceState == .live {
             await stopMicrophone(markUnavailable: false)
             return
@@ -368,16 +388,10 @@ final class WatchTogetherModel: ObservableObject {
             return
         }
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(
-                .playAndRecord,
-                mode: .videoChat,
-                options: [.defaultToSpeaker, .allowBluetoothHFP]
-            )
-            try session.setActive(true)
             microphonePublication = try await room.localParticipant.setMicrophone(enabled: true)
             voiceState = .live
             errorMessage = nil
+            PlaybackAudioSession.voiceCaptureDidChange(isEnabled: true)
         } catch {
             voiceState = .unavailable
             errorMessage = "Couldn’t start room voice: \(error.localizedDescription)"
@@ -626,27 +640,11 @@ final class WatchTogetherModel: ObservableObject {
         }
         microphonePublication = nil
         voiceState = markUnavailable ? .unavailable : .off
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .moviePlayback)
-        try? session.setActive(true)
+        PlaybackAudioSession.voiceCaptureDidChange(isEnabled: false)
     }
 
     private func requestMicrophonePermission() async -> Bool {
-        let session = AVAudioSession.sharedInstance()
-        switch session.recordPermission {
-        case .granted:
-            return true
-        case .denied:
-            return false
-        case .undetermined:
-            return await withCheckedContinuation { continuation in
-                session.requestRecordPermission { granted in
-                    continuation.resume(returning: granted)
-                }
-            }
-        @unknown default:
-            return false
-        }
+        await MicrophonePermissionRequester.request()
     }
 }
 

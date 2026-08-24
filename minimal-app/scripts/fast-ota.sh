@@ -345,6 +345,7 @@ create_signing_keychain() {
 
 inspect_source_artifacts() {
   local ipa_path="$1" info_entry info_count unpacked_app_count
+  local local_watch_config shipped_convex_url shipped_livekit_url
   [[ -f "$ipa_path" ]] || fail "IPA not found: $ipa_path"
   unzip -tq "$ipa_path" >/dev/null || fail "IPA archive validation failed"
   ensure_work_dir
@@ -359,6 +360,30 @@ inspect_source_artifacts() {
   ipa_name="$(plutil -extract CFBundleName raw -o - "$work_dir/ipa-Info.plist")"
   [[ "$ipa_bundle_id" == "$source_bundle_id" ]] || fail \
     "IPA bundle ID is $ipa_bundle_id; expected $source_bundle_id"
+
+  # WatchTogether.local.xcconfig is intentionally ignored because it is a
+  # machine-local endpoint snapshot. Clean build copies must carry that file.
+  # Refuse an OTA when this checkout is configured but the supplied IPA lost
+  # those values, rather than shipping a Create profile button that can only
+  # return early as unconfigured.
+  local_watch_config="$repo_root/config/WatchTogether.local.xcconfig"
+  if [[ -f "$local_watch_config" ]] \
+      && grep -Eq '^[[:space:]]*WATCH_TOGETHER_CONVEX_URL[[:space:]]*=[[:space:]]*https:' \
+        "$local_watch_config"; then
+    shipped_convex_url="$(plutil -extract WatchTogetherConvexURL raw -o - \
+      "$work_dir/ipa-Info.plist" 2>/dev/null || true)"
+    [[ "$shipped_convex_url" == https://* ]] || fail \
+      "This checkout configures Watch Together, but the IPA is missing its Convex endpoint"
+
+    if grep -Eq '^[[:space:]]*WATCH_TOGETHER_LIVEKIT_URL[[:space:]]*=[[:space:]]*wss:' \
+        "$local_watch_config"; then
+      shipped_livekit_url="$(plutil -extract WatchTogetherLiveKitURL raw -o - \
+        "$work_dir/ipa-Info.plist" 2>/dev/null || true)"
+      [[ "$shipped_livekit_url" == wss://* ]] || fail \
+        "This checkout configures LiveKit, but the IPA is missing its LiveKit endpoint"
+    fi
+    note "artifact: Watch Together endpoints are present"
+  fi
 
   # The requested IPA is the release artifact and must also be the exact source
   # that is re-signed. Bundle/version/build metadata is not a content identity:
