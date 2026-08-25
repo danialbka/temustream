@@ -30,6 +30,28 @@ struct CatalogSource: Identifiable, Hashable, Sendable {
     let manifestURL: URL
     let preferredType: String
     let preferredCatalogID: String
+
+    var discoveryShelfTitle: String {
+        switch id {
+        case "cinemeta": "Popular Movies"
+        case "cinemeta-series": "Popular Series"
+        default: title
+        }
+    }
+}
+
+private struct CatalogLoadResult: Sendable {
+    let source: CatalogSource
+    let endpoint: AddonEndpoint
+    let manifest: AddonManifest
+    let descriptor: AddonCatalog
+    let items: [MetaItem]
+    let cacheHit: Bool
+}
+
+private struct DetailRequestKey: Hashable, Sendable {
+    let identity: MediaIdentity
+    let endpointURLs: [URL]
 }
 
 struct StreamProviderGroup: Identifiable, Equatable, Sendable {
@@ -44,6 +66,19 @@ struct SearchCatalogGroup: Identifiable, Equatable, Sendable {
     let catalogName: String
     let manifestURL: URL
     let items: [MetaItem]
+}
+
+private struct SearchCatalogAttempt: Sendable {
+    let index: Int
+    let group: SearchCatalogGroup?
+    let succeeded: Bool
+}
+
+private struct SearchProviderOutcome: Sendable {
+    let index: Int
+    let groups: [SearchCatalogGroup]
+    let attemptedRequestCount: Int
+    let successfulRequestCount: Int
 }
 
 struct PlaybackPlan: Sendable {
@@ -93,15 +128,23 @@ struct ContinueWatchingEntry: Identifiable, Equatable, Sendable {
 final class AppModel: ObservableObject {
     @Published private(set) var manifest: AddonManifest?
     @Published private(set) var catalog: [MetaItem] = []
+    @Published private(set) var homeShelves: [DiscoveryShelf] = []
     @Published private(set) var catalogSources: [CatalogSource]
     @Published private(set) var selectedCatalogSourceID: String
     @Published private(set) var isLoadingNextPage = false
     @Published private(set) var searchCatalogs: [SearchCatalogGroup] = []
     @Published private(set) var isSearching = false
     @Published private(set) var activeSearchQuery: String?
+    @Published private(set) var searchFailureMessage: String?
     @Published private(set) var library: [MetaItem] = []
     @Published private(set) var playbackProgress: [String: PlaybackProgress] = [:]
     @Published private(set) var completedPlaybackIdentifiers: Set<String> = []
+    @Published private(set) var viewingProfileSnapshot: ViewingProfileSnapshot?
+    @Published private(set) var mediaRatings: [LocalMediaIdentity: MediaReaction] = [:]
+    @Published private(set) var localRecommendations: [LocalRecommendation] = []
+    @Published private(set) var isLoadingMoreRecommendations = false
+    @Published private(set) var canLoadMoreRecommendations = false
+    @Published private(set) var recentSearches: [String] = []
     @Published private(set) var installedAddons: [URL] = []
     @Published private(set) var accountEmail: String?
     @Published private(set) var accountSyncStatus = "Not signed in"
@@ -116,8 +159,16 @@ final class AppModel: ObservableObject {
     private let primaryEndpoint: AddonEndpoint
     private let libraryDirectory: URL
     private var libraryStore: LibraryStore
-    private let playbackProgressStore: PlaybackProgressStore
-    private let playbackCompletionStore: PlaybackCompletionStore
+    private var playbackProgressStore: PlaybackProgressStore
+    private var playbackCompletionStore: PlaybackCompletionStore
+    private let viewingProfileStore: ViewingProfileStore
+    private var mediaRatingStore: MediaRatingStore
+    private var recommendationHistoryStore: RecommendationHistoryStore
+    private let recentSearchStore = RecentSearchStore()
+    private var recommendationImpressions: [RecommendationImpression] = []
+    private var recommendationPager = LocalRecommendationPager()
+    private var recommendationCandidates: [MetaItem] = []
+    private var profileActivationRevision = 0
     private let accountClient: StremioAccountClient
     private let sessionStore = SessionStore()
     private var session: StremioSession?
@@ -126,6 +177,16 @@ final class AppModel: ObservableObject {
     private var activeCatalogEndpoint: AddonEndpoint?
     private var activeCatalogDescriptor: AddonCatalog?
     private var catalogPaging = CatalogPageAccumulator()
+    private var catalogResponseCache = BoundedCache<String, [MetaItem]>(
+        capacity: 16,
+        timeToLive: 5 * 60
+    )
+    private var detailResponseCache = BoundedCache<DetailRequestKey, MetaItem>(
+        capacity: 96,
+        timeToLive: 15 * 60
+    )
+    private let catalogRequestGate = InFlightRequestGate<String, [MetaItem]>()
+    private let detailRequestGate = InFlightRequestGate<DetailRequestKey, MetaItem>()
     private var currentSearch: String?
     private var catalogLoadRevision = 0
     private var searchRevision = 0
@@ -141,9 +202,20 @@ final class AppModel: ObservableObject {
         catalogSources.first { $0.id == selectedCatalogSourceID }
     }
 
+    var activeViewingProfileID: UUID? {
+        viewingProfileSnapshot?.activeProfileID
+    }
+
+    var activeViewingProfile: ViewingProfile? {
+        viewingProfileSnapshot?.activeProfile
+    }
+
     var continueWatching: [ContinueWatchingEntry] {
         var knownItemsByIdentifier: [String: MetaItem] = [:]
-        let knownItems = catalog + library + searchCatalogs.flatMap(\.items)
+        let knownItems = homeShelves.flatMap(\.items)
+            + catalog
+            + library
+            + searchCatalogs.flatMap(\.items)
         for item in knownItems {
             knownItemsByIdentifier["\(item.type):\(item.id)"] = item
         }
@@ -212,14 +284,25 @@ final class AppModel: ObservableObject {
         ).first!
         let restoredSession = SessionStore().load()
         libraryDirectory = support
+        viewingProfileStore = ViewingProfileStore(rootDirectory: support)
         libraryStore = LibraryStore(
-            fileURL: Self.libraryURL(in: support, for: restoredSession)
+            fileURL: support.appendingPathComponent(
+                ViewingProfileDataFile.anonymousLibrary
+            )
         )
         playbackProgressStore = PlaybackProgressStore(
             fileURL: support.appendingPathComponent("playback-progress.json")
         )
         playbackCompletionStore = PlaybackCompletionStore(
             fileURL: support.appendingPathComponent("playback-completions.json")
+        )
+        mediaRatingStore = MediaRatingStore(
+            fileURL: support.appendingPathComponent(ViewingProfileDataFile.mediaRatings)
+        )
+        recommendationHistoryStore = RecommendationHistoryStore(
+            fileURL: support.appendingPathComponent(
+                ViewingProfileDataFile.recommendationHistory
+            )
         )
         session = restoredSession
         accountEmail = session?.user.email
@@ -237,25 +320,8 @@ final class AppModel: ObservableObject {
             #if targetEnvironment(simulator)
             try await activateEphemeralSimulatorAccountIfRequested()
             #endif
-            library = try await libraryStore.items()
-            do {
-                for progress in try await playbackProgressStore.items() {
-                    currentPlaybackProgress[progress.contentIdentifier] = progress
-                    playbackProgress[progress.contentIdentifier] = progress
-                    playbackProgressUpdateDates[progress.contentIdentifier] = progress.updatedAt
-                }
-            } catch {
-                NSLog("PLAYBACK_PROGRESS load_failed=%@", error.localizedDescription)
-            }
-            do {
-                let completed = Set(
-                    try await playbackCompletionStore.items().map(\.contentIdentifier)
-                )
-                currentCompletedPlaybackIdentifiers = completed
-                completedPlaybackIdentifiers = completed
-            } catch {
-                NSLog("PLAYBACK_COMPLETION load_failed=%@", error.localizedDescription)
-            }
+            let profileSnapshot = try await bootstrapViewingProfiles()
+            try await activateProfileSnapshot(profileSnapshot)
             if ProcessInfo.processInfo.environment["SKELETON_E2E"] == "1" {
                 await runE2E()
             } else {
@@ -269,7 +335,12 @@ final class AppModel: ObservableObject {
                 }
                 #endif
                 await refreshStreamingServerStatus()
-                if session != nil { try await syncAccount() }
+                if session != nil {
+                    // The local app remains usable when Stremio account sync is
+                    // temporarily unavailable. `syncAccount` publishes its own
+                    // failure state without turning startup into a fatal error.
+                    try? await syncAccount()
+                }
                 #if canImport(KSPlayer)
                 if ProcessInfo.processInfo.environment["SKELETON_OBSESSION_STREAM_STRESS"] == "1" {
                     let stressEnvironment = ProcessInfo.processInfo.environment
@@ -287,7 +358,424 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func bootstrapViewingProfiles() async throws -> ViewingProfileSnapshot {
+        try FileManager.default.createDirectory(
+            at: libraryDirectory,
+            withIntermediateDirectories: true
+        )
+        let directoryContents = try FileManager.default.contentsOfDirectory(
+            at: libraryDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+        let legacyNames = Set([
+            ViewingProfileDataFile.anonymousLibrary,
+            ViewingProfileDataFile.playbackProgress,
+            ViewingProfileDataFile.playbackCompletions,
+            ViewingProfileDataFile.mediaRatings,
+            ViewingProfileDataFile.recommendationHistory,
+        ])
+        let restoredAccountLibraryName = session.map {
+            Self.legacyAccountLibraryFileName(for: $0)
+        }
+        let legacyFiles = directoryContents
+            .filter { url in
+                let name = url.lastPathComponent
+                return legacyNames.contains(name)
+                    || name == restoredAccountLibraryName
+            }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map {
+                ViewingProfileLegacyFile(
+                    fileName: $0.lastPathComponent,
+                    sourceURL: $0
+                )
+            }
+        let snapshot = try await viewingProfileStore.bootstrap(
+            migrating: legacyFiles
+        )
+        if let session {
+            try await migrateLegacyAccountLibraryIfNeeded(
+                for: session,
+                in: snapshot
+            )
+        }
+        migrateLegacyRecentSearchesIfNeeded(to: snapshot.primaryProfileID)
+        return snapshot
+    }
+
+    /// Copies only the exact signed-in account's legacy file into the primary
+    /// profile. This is intentionally idempotent and also runs on sign-in, so
+    /// launching signed out cannot permanently skip a later account import.
+    /// The source stays untouched as a recoverable backup.
+    private func migrateLegacyAccountLibraryIfNeeded(
+        for session: StremioSession,
+        in snapshot: ViewingProfileSnapshot
+    ) async throws {
+        let accountFileName = Self.legacyAccountLibraryFileName(for: session)
+        let directory = try await viewingProfileStore.dataDirectoryURL(
+            for: snapshot.primaryProfileID
+        )
+        let sourceURL = libraryDirectory.appendingPathComponent(accountFileName)
+        let destinationURL = directory.appendingPathComponent(accountFileName)
+        guard FileManager.default.fileExists(atPath: sourceURL.path),
+              !FileManager.default.fileExists(atPath: destinationURL.path)
+        else {
+            return
+        }
+
+        let temporaryURL = directory.appendingPathComponent(
+            ".\(accountFileName).\(UUID().uuidString).migrating"
+        )
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: temporaryURL)
+            try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            throw error
+        }
+    }
+
+    private static func legacyAccountLibraryFileName(
+        for session: StremioSession
+    ) -> String {
+        let identity = session.user.id ?? session.user.email ?? "signed-in"
+        let encoded = Data(identity.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        return "library-account-\(encoded).json"
+    }
+
+    /// Loads every profile-owned store before publishing any of it. SwiftUI
+    /// therefore observes one coherent profile rather than a mixture of the
+    /// old library and the new profile's progress or ratings.
+    private func activateProfileSnapshot(
+        _ snapshot: ViewingProfileSnapshot
+    ) async throws {
+        profileActivationRevision += 1
+        let revision = profileActivationRevision
+        let profileID = snapshot.activeProfileID
+        let profileDirectory = try await viewingProfileStore.dataDirectoryURL(
+            for: profileID
+        )
+        let libraryFileName: String
+        if snapshot.activeProfileAllowsAccountLibrarySync, let session {
+            libraryFileName = Self.legacyAccountLibraryFileName(for: session)
+        } else {
+            libraryFileName = ViewingProfileDataFile.anonymousLibrary
+        }
+        let nextLibraryStore = LibraryStore(
+            fileURL: profileDirectory.appendingPathComponent(libraryFileName)
+        )
+        let nextProgressStore = PlaybackProgressStore(
+            fileURL: profileDirectory.appendingPathComponent(
+                ViewingProfileDataFile.playbackProgress
+            )
+        )
+        let nextCompletionStore = PlaybackCompletionStore(
+            fileURL: profileDirectory.appendingPathComponent(
+                ViewingProfileDataFile.playbackCompletions
+            )
+        )
+        let nextRatingStore = MediaRatingStore(
+            fileURL: profileDirectory.appendingPathComponent(
+                ViewingProfileDataFile.mediaRatings
+            )
+        )
+        let nextRecommendationStore = RecommendationHistoryStore(
+            fileURL: profileDirectory.appendingPathComponent(
+                ViewingProfileDataFile.recommendationHistory
+            )
+        )
+
+        let loadedLibrary = await loadProfileValue(
+            label: "library",
+            fallback: []
+        ) { try await nextLibraryStore.items() }
+        let loadedProgress = await loadProfileValue(
+            label: "playback-progress",
+            fallback: []
+        ) { try await nextProgressStore.items() }
+        let loadedCompletions = await loadProfileValue(
+            label: "playback-completions",
+            fallback: []
+        ) { try await nextCompletionStore.items() }
+        let loadedRatings = await loadProfileValue(
+            label: "media-ratings",
+            fallback: []
+        ) { try await nextRatingStore.items() }
+        let loadedRecommendationHistory = await loadProfileValue(
+            label: "recommendation-history",
+            fallback: []
+        ) { try await nextRecommendationStore.items() }
+        guard revision == profileActivationRevision else { return }
+
+        libraryStore = nextLibraryStore
+        playbackProgressStore = nextProgressStore
+        playbackCompletionStore = nextCompletionStore
+        mediaRatingStore = nextRatingStore
+        recommendationHistoryStore = nextRecommendationStore
+
+        library = loadedLibrary
+        currentPlaybackProgress = Dictionary(
+            uniqueKeysWithValues: loadedProgress.map {
+                ($0.contentIdentifier, $0)
+            }
+        )
+        playbackProgress = currentPlaybackProgress
+        currentCompletedPlaybackIdentifiers = Set(
+            loadedCompletions.map(\.contentIdentifier)
+        )
+        completedPlaybackIdentifiers = currentCompletedPlaybackIdentifiers
+        playbackProgressUpdateDates = Dictionary(
+            uniqueKeysWithValues: loadedProgress.map {
+                ($0.contentIdentifier, $0.updatedAt)
+            }
+        )
+        mediaRatings = Dictionary(
+            uniqueKeysWithValues: loadedRatings.map { ($0.id, $0.reaction) }
+        )
+        recommendationImpressions = loadedRecommendationHistory
+        clearRecommendationPagination()
+        recentSearches = recentSearchStore.queries(
+            profileID: profileID.uuidString
+        )
+        homeShelves.removeAll { shelf in
+            shelf.id == "for-you" || shelf.id == "my-list"
+        }
+        viewingProfileSnapshot = snapshot
+
+        if session != nil, !snapshot.activeProfileAllowsAccountLibrarySync {
+            accountSyncStatus = "Local profile · Add-ons still sync"
+        }
+    }
+
+    private func loadProfileValue<Value: Sendable>(
+        label: String,
+        fallback: Value,
+        operation: () async throws -> Value
+    ) async -> Value {
+        do {
+            return try await operation()
+        } catch {
+            NSLog(
+                "VIEWING_PROFILE load_failed store=%@ error=%@",
+                label,
+                error.localizedDescription
+            )
+            return fallback
+        }
+    }
+
+    func createViewingProfile(
+        name: String,
+        avatar: ViewingProfileAvatar
+    ) async throws {
+        let before = Set(viewingProfileSnapshot?.profiles.map(\.id) ?? [])
+        let created = try await viewingProfileStore.create(
+            name: name,
+            avatar: avatar
+        )
+        guard let newProfileID = created.profiles.first(where: {
+            !before.contains($0.id)
+        })?.id else {
+            viewingProfileSnapshot = created
+            return
+        }
+        let activated = try await viewingProfileStore.activate(id: newProfileID)
+        try await activateProfileSnapshot(activated)
+        await reloadHomeAfterProfileMutation()
+    }
+
+    func updateViewingProfile(
+        id: UUID,
+        name: String,
+        avatar: ViewingProfileAvatar
+    ) async throws {
+        viewingProfileSnapshot = try await viewingProfileStore.update(
+            id: id,
+            name: name,
+            avatar: avatar
+        )
+        if id == activeViewingProfileID {
+            await reloadHomeAfterProfileMutation()
+        }
+    }
+
+    func selectViewingProfile(id: UUID) async throws {
+        guard id != activeViewingProfileID else { return }
+        let snapshot = try await viewingProfileStore.activate(id: id)
+        try await activateProfileSnapshot(snapshot)
+        // Profile activation is a local transaction. Publish it immediately;
+        // a network outage must not leave the picker open as though selection
+        // failed after the active profile has already changed.
+        await reloadHomeAfterProfileMutation()
+        if session != nil {
+            try? await syncAccount()
+        }
+    }
+
+    func activateViewingProfile(id: UUID) async throws {
+        try await selectViewingProfile(id: id)
+    }
+
+    func archiveViewingProfile(id: UUID) async throws {
+        let previousActiveID = activeViewingProfileID
+        let snapshot = try await viewingProfileStore.archive(id: id)
+        if snapshot.activeProfileID != previousActiveID {
+            try await activateProfileSnapshot(snapshot)
+            await reloadHomeAfterProfileMutation()
+            if session != nil {
+                try? await syncAccount()
+            }
+        } else {
+            viewingProfileSnapshot = snapshot
+        }
+    }
+
+    func restoreViewingProfile(id: UUID) async throws {
+        viewingProfileSnapshot = try await viewingProfileStore.restore(id: id)
+    }
+
+    func mediaReaction(for item: MetaItem) -> MediaReaction? {
+        mediaRatings[LocalMediaIdentity(item: item)]
+    }
+
+    func reaction(for item: MetaItem) -> MediaReaction? {
+        mediaReaction(for: item)
+    }
+
+    func setMediaReaction(
+        _ reaction: MediaReaction?,
+        for item: MetaItem
+    ) async throws {
+        guard let profileID = activeViewingProfileID else { return }
+        let activeStore = mediaRatingStore
+        let ratings = try await activeStore.set(reaction, for: item)
+        guard activeStore === mediaRatingStore,
+              profileID == activeViewingProfileID
+        else { return }
+        mediaRatings = Dictionary(
+            uniqueKeysWithValues: ratings.map { ($0.id, $0.reaction) }
+        )
+        await reloadHomeAfterProfileMutation()
+    }
+
+    func setReaction(
+        _ reaction: MediaReaction?,
+        for item: MetaItem
+    ) async throws {
+        try await setMediaReaction(reaction, for: item)
+    }
+
+    func resetViewingProfilePersonalization() async throws {
+        guard let profileID = activeViewingProfileID else { return }
+        let ratingsStore = mediaRatingStore
+        let historyStore = recommendationHistoryStore
+        async let resetRatings = ratingsStore.reset()
+        async let resetHistory = historyStore.reset()
+        _ = try await (resetRatings, resetHistory)
+        guard ratingsStore === mediaRatingStore,
+              historyStore === recommendationHistoryStore,
+              profileID == activeViewingProfileID
+        else { return }
+        mediaRatings = [:]
+        recommendationImpressions = []
+        clearRecommendationPagination()
+        await reloadHomeAfterProfileMutation()
+    }
+
+    func recordRecentSearch(_ query: String) {
+        guard let profileID = activeViewingProfileID else { return }
+        let namespace = profileID.uuidString
+        recentSearchStore.record(query, profileID: namespace)
+        recentSearches = recentSearchStore.queries(profileID: namespace)
+    }
+
+    func clearRecentSearches() {
+        guard let profileID = activeViewingProfileID else { return }
+        recentSearchStore.clear(profileID: profileID.uuidString)
+        recentSearches = []
+    }
+
+    func recordRecommendationImpression(for item: MetaItem) async {
+        guard let profileID = activeViewingProfileID else { return }
+        let identity = LocalMediaIdentity(item: item)
+        guard let recommendation = localRecommendations.first(where: {
+            $0.id == identity
+        }) else { return }
+
+        let historyStore = recommendationHistoryStore
+        guard let updated = try? await historyStore.record([recommendation]),
+              historyStore === recommendationHistoryStore,
+              profileID == activeViewingProfileID,
+              localRecommendations.contains(where: { $0.id == identity })
+        else { return }
+        recommendationImpressions = updated
+    }
+
+    private func migrateLegacyRecentSearchesIfNeeded(to profileID: UUID) {
+        let defaults = UserDefaults.standard
+        let migrationKey = "viewingProfiles.recentSearchMigration.v1"
+        guard !defaults.bool(forKey: migrationKey) else { return }
+        let legacy = recentSearchStore.queries(profileID: "default")
+        if recentSearchStore.queries(profileID: profileID.uuidString).isEmpty {
+            for query in legacy.reversed() {
+                recentSearchStore.record(query, profileID: profileID.uuidString)
+            }
+        }
+        defaults.set(true, forKey: migrationKey)
+    }
+
+    private func reloadHomeAfterProfileMutation() async {
+        guard started,
+              ProcessInfo.processInfo.environment["SKELETON_E2E"] != "1"
+        else { return }
+        do {
+            try await loadHome()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     #if targetEnvironment(simulator)
+    /// Deterministic, network-free recommendation shelf used by the pagination
+    /// UI test. It exercises the same pager and Home shelf that production uses.
+    func prepareRecommendationPaginationFixture(totalCount: Int = 36) {
+        let recommendations = (0..<max(totalCount, 0)).map { index in
+            let number = index + 1
+            let item = MetaItem(
+                id: "recommendation-fixture-\(number)",
+                type: index.isMultiple(of: 3) ? "series" : "movie",
+                name: "Recommendation \(number)",
+                description: "A deterministic personalized pick for infinite-scroll verification.",
+                releaseInfo: "2026",
+                genres: [index.isMultiple(of: 2) ? "Drama" : "Adventure"]
+            )
+            return LocalRecommendation(
+                item: item,
+                score: Double(totalCount - index),
+                reasons: ["Because you enjoyed Fixture Story"]
+            )
+        }
+        catalogPaging.reset()
+        catalogPaging.append([], supportsSkip: false)
+        recommendationCandidates = recommendations.map(\.item)
+        recommendationPager.reset(with: recommendations)
+        publishRecommendationPage(syncShelf: false)
+        homeShelves = [
+            DiscoveryShelf(
+                id: "for-you",
+                title: "For You",
+                subtitle: "Because you enjoyed Fixture Story",
+                items: localRecommendations.map(\.item)
+            ),
+        ]
+        isLoading = false
+        errorMessage = nil
+    }
+
     /// Allows real-account provider audits without writing the supplied password or
     /// resulting session to disk. The session exists only for this simulator process.
     private func activateEphemeralSimulatorAccountIfRequested() async throws {
@@ -301,7 +789,6 @@ final class AppModel: ObservableObject {
         let signedIn = try await accountClient.login(email: email, password: password)
         session = signedIn
         accountEmail = signedIn.user.email ?? email
-        await selectLibraryStore(for: signedIn)
         NSLog("SIMULATOR_ACCOUNT_AUDIT authenticated ephemeral=1")
     }
     #endif
@@ -316,6 +803,10 @@ final class AppModel: ObservableObject {
     func loadHome(search: String? = nil) async throws {
         catalogLoadRevision += 1
         let revision = catalogLoadRevision
+        let traceID = PerformanceMilestoneRecorder.shared.begin(
+            flow: .catalog,
+            identity: selectedCatalogSourceID
+        )
         isLoading = true
         isLoadingNextPage = false
         errorMessage = nil
@@ -328,36 +819,343 @@ final class AppModel: ObservableObject {
         guard let source = selectedCatalogSource else {
             throw E2EFailure("No selected catalog source")
         }
-        let endpoint = try AddonEndpoint(manifestURL: source.manifestURL)
-        let client = AddonClient(endpoint: endpoint)
-        let loadedManifest = try await client.manifest()
-        addonManifestCache[source.manifestURL] = loadedManifest
-        guard let descriptor = catalogDescriptor(
-            in: loadedManifest,
-            source: source,
-            search: currentSearch
-        ) else {
-            guard revision == catalogLoadRevision else { return }
-            manifest = loadedManifest
-            catalog = []
-            return
-        }
-        let items = try await client.catalog(
-            type: descriptor.type,
-            id: descriptor.id,
+        let selectedResult = try await loadCatalogResult(
+            for: source,
             search: currentSearch
         )
         guard revision == catalogLoadRevision, !Task.isCancelled else { return }
 
         catalogPaging.reset()
-        catalogPaging.append(items, supportsSkip: descriptor.supportsSkip)
-        activeCatalogEndpoint = endpoint
-        activeCatalogDescriptor = descriptor
-        manifest = loadedManifest
+        catalogPaging.append(
+            selectedResult.items,
+            supportsSkip: selectedResult.descriptor.supportsSkip
+        )
+        activeCatalogEndpoint = selectedResult.endpoint
+        activeCatalogDescriptor = selectedResult.descriptor
+        manifest = selectedResult.manifest
         catalog = catalogPaging.items
+
+        let companionSources = catalogSources.filter { candidate in
+            candidate.id != source.id
+                && (candidate.id == "cinemeta" || candidate.id == "cinemeta-series")
+        }
+        let companionResults = await loadCompanionCatalogs(companionSources)
+        guard revision == catalogLoadRevision, !Task.isCancelled else { return }
+        await rebuildHomeShelves(
+            selected: selectedResult,
+            companions: companionResults,
+            revision: revision
+        )
+        guard revision == catalogLoadRevision, !Task.isCancelled else { return }
+        let elapsed = PerformanceMilestoneRecorder.shared.mark(.catalogReady, for: traceID)
+        NSLog(
+            "CATALOG_BENCHMARK ready_ms=%.1f selected_cache=%@ shelves=%ld",
+            elapsed ?? 0,
+            selectedResult.cacheHit ? "hit" : "miss",
+            homeShelves.count
+        )
     }
 
-    func searchAllCatalogs(_ input: String) async {
+    private func loadCatalogResult(
+        for source: CatalogSource,
+        search: String?
+    ) async throws -> CatalogLoadResult {
+        let endpoint = try AddonEndpoint(manifestURL: source.manifestURL)
+        let loadedManifest: AddonManifest
+        if let cached = addonManifestCache[source.manifestURL] {
+            loadedManifest = cached
+        } else {
+            loadedManifest = try await Self.withAddonTimeout {
+                try await AddonClient(endpoint: endpoint).manifest()
+            }
+            addonManifestCache[source.manifestURL] = loadedManifest
+        }
+        guard let descriptor = catalogDescriptor(
+            in: loadedManifest,
+            source: source,
+            search: search
+        ) else {
+            throw E2EFailure("No compatible catalog in \(loadedManifest.name)")
+        }
+
+        let cacheKey = [
+            source.manifestURL.absoluteString,
+            descriptor.type,
+            descriptor.id,
+            search ?? "",
+        ].joined(separator: "|")
+        if let cached = catalogResponseCache.value(forKey: cacheKey) {
+            return CatalogLoadResult(
+                source: source,
+                endpoint: endpoint,
+                manifest: loadedManifest,
+                descriptor: descriptor,
+                items: cached,
+                cacheHit: true
+            )
+        }
+
+        let manifestURL = source.manifestURL
+        let descriptorType = descriptor.type
+        let descriptorID = descriptor.id
+        let loadedItems = try await catalogRequestGate.run(key: cacheKey) {
+            let requestEndpoint = try AddonEndpoint(manifestURL: manifestURL)
+            return try await AddonClient(endpoint: requestEndpoint).catalog(
+                type: descriptorType,
+                id: descriptorID,
+                search: search
+            )
+        }
+        catalogResponseCache.insert(loadedItems, forKey: cacheKey)
+        return CatalogLoadResult(
+            source: source,
+            endpoint: endpoint,
+            manifest: loadedManifest,
+            descriptor: descriptor,
+            items: loadedItems,
+            cacheHit: false
+        )
+    }
+
+    private func loadCompanionCatalogs(
+        _ sources: [CatalogSource]
+    ) async -> [CatalogLoadResult] {
+        await withTaskGroup(of: (Int, CatalogLoadResult?).self) { group in
+            for (index, source) in sources.enumerated() {
+                group.addTask {
+                    let result = try? await self.loadCatalogResult(
+                        for: source,
+                        search: nil
+                    )
+                    return (index, result)
+                }
+            }
+            var loaded: [(Int, CatalogLoadResult)] = []
+            for await (index, result) in group {
+                if let result { loaded.append((index, result)) }
+            }
+            return loaded.sorted { $0.0 < $1.0 }.map(\.1)
+        }
+    }
+
+    private func rebuildHomeShelves(
+        selected: CatalogLoadResult,
+        companions: [CatalogLoadResult],
+        revision: Int
+    ) async {
+        let candidates = selected.items + companions.flatMap(\.items) + library
+        await refreshLocalRecommendations(
+            candidates: candidates,
+            catalogRevision: revision,
+            resetPagination: true
+        )
+        guard revision == catalogLoadRevision, !Task.isCancelled else { return }
+
+        var shelves: [DiscoveryShelf] = []
+        if !localRecommendations.isEmpty {
+            shelves.append(
+                DiscoveryShelf(
+                    id: "for-you",
+                    title: activeViewingProfile.map { "For \($0.name)" } ?? "For You",
+                    subtitle: localRecommendations.first?.reasons.first,
+                    items: localRecommendations.map(\.item)
+                )
+            )
+        }
+        if !library.isEmpty {
+            shelves.append(
+                DiscoveryShelf(
+                    id: "my-list",
+                    title: "My List",
+                    subtitle: "Saved by this profile",
+                    items: library
+                )
+            )
+        }
+        shelves.append(
+                DiscoveryShelf(
+                    id: "selected-catalog",
+                    title: selected.source.discoveryShelfTitle,
+                    subtitle: selected.source.subtitle,
+                    items: selected.items
+            )
+        )
+        let recentItems = DiscoveryShelfBuilder.recentItems(from: candidates)
+        if !recentItems.isEmpty {
+            shelves.append(
+                DiscoveryShelf(
+                    id: "new-and-recent",
+                    title: "New & Recent",
+                    subtitle: "Recent and upcoming",
+                    items: recentItems
+                )
+            )
+        }
+        shelves.append(contentsOf: companions.map { result in
+            DiscoveryShelf(
+                id: "source:\(result.source.id)",
+                title: result.source.preferredType == "series"
+                    ? "Popular Series"
+                    : "Popular Movies",
+                subtitle: result.source.subtitle,
+                items: result.items
+            )
+        })
+
+        shelves.append(
+            contentsOf: DiscoveryShelfBuilder.genreShelves(
+                from: candidates,
+                excluding: []
+            )
+        )
+        // A title may legitimately appear in Popular, My List, Recent, and a
+        // genre row. Dedupe only within each row so one discovery path does not
+        // erase another.
+        guard revision == catalogLoadRevision, !Task.isCancelled else { return }
+        homeShelves = DiscoveryShelfBuilder.deduplicated(shelves, globally: false)
+    }
+
+    private func refreshLocalRecommendations(
+        candidates: [MetaItem],
+        catalogRevision: Int,
+        resetPagination: Bool
+    ) async {
+        guard let profileID = activeViewingProfileID else {
+            clearRecommendationPagination()
+            return
+        }
+        let uniqueCandidates = Self.uniqueMediaItems(candidates)
+        recommendationCandidates = uniqueCandidates
+        let ratingsStore = mediaRatingStore
+        let historyStore = recommendationHistoryStore
+        let completionStore = playbackCompletionStore
+        var knownItems: [LocalMediaIdentity: MetaItem] = [:]
+        for item in uniqueCandidates + library {
+            knownItems[LocalMediaIdentity(item: item)] = item
+        }
+        let libraryActivity = library.map {
+            RecommendationActivity(item: $0, kind: .addedToLibrary)
+        }
+        let playbackActivity: [RecommendationActivity] = currentPlaybackProgress.values.compactMap { progress in
+            guard let metadata = progress.mediaMetadata,
+                  let item = knownItems[
+                    LocalMediaIdentity(id: metadata.mediaID, type: metadata.mediaType)
+                  ]
+            else { return nil }
+            return RecommendationActivity(
+                item: item,
+                kind: .watched,
+                occurredAt: progress.updatedAt
+            )
+        }
+        // `mediaRatings` is optimized for synchronous SwiftUI lookup; recover
+        // the richer stored snapshots for recommendation signals off the main path.
+        let storedRatings = (try? await ratingsStore.items()) ?? []
+        let storedCompletions = (try? await completionStore.items()) ?? []
+        guard ratingsStore === mediaRatingStore,
+              historyStore === recommendationHistoryStore,
+              completionStore === playbackCompletionStore,
+              catalogRevision == catalogLoadRevision,
+              profileID == activeViewingProfileID
+        else { return }
+        let activelyWatchedIDs = Set(playbackActivity.map { $0.media.identity })
+        var latestCompleted: [LocalMediaIdentity: (item: MetaItem, date: Date)] = [:]
+        for completion in storedCompletions {
+            guard let completedItem = recommendationItem(
+                for: completion.contentIdentifier,
+                knownItems: knownItems
+            ) else { continue }
+            let identity = LocalMediaIdentity(item: completedItem)
+            guard !activelyWatchedIDs.contains(identity),
+                  (latestCompleted[identity]?.date ?? .distantPast) < completion.completedAt
+            else { continue }
+            latestCompleted[identity] = (completedItem, completion.completedAt)
+        }
+        let completionActivity = latestCompleted.values.map { completed in
+            RecommendationActivity(
+                item: completed.item,
+                kind: .completed,
+                occurredAt: completed.date
+            )
+        }
+        let activity = libraryActivity + playbackActivity + completionActivity
+        guard !activity.isEmpty || !storedRatings.isEmpty else {
+            clearRecommendationPagination()
+            return
+        }
+        let refreshed = LocalRecommendationEngine.recommend(
+            candidates: uniqueCandidates,
+            activity: activity,
+            ratings: storedRatings,
+            impressions: recommendationImpressions,
+            limit: .max
+        )
+        if resetPagination {
+            recommendationPager.reset(with: refreshed)
+        } else {
+            recommendationPager.appendRanked(refreshed)
+        }
+        publishRecommendationPage(syncShelf: false)
+    }
+
+    private func clearRecommendationPagination() {
+        recommendationPager.clear()
+        recommendationCandidates = []
+        localRecommendations = []
+        isLoadingMoreRecommendations = false
+        canLoadMoreRecommendations = false
+    }
+
+    private func publishRecommendationPage(syncShelf: Bool) {
+        localRecommendations = recommendationPager.visibleRecommendations
+        canLoadMoreRecommendations = !localRecommendations.isEmpty
+            && (recommendationPager.canRevealMore || catalogPaging.canLoadMore)
+        if syncShelf {
+            updateRecommendationShelfIfPresent()
+        }
+    }
+
+    private func updateRecommendationShelfIfPresent() {
+        guard let shelfIndex = homeShelves.firstIndex(where: { $0.id == "for-you" }) else {
+            return
+        }
+        var shelves = homeShelves
+        if localRecommendations.isEmpty {
+            shelves.remove(at: shelfIndex)
+        } else {
+            let existing = shelves[shelfIndex]
+            shelves[shelfIndex] = DiscoveryShelf(
+                id: existing.id,
+                title: existing.title,
+                subtitle: localRecommendations.first?.reasons.first ?? existing.subtitle,
+                items: localRecommendations.map(\.item)
+            )
+        }
+        homeShelves = shelves
+    }
+
+    private static func uniqueMediaItems(_ items: [MetaItem]) -> [MetaItem] {
+        var seen = Set<LocalMediaIdentity>()
+        return items.filter { seen.insert(LocalMediaIdentity(item: $0)).inserted }
+    }
+
+    private func recommendationItem(
+        for contentIdentifier: String,
+        knownItems: [LocalMediaIdentity: MetaItem]
+    ) -> MetaItem? {
+        if let episodeIdentity = Self.legacyEpisodeIdentity(contentIdentifier) {
+            return knownItems[
+                LocalMediaIdentity(id: episodeIdentity.seriesID, type: "series")
+            ]
+        }
+        guard let separator = contentIdentifier.firstIndex(of: ":") else { return nil }
+        let type = String(contentIdentifier[..<separator])
+        let idStart = contentIdentifier.index(after: separator)
+        let id = String(contentIdentifier[idStart...])
+        return knownItems[LocalMediaIdentity(id: id, type: type)]
+    }
+
+    func searchAllCatalogs(_ input: String, mediaType: String? = nil) async {
         let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             clearSearch()
@@ -369,8 +1167,21 @@ final class AppModel: ObservableObject {
         activeSearchQuery = query
         searchCatalogs = []
         isSearching = true
+        searchFailureMessage = nil
         errorMessage = nil
-        let requestedType = selectedCatalogSource?.preferredType ?? "movie"
+        let requestedType = mediaType ?? selectedCatalogSource?.preferredType ?? "movie"
+        let localMatches = DiscoveryShelfBuilder.matchingItems(
+            homeShelves.flatMap(\.items) + catalog + library,
+            query: query,
+            mediaType: requestedType
+        )
+        let localGroup = localMatches.isEmpty ? nil : SearchCatalogGroup(
+            id: "local-metadata#\(requestedType)",
+            providerName: "TemuStream",
+            catalogName: "Titles, People & Genres",
+            manifestURL: primaryEndpoint.manifestURL,
+            items: localMatches
+        )
 
         var urls: [URL] = []
         var seenURLs = Set<URL>()
@@ -382,12 +1193,17 @@ final class AppModel: ObservableObject {
             knownManifests[descriptor.transportUrl] = descriptor.manifest
         }
 
-        let loaded = await withTaskGroup(of: (Int, [SearchCatalogGroup]).self) { group in
+        let outcomes = await withTaskGroup(of: SearchProviderOutcome.self) { group in
             for (providerIndex, url) in urls.enumerated() {
                 let knownManifest = knownManifests[url]
                 group.addTask {
                     guard let endpoint = try? AddonEndpoint(manifestURL: url) else {
-                        return (providerIndex, [])
+                        return SearchProviderOutcome(
+                            index: providerIndex,
+                            groups: [],
+                            attemptedRequestCount: 1,
+                            successfulRequestCount: 0
+                        )
                     }
                     let client = AddonClient(endpoint: endpoint)
                     let manifest: AddonManifest
@@ -396,7 +1212,14 @@ final class AppModel: ObservableObject {
                     } else {
                         guard let loadedManifest = try? await Self.withAddonTimeout({
                             try await client.manifest()
-                        }) else { return (providerIndex, []) }
+                        }) else {
+                            return SearchProviderOutcome(
+                                index: providerIndex,
+                                groups: [],
+                                attemptedRequestCount: 1,
+                                successfulRequestCount: 0
+                            )
+                        }
                         manifest = loadedManifest
                     }
 
@@ -405,61 +1228,96 @@ final class AppModel: ObservableObject {
                             && descriptor.type == requestedType
                     }
                     let results = await withTaskGroup(
-                        of: (Int, SearchCatalogGroup?).self
+                        of: SearchCatalogAttempt.self
                     ) { catalogGroup in
                         for (catalogIndex, descriptor) in searchable.enumerated() {
                             catalogGroup.addTask {
-                                guard let items = try? await Self.withAddonTimeout({
-                                    try await client.catalog(
-                                        type: descriptor.type,
-                                        id: descriptor.id,
-                                        search: query
-                                    )
-                                }), !items.isEmpty else { return (catalogIndex, nil) }
+                                do {
+                                    let items = try await Self.withAddonTimeout {
+                                        try await client.catalog(
+                                            type: descriptor.type,
+                                            id: descriptor.id,
+                                            search: query
+                                        )
+                                    }
+                                    guard !items.isEmpty else {
+                                        return SearchCatalogAttempt(
+                                            index: catalogIndex,
+                                            group: nil,
+                                            succeeded: true
+                                        )
+                                    }
 
-                                var seenItems = Set<String>()
-                                let uniqueItems = items.filter {
-                                    seenItems.insert("\($0.type)|\($0.id)").inserted
-                                }
-                                return (
-                                    catalogIndex,
-                                    SearchCatalogGroup(
-                                        id: "\(url.absoluteString)#\(descriptor.type)#\(descriptor.id)",
-                                        providerName: manifest.name,
-                                        catalogName: descriptor.name ?? descriptor.id,
-                                        manifestURL: url,
-                                        items: uniqueItems
+                                    var seenItems = Set<String>()
+                                    let uniqueItems = items.filter {
+                                        seenItems.insert("\($0.type)|\($0.id)").inserted
+                                    }
+                                    return SearchCatalogAttempt(
+                                        index: catalogIndex,
+                                        group: SearchCatalogGroup(
+                                            id: "\(url.absoluteString)#\(descriptor.type)#\(descriptor.id)",
+                                            providerName: manifest.name,
+                                            catalogName: descriptor.name ?? descriptor.id,
+                                            manifestURL: url,
+                                            items: uniqueItems
+                                        ),
+                                        succeeded: true
                                     )
-                                )
+                                } catch {
+                                    return SearchCatalogAttempt(
+                                        index: catalogIndex,
+                                        group: nil,
+                                        succeeded: false
+                                    )
+                                }
                             }
                         }
-                        var catalogs: [(Int, SearchCatalogGroup)] = []
-                        for await (catalogIndex, result) in catalogGroup {
-                            if let result { catalogs.append((catalogIndex, result)) }
+                        var attempts: [SearchCatalogAttempt] = []
+                        for await attempt in catalogGroup {
+                            attempts.append(attempt)
                         }
-                        return catalogs.sorted { $0.0 < $1.0 }.map(\.1)
+                        return attempts
                     }
-                    return (providerIndex, results)
+                    return SearchProviderOutcome(
+                        index: providerIndex,
+                        groups: results.sorted { $0.index < $1.index }.compactMap(\.group),
+                        attemptedRequestCount: searchable.count,
+                        successfulRequestCount: results.filter(\.succeeded).count
+                    )
                 }
             }
 
-            var providers: [(Int, [SearchCatalogGroup])] = []
+            var providers: [SearchProviderOutcome] = []
             for await result in group { providers.append(result) }
-            return providers.sorted { $0.0 < $1.0 }.flatMap(\.1)
+            return providers.sorted { $0.index < $1.index }
         }
 
         guard revision == searchRevision, activeSearchQuery == query, !Task.isCancelled else {
             return
         }
-        searchCatalogs = loaded
+        searchCatalogs = localGroup.map { [$0] } ?? []
+        searchCatalogs.append(contentsOf: outcomes.flatMap(\.groups))
+        let attemptedRequestCount = outcomes.reduce(0) {
+            $0 + $1.attemptedRequestCount
+        }
+        let successfulRequestCount = outcomes.reduce(0) {
+            $0 + $1.successfulRequestCount
+        }
+        if attemptedRequestCount > 0, successfulRequestCount == 0 {
+            searchFailureMessage = "Installed add-ons did not respond to this search. Check your connection and try again."
+        } else {
+            searchFailureMessage = nil
+        }
         isSearching = false
     }
 
     func clearSearch() {
-        guard activeSearchQuery != nil || isSearching || !searchCatalogs.isEmpty else { return }
+        guard activeSearchQuery != nil || isSearching || !searchCatalogs.isEmpty
+            || searchFailureMessage != nil else { return }
         searchRevision += 1
         activeSearchQuery = nil
         searchCatalogs = []
+        searchFailureMessage = nil
         isSearching = false
     }
 
@@ -470,6 +1328,49 @@ final class AppModel: ObservableObject {
 
         do {
             try await loadNextPage()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func loadMoreRecommendationsIfNeeded(currentItem: MetaItem) async {
+        guard let index = localRecommendations.firstIndex(where: {
+            $0.item.id == currentItem.id && $0.item.type == currentItem.type
+        }), index >= max(0, localRecommendations.count - 4) else { return }
+
+        await loadMoreRecommendations()
+    }
+
+    private func loadMoreRecommendations() async {
+        guard !isLoading, !isLoadingMoreRecommendations,
+              canLoadMoreRecommendations
+        else { return }
+
+        if recommendationPager.canRevealMore {
+            recommendationPager.revealNextPage()
+            publishRecommendationPage(syncShelf: true)
+            return
+        }
+
+        guard !isLoadingNextPage else { return }
+        guard catalogPaging.canLoadMore else {
+            canLoadMoreRecommendations = false
+            return
+        }
+
+        isLoadingMoreRecommendations = true
+        defer {
+            isLoadingMoreRecommendations = false
+            canLoadMoreRecommendations = !localRecommendations.isEmpty
+                && (recommendationPager.canRevealMore || catalogPaging.canLoadMore)
+        }
+
+        do {
+            try await loadNextPage()
+            if recommendationPager.canRevealMore {
+                recommendationPager.revealNextPage()
+            }
+            publishRecommendationPage(syncShelf: true)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -497,48 +1398,119 @@ final class AppModel: ObservableObject {
         guard revision == catalogLoadRevision, !Task.isCancelled else { return }
         catalogPaging.append(page, supportsSkip: descriptor.supportsSkip)
         catalog = catalogPaging.items
+        if let shelfIndex = homeShelves.firstIndex(where: {
+            $0.id == "selected-catalog"
+        }) {
+            var shelves = homeShelves
+            let selectedShelf = shelves[shelfIndex]
+            shelves[shelfIndex] = DiscoveryShelf(
+                id: selectedShelf.id,
+                title: selectedShelf.title,
+                subtitle: selectedShelf.subtitle,
+                items: catalog
+            )
+            homeShelves = shelves
+        }
+
+        if !recommendationCandidates.isEmpty {
+            await refreshLocalRecommendations(
+                candidates: recommendationCandidates + page,
+                catalogRevision: revision,
+                resetPagination: false
+            )
+            guard revision == catalogLoadRevision, !Task.isCancelled else { return }
+            updateRecommendationShelfIfPresent()
+        }
+        canLoadMoreRecommendations = !localRecommendations.isEmpty
+            && (recommendationPager.canRevealMore || catalogPaging.canLoadMore)
     }
 
     func details(
         for item: MetaItem,
         preferredManifestURL: URL? = nil
     ) async -> MetaItem {
-        let startedAt = ProcessInfo.processInfo.systemUptime
-        let preferredEndpoint = preferredManifestURL.flatMap {
-            try? AddonEndpoint(manifestURL: $0)
-        }
-        var endpoints = [preferredEndpoint, activeCatalogEndpoint, primaryEndpoint]
-            .compactMap { $0 }
-        var seen = Set<URL>()
-        endpoints = endpoints.filter { seen.insert($0.manifestURL).inserted }
-        var resolvedDetail: MetaItem?
-        for endpoint in endpoints {
-            if let detail = try? await AddonClient(endpoint: endpoint)
-                .meta(type: item.type, id: item.id) {
-                resolvedDetail = resolvedDetail?.fillingTrailerMetadata(from: detail)
-                    ?? detail
-                if resolvedDetail?.preferredTrailerURL != nil {
-                    break
-                }
-            }
-        }
-        if let resolvedDetail {
-            NSLog(
-                "DETAIL_BENCHMARK elapsed_ms=%.1f endpoints=%ld result=remote",
-                (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
-                endpoints.count
-            )
-            return resolvedDetail
-        }
-        NSLog(
-            "DETAIL_BENCHMARK elapsed_ms=%.1f endpoints=%ld result=seed",
-            (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
-            endpoints.count
+        let traceID = PerformanceMilestoneRecorder.shared.begin(
+            flow: .detail,
+            identity: "\(item.type):\(item.id)"
         )
-        return item
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let identity = MediaIdentity(item)
+        let candidateEndpointURLs = [
+            preferredManifestURL,
+            activeCatalogEndpoint?.manifestURL,
+            primaryEndpoint.manifestURL,
+        ].compactMap { $0 }
+        var seen = Set<URL>()
+        let endpointURLs = candidateEndpointURLs.filter { seen.insert($0).inserted }
+        let requestKey = DetailRequestKey(
+            identity: identity,
+            endpointURLs: endpointURLs
+        )
+        if let cached = detailResponseCache.value(forKey: requestKey) {
+            let elapsed = PerformanceMilestoneRecorder.shared.mark(.detailReady, for: traceID)
+            NSLog(
+                "DETAIL_BENCHMARK elapsed_ms=%.1f cache=hit result=remote",
+                elapsed ?? 0
+            )
+            return cached
+        }
+
+        do {
+            let enriched = try await detailRequestGate.run(key: requestKey) {
+                let responses = await withTaskGroup(
+                    of: (Int, MetaItem?).self
+                ) { group in
+                    for (index, manifestURL) in endpointURLs.enumerated() {
+                        group.addTask {
+                            guard let endpoint = try? AddonEndpoint(
+                                manifestURL: manifestURL
+                            ) else { return (index, nil) }
+                            let detail = try? await AddonClient(endpoint: endpoint)
+                                .meta(type: item.type, id: item.id)
+                            return (index, detail)
+                        }
+                    }
+
+                    var loaded: [(Int, MetaItem)] = []
+                    for await (index, detail) in group {
+                        if let detail { loaded.append((index, detail)) }
+                    }
+                    return loaded.sorted { $0.0 < $1.0 }.map(\.1)
+                }
+                guard var resolvedDetail = responses.first else {
+                    throw E2EFailure("No metadata provider returned this title")
+                }
+                for fallback in responses.dropFirst() {
+                    resolvedDetail = resolvedDetail.fillingTrailerMetadata(from: fallback)
+                }
+                return resolvedDetail.fillingTrailerMetadata(from: item)
+            }
+            detailResponseCache.insert(enriched, forKey: requestKey)
+            let elapsed = PerformanceMilestoneRecorder.shared.mark(.detailReady, for: traceID)
+            NSLog(
+                "DETAIL_BENCHMARK elapsed_ms=%.1f wall_ms=%.1f endpoints=%ld cache=miss result=remote",
+                elapsed ?? 0,
+                (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
+                endpointURLs.count
+            )
+            return enriched
+        } catch {
+            let elapsed = PerformanceMilestoneRecorder.shared.mark(.detailReady, for: traceID)
+            NSLog(
+                "DETAIL_BENCHMARK elapsed_ms=%.1f wall_ms=%.1f endpoints=%ld cache=miss result=seed",
+                elapsed ?? 0,
+                (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
+                endpointURLs.count
+            )
+            return item
+        }
     }
 
-    func streamProviders(for item: MetaItem, videoID: String? = nil) async -> [StreamProviderGroup] {
+    func streamProviders(
+        for item: MetaItem,
+        videoID: String? = nil,
+        onUpdate: (([StreamProviderGroup]) -> Void)? = nil
+    ) async -> [StreamProviderGroup] {
         let startedAt = ProcessInfo.processInfo.systemUptime
         let requestID = videoID ?? item.id
         let configuredStreamingServer = try? StreamingServerEndpoint(streamingServerInput).baseURL
@@ -606,7 +1578,10 @@ final class AppModel: ObservableObject {
 
             var results: [(Int, StreamProviderGroup)] = []
             for await (index, provider) in group {
-                if let provider { results.append((index, provider)) }
+                if let provider {
+                    results.append((index, provider))
+                    onUpdate?(results.sorted { $0.0 < $1.0 }.map(\.1))
+                }
             }
             return results.sorted { $0.0 < $1.0 }.map(\.1)
         }
@@ -645,18 +1620,36 @@ final class AppModel: ObservableObject {
         do {
             let removing = isInLibrary(item)
             let activeStore = libraryStore
-            let activeAuthKey = session?.authKey
+            let activeProfileID = activeViewingProfileID
+            let syncSession = session
+            let activeAuthKey = syncSession?.authKey
+            let canSyncAccountLibrary = viewingProfileSnapshot?
+                .activeProfileAllowsAccountLibrarySync == true
             let updatedLibrary = try await activeStore.toggle(item)
             guard activeStore === libraryStore,
+                  activeProfileID == activeViewingProfileID,
                   activeAuthKey == session?.authKey
             else { return }
             library = updatedLibrary
-            if let session {
+            // Rebuild My List and For You from the local transaction before a
+            // potentially slow remote push.
+            await reloadHomeAfterProfileMutation()
+            if let syncSession, canSyncAccountLibrary {
+                // Home rebuilding suspends before this push. Revalidate the
+                // captured account so a rapid sign-out/sign-in cannot send the
+                // originating account's library mutation to the new account.
+                guard syncSession.authKey == self.session?.authKey else { return }
                 try await accountClient.pushLibrary(
-                    authKey: session.authKey,
+                    authKey: syncSession.authKey,
                     changes: [RemoteLibraryItem(item: item, removed: removing)]
                 )
+                guard activeStore === libraryStore,
+                      activeProfileID == activeViewingProfileID,
+                      syncSession.authKey == self.session?.authKey
+                else { return }
                 accountSyncStatus = "Library synced"
+            } else if session != nil {
+                accountSyncStatus = "Local profile · Library stays private"
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -741,9 +1734,28 @@ final class AppModel: ObservableObject {
             position: position,
             duration: duration
         )
+        let isEpisodePlayback = mediaMetadata?.episodeID != nil
+            || (contentIdentifier.hasPrefix("series:")
+                && contentIdentifier.contains(":episode:"))
+        let completionTransition = isEpisodePlayback
+            ? EpisodePlaybackCompletionPolicy.transition(
+                isCompleted: currentCompletedPlaybackIdentifiers.contains(
+                    contentIdentifier
+                ),
+                position: position,
+                duration: duration
+            )
+            : .noChange
+        let activeProgressStore = playbackProgressStore
+        let activeCompletionStore = playbackCompletionStore
+        let activeProfileID = activeViewingProfileID
         playbackProgressUpdateDates[contentIdentifier] = progress.updatedAt
         if PlaybackProgress.shouldSave(position: position, duration: duration) {
             currentPlaybackProgress[contentIdentifier] = progress
+            if completionTransition == .markIncomplete {
+                currentCompletedPlaybackIdentifiers.remove(contentIdentifier)
+                completedPlaybackIdentifiers.remove(contentIdentifier)
+            }
             if updateKind == .final {
                 playbackProgress[contentIdentifier] = progress
             }
@@ -760,7 +1772,36 @@ final class AppModel: ObservableObject {
 
         Task {
             do {
-                let persisted = try await playbackProgressStore.record(progress)
+                let persisted = try await activeProgressStore.record(progress)
+                if isCompleted {
+                    do {
+                        _ = try await activeCompletionStore.markCompleted(
+                            contentIdentifier: contentIdentifier,
+                            completedAt: progress.updatedAt
+                        )
+                    } catch {
+                        NSLog(
+                            "PLAYBACK_COMPLETION save_failed=%@",
+                            error.localizedDescription
+                        )
+                    }
+                } else if completionTransition == .markIncomplete {
+                    do {
+                        _ = try await activeCompletionStore.markIncomplete(
+                            contentIdentifier: contentIdentifier,
+                            updatedAt: progress.updatedAt
+                        )
+                    } catch {
+                        NSLog(
+                            "PLAYBACK_COMPLETION clear_failed=%@",
+                            error.localizedDescription
+                        )
+                    }
+                }
+                guard activeProgressStore === playbackProgressStore,
+                      activeCompletionStore === playbackCompletionStore,
+                      activeProfileID == activeViewingProfileID
+                else { return }
                 guard playbackProgressUpdateDates[contentIdentifier] == progress.updatedAt else {
                     return
                 }
@@ -777,19 +1818,6 @@ final class AppModel: ObservableObject {
                     if updateKind == .final,
                        playbackProgress[contentIdentifier] != nil {
                         playbackProgress.removeValue(forKey: contentIdentifier)
-                    }
-                }
-                if isCompleted {
-                    do {
-                        _ = try await playbackCompletionStore.markCompleted(
-                            contentIdentifier: contentIdentifier,
-                            completedAt: progress.updatedAt
-                        )
-                    } catch {
-                        NSLog(
-                            "PLAYBACK_COMPLETION save_failed=%@",
-                            error.localizedDescription
-                        )
                     }
                 }
             } catch {
@@ -929,50 +1957,110 @@ final class AppModel: ObservableObject {
 
     func signIn(email: String, password: String) async throws {
         let signedIn = try await accountClient.login(email: email, password: password)
-        try sessionStore.save(signedIn)
-        session = signedIn
-        accountEmail = signedIn.user.email ?? email
-        await selectLibraryStore(for: signedIn)
-        try await syncAccount()
+        if let snapshot = viewingProfileSnapshot {
+            try await migrateLegacyAccountLibraryIfNeeded(
+                for: signedIn,
+                in: snapshot
+            )
+        }
+
+        let previousSession = session
+        let previousAccountEmail = accountEmail
+        do {
+            try sessionStore.save(signedIn)
+            session = signedIn
+            accountEmail = signedIn.user.email ?? email
+            if let snapshot = viewingProfileSnapshot {
+                try await activateProfileSnapshot(snapshot)
+            }
+        } catch {
+            session = previousSession
+            accountEmail = previousAccountEmail
+            if let previousSession {
+                try? sessionStore.save(previousSession)
+            } else {
+                sessionStore.clear()
+            }
+            if let snapshot = viewingProfileSnapshot {
+                try? await activateProfileSnapshot(snapshot)
+            }
+            throw error
+        }
+        await reloadHomeAfterProfileMutation()
+        try? await syncAccount()
     }
 
     func signOut() async {
-        sessionStore.clear()
+        let previousSession = session
+        let previousAccountEmail = accountEmail
         session = nil
         accountEmail = nil
+        if let snapshot = viewingProfileSnapshot {
+            do {
+                try await activateProfileSnapshot(snapshot)
+            } catch {
+                session = previousSession
+                accountEmail = previousAccountEmail
+                errorMessage = error.localizedDescription
+                return
+            }
+        }
+        sessionStore.clear()
         syncedAddonDescriptors = []
         accountSyncStatus = "Not signed in"
-        await selectLibraryStore(for: nil)
+        await reloadHomeAfterProfileMutation()
     }
 
     func syncAccount() async throws {
         guard let session else { return }
         let activeStore = libraryStore
+        let activeProfileID = activeViewingProfileID
+        let canSyncAccountLibrary = viewingProfileSnapshot?
+            .activeProfileAllowsAccountLibrarySync == true
         accountSyncStatus = "Syncing…"
         do {
-            async let remoteLibrary = accountClient.pullLibrary(authKey: session.authKey)
-            async let remoteAddons = accountClient.pullAddons(authKey: session.authKey)
-            let (libraryItems, addonDescriptors) = try await (remoteLibrary, remoteAddons)
+            if canSyncAccountLibrary {
+                async let remoteLibrary = accountClient.pullLibrary(
+                    authKey: session.authKey
+                )
+                async let remoteAddons = accountClient.pullAddons(
+                    authKey: session.authKey
+                )
+                let (libraryItems, addonDescriptors) = try await (
+                    remoteLibrary,
+                    remoteAddons
+                )
+                guard self.session?.authKey == session.authKey,
+                      activeStore === libraryStore,
+                      activeProfileID == activeViewingProfileID,
+                      viewingProfileSnapshot?
+                        .activeProfileAllowsAccountLibrarySync == true
+                else { return }
 
-            let updatedLibrary = try await activeStore.replaceWithRemoteSnapshot(libraryItems)
-            guard activeStore === libraryStore,
-                  self.session?.authKey == session.authKey
-            else { return }
-            library = updatedLibrary
-            syncedAddonDescriptors = addonDescriptors
-            for descriptor in addonDescriptors {
-                addonManifestCache[descriptor.transportUrl] = descriptor.manifest
+                // `datastoreGet(all: true)` is a complete account snapshot.
+                // Replace the account-specific store so anonymous items or a
+                // previous account can never leak into this account.
+                let updatedLibrary = try await activeStore
+                    .replaceWithRemoteSnapshot(libraryItems)
+                guard self.session?.authKey == session.authKey,
+                      activeStore === libraryStore,
+                      activeProfileID == activeViewingProfileID
+                else { return }
+                library = updatedLibrary
+                applySyncedAddonSnapshot(addonDescriptors)
+                accountSyncStatus = "Synced now"
+                await reloadHomeAfterProfileMutation()
+            } else {
+                // Add-ons are an account-level setting. Secondary viewing
+                // profiles receive them, but their private library never reads
+                // from or writes to the Stremio account snapshot.
+                let addonDescriptors = try await accountClient.pullAddons(
+                    authKey: session.authKey
+                )
+                guard self.session?.authKey == session.authKey else { return }
+                applySyncedAddonSnapshot(addonDescriptors)
+                accountSyncStatus = "Local profile · Add-ons synced"
             }
-            installedAddons = addonDescriptors.compactMap { descriptor in
-                (try? AddonEndpoint(manifestURL: descriptor.transportUrl)) == nil
-                    ? nil
-                    : descriptor.transportUrl
-            }
-            if !installedAddons.contains(primaryEndpoint.manifestURL) {
-                installedAddons.insert(primaryEndpoint.manifestURL, at: 0)
-            }
-            persistAddonURLs()
-            accountSyncStatus = "Synced now"
         } catch {
             guard self.session?.authKey == session.authKey else { return }
             accountSyncStatus = "Sync failed"
@@ -981,31 +2069,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func selectLibraryStore(for session: StremioSession?) async {
-        libraryStore = LibraryStore(
-            fileURL: Self.libraryURL(in: libraryDirectory, for: session)
-        )
-        do {
-            library = try await libraryStore.items()
-        } catch {
-            library = []
-            NSLog("[Library] load_failed=%@", error.localizedDescription)
+    private func applySyncedAddonSnapshot(_ addonDescriptors: [SyncedAddon]) {
+        syncedAddonDescriptors = addonDescriptors
+        for descriptor in addonDescriptors {
+            addonManifestCache[descriptor.transportUrl] = descriptor.manifest
         }
-    }
-
-    private static func libraryURL(
-        in directory: URL,
-        for session: StremioSession?
-    ) -> URL {
-        guard let session else {
-            return directory.appendingPathComponent("library.json")
+        installedAddons = addonDescriptors.compactMap { descriptor in
+            (try? AddonEndpoint(manifestURL: descriptor.transportUrl)) == nil
+                ? nil
+                : descriptor.transportUrl
         }
-        let identity = session.user.id ?? session.user.email ?? "signed-in"
-        let encoded = Data(identity.utf8).base64EncodedString()
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "=", with: "")
-        return directory.appendingPathComponent("library-account-\(encoded).json")
+        if !installedAddons.contains(primaryEndpoint.manifestURL) {
+            installedAddons.insert(primaryEndpoint.manifestURL, at: 0)
+        }
+        persistAddonURLs()
     }
 
     func saveStreamingServer() async throws {
@@ -1047,11 +2124,20 @@ final class AppModel: ObservableObject {
                 if detectedMIMEType == "video/mp2t",
                    resolved.supportsByteRanges,
                    let contentLength = resolved.contentLength {
+                    #if os(tvOS)
+                    // AVKit on Apple TV gets the provider URL first and the
+                    // existing streaming-server HLS route as its fallback.
+                    // The iOS loopback bridge depends on the Rust timing core
+                    // and custom players, which are intentionally absent from
+                    // the lightweight tvOS target.
+                    _ = contentLength
+                    #else
                     sourceURL = try await StreamTransportBridge.shared.localURL(
                         upstream: resolved.url,
                         contentLength: contentLength,
                         mimeType: "video/mp2t"
                     )
+                    #endif
                 }
             } else {
                 sourceURL = url
@@ -1065,10 +2151,15 @@ final class AppModel: ObservableObject {
             detectedMIMEType = nil
         }
 
+        #if os(tvOS)
+        let requiresCompatibilityPlayback = stream.prefersCompatibilityPlayback
+            || detectedMIMEType == "video/mp2t"
+        #else
         let selectedPlayer = StremioInternalPlayer.selected
         let requiresCompatibilityPlayback = selectedPlayer == .bunny
             ? false
             : stream.prefersCompatibilityPlayback
+        #endif
         var compatibilityURL: URL?
         if requiresCompatibilityPlayback, let client {
             // Torrent resolution already proves that the configured server is

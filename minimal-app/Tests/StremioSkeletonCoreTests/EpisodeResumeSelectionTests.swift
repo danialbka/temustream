@@ -184,23 +184,52 @@ final class EpisodeResumeSelectionTests: XCTestCase {
         )
     }
 
-    func testEpisodeAutoplayOnlyPresentsForFinalNearEndUpdate() {
+    func testEpisodeAutoplayPreviewStartsOneMinuteBeforeEnd() {
         XCTAssertFalse(
             EpisodeAutoplayPresentationPolicy.shouldPresent(
-                position: 1_798,
+                position: 1_739,
+                duration: 1_800
+            )
+        )
+        XCTAssertTrue(
+            EpisodeAutoplayPresentationPolicy.shouldPresent(
+                position: 1_740,
+                duration: 1_800
+            )
+        )
+        XCTAssertEqual(
+            EpisodeAutoplayPresentationPolicy.countdownSeconds(
+                position: 1_740,
+                duration: 1_800
+            ),
+            60
+        )
+    }
+
+    func testEpisodeAutoplayWaitsForTrueEndUpdate() {
+        XCTAssertFalse(
+            EpisodeAutoplayPresentationPolicy.shouldStartNext(
+                position: 1_740,
                 duration: 1_800,
                 isFinalUpdate: false
             )
         )
         XCTAssertFalse(
-            EpisodeAutoplayPresentationPolicy.shouldPresent(
-                position: 1_700,
+            EpisodeAutoplayPresentationPolicy.shouldStartNext(
+                position: 1_740,
                 duration: 1_800,
                 isFinalUpdate: true
             )
         )
+        XCTAssertFalse(
+            EpisodeAutoplayPresentationPolicy.shouldStartNext(
+                position: 1_798,
+                duration: 1_800,
+                isFinalUpdate: false
+            )
+        )
         XCTAssertTrue(
-            EpisodeAutoplayPresentationPolicy.shouldPresent(
+            EpisodeAutoplayPresentationPolicy.shouldStartNext(
                 position: 1_798,
                 duration: 1_800,
                 isFinalUpdate: true

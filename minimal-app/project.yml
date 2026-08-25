@@ -3,6 +3,7 @@ options:
   minimumXcodeGenVersion: 2.42.0
   deploymentTarget:
     iOS: "16.0"
+    tvOS: "18.0"
 packages:
   KSPlayer:
     # Pinned from upstream revision 25c923b. The local package carries narrowly
@@ -32,7 +33,8 @@ targets:
       path: iOS/Resources/Info.plist
       properties:
         CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "16"
+        CFBundleVersion: "18"
+        StremioSourceIdentity: $(STREMIO_SOURCE_ID)
         WatchTogetherConvexURL: $(WATCH_TOGETHER_CONVEX_URL)
         WatchTogetherLiveKitURL: $(WATCH_TOGETHER_LIVEKIT_URL)
         NSMicrophoneUsageDescription: TemuStream uses your microphone only when you enable voice chat in a Watch Together room.
@@ -82,12 +84,94 @@ targets:
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
         DEVELOPMENT_TEAM: ""
+        STREMIO_SOURCE_ID: unverified
         ENABLE_USER_SCRIPT_SANDBOXING: YES
+  StremioSkeletonUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - iOS/UITests
+    dependencies:
+      - target: StremioSkeleton
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.stremio.skeleton.uitests
+        PRODUCT_NAME: StremioSkeletonUITests
+        TEST_TARGET_NAME: StremioSkeleton
+        SWIFT_VERSION: 6.0
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+  TemuStreamTV:
+    type: application
+    platform: tvOS
+    sources:
+      - Sources/StremioSkeletonCore
+      - iOS/App/AppModel.swift
+      - iOS/App/SessionStore.swift
+      - iOS/App/TorBoxPlaybackResolver.swift
+      - tvOS/App
+    info:
+      path: tvOS/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: TemuStream
+        CFBundleShortVersionString: "1.3"
+        CFBundleVersion: "18"
+        StremioSourceIdentity: $(STREMIO_SOURCE_ID)
+        NSLocalNetworkUsageDescription: TemuStream connects to streaming servers on your local network when you configure one for playback.
+        UIBackgroundModes:
+          - audio
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.stremio.skeleton.tv
+        PRODUCT_NAME: TemuStreamTV
+        SWIFT_VERSION: 6.0
+        SWIFT_OPTIMIZATION_LEVEL: -O
+        SWIFT_COMPILATION_MODE: wholemodule
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        STREMIO_SOURCE_ID: unverified
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+  TemuStreamTVUITests:
+    type: bundle.ui-testing
+    platform: tvOS
+    sources:
+      - tvOS/UITests
+    dependencies:
+      - target: TemuStreamTV
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.stremio.skeleton.tv.uitests
+        PRODUCT_NAME: TemuStreamTVUITests
+        TEST_TARGET_NAME: TemuStreamTV
+        SWIFT_VERSION: 6.0
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
 schemes:
   StremioSkeleton:
     build:
       targets:
         StremioSkeleton: all
+        StremioSkeletonUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - StremioSkeletonUITests
+    run:
+      config: Release
+    archive:
+      config: Release
+  TemuStreamTV:
+    build:
+      targets:
+        TemuStreamTV: all
+        TemuStreamTVUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - TemuStreamTVUITests
     run:
       config: Release
     archive:

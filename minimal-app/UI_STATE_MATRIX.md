@@ -6,11 +6,17 @@
 | `home-cinemeta.png` | Loaded Cinemeta catalog and source dropdown |
 | `home-letterboxd.png` | Loaded Letterboxd Recommendations selection |
 | `home-series.png` | TV Series selected with the horizontal Continue Watching poster row and dot-matrix progress |
+| `home-card-layout.png` | Wide, tall, and standard poster sources crop-fill identical cards while one- and two-line titles retain aligned metadata |
+| `search-idle.png` | Dedicated search route before a query, including recent-search presentation |
+| `search-results.png` | Cross-provider movie search results and profile-scoped query state |
+| `profiles-picker.png` | Multiple local profiles, active profile, editing, and profile creation |
 | `home-light-custom-theme.png` | Light catalog using a persisted custom purple accent and adaptive surfaces |
 | `catalog-error.png` | Catalog network or protocol failure |
 | `details-streams.png` | Metadata, trailer action, and direct/torrent stream choices |
 | `details-resume.png` | Persisted resume with dot-matrix progress and trailer actions below Add to Library |
 | `details-series-episodes.png` | Series trailer action, full-width episode routes, season picker, dot-matrix resume and episode progress, and completed tick |
+| `details-cast-movie.png` | Movie summary metadata, credits, and horizontally scrollable provider-backed trivia cards |
+| `details-cast-series.png` | Series summary metadata, credits, episode inventory, and horizontally scrollable provider-backed trivia cards |
 | `episode-streams.png` | Dedicated episode route with thumbnail, summary, dot-matrix resume progress, provider filters, and streams |
 | `episode-up-next.png` | Compact next-episode thumbnail, episode number, countdown, and immediate playback action |
 | `library-empty.png` | Empty saved library |

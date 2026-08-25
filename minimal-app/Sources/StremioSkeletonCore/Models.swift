@@ -93,6 +93,36 @@ public struct CatalogExtra: Codable, Equatable, Sendable {
     }
 }
 
+/// Community metadata add-ons are not consistent about whether trivia is a
+/// single string or an array. Decode both without allowing an unfamiliar value
+/// shape to make the title's entire metadata response fail.
+public struct MetadataTextList: Codable, Equatable, Hashable, Sendable {
+    public let values: [String]
+
+    public init(_ values: [String]) {
+        self.values = values
+    }
+
+    public init(from decoder: Decoder) throws {
+        guard let container = try? decoder.singleValueContainer() else {
+            values = []
+            return
+        }
+        if let decodedValues = try? container.decode([String].self) {
+            values = decodedValues
+        } else if let decodedValue = try? container.decode(String.self) {
+            values = [decodedValue]
+        } else {
+            values = []
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(values)
+    }
+}
+
 public struct MetaItem: Codable, Equatable, Identifiable, Hashable, Sendable {
     public let id: String
     public let type: String
@@ -102,6 +132,20 @@ public struct MetaItem: Codable, Equatable, Identifiable, Hashable, Sendable {
     public let description: String?
     public let releaseInfo: String?
     public let genres: [String]?
+    public let cast: [String]?
+    public let actors: [String]?
+    public let runtime: String?
+    public let imdbRating: String?
+    public let director: [String]?
+    public let writer: [String]?
+    public let country: String?
+    public let language: String?
+    public let certification: String?
+    public let awards: String?
+    public let status: String?
+    public let released: String?
+    public let trivia: MetadataTextList?
+    public let funFacts: MetadataTextList?
     public let videos: [Video]?
     public let trailerStreams: [TrailerStream]?
     public let trailers: [TrailerReference]?
@@ -115,6 +159,20 @@ public struct MetaItem: Codable, Equatable, Identifiable, Hashable, Sendable {
         description: String? = nil,
         releaseInfo: String? = nil,
         genres: [String]? = nil,
+        cast: [String]? = nil,
+        actors: [String]? = nil,
+        runtime: String? = nil,
+        imdbRating: String? = nil,
+        director: [String]? = nil,
+        writer: [String]? = nil,
+        country: String? = nil,
+        language: String? = nil,
+        certification: String? = nil,
+        awards: String? = nil,
+        status: String? = nil,
+        released: String? = nil,
+        trivia: [String]? = nil,
+        funFacts: [String]? = nil,
         videos: [Video]? = nil,
         trailerStreams: [TrailerStream]? = nil,
         trailers: [TrailerReference]? = nil
@@ -127,6 +185,20 @@ public struct MetaItem: Codable, Equatable, Identifiable, Hashable, Sendable {
         self.description = description
         self.releaseInfo = releaseInfo
         self.genres = genres
+        self.cast = cast
+        self.actors = actors
+        self.runtime = runtime
+        self.imdbRating = imdbRating
+        self.director = director
+        self.writer = writer
+        self.country = country
+        self.language = language
+        self.certification = certification
+        self.awards = awards
+        self.status = status
+        self.released = released
+        self.trivia = trivia.map(MetadataTextList.init)
+        self.funFacts = funFacts.map(MetadataTextList.init)
         self.videos = videos
         self.trailerStreams = trailerStreams
         self.trailers = trailers
@@ -140,23 +212,112 @@ public struct MetaItem: Codable, Equatable, Identifiable, Hashable, Sendable {
             ?? trailers?.compactMap(\.playbackURL).first
     }
 
+    /// Stremio metadata normally calls this field `cast`; a few community
+    /// add-ons use `actors`. Merge both spellings while keeping provider order.
+    public var actorNames: [String] {
+        ((cast ?? []) + (actors ?? []))
+            .reduce(into: [String]()) { names, rawName in
+                let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty,
+                      !names.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame })
+                else { return }
+                names.append(name)
+            }
+    }
+
+    public var explicitTriviaFacts: [String] {
+        ((trivia?.values ?? []) + (funFacts?.values ?? []))
+            .reduce(into: [String]()) { facts, rawFact in
+                let fact = rawFact.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !fact.isEmpty,
+                      !facts.contains(where: {
+                          $0.caseInsensitiveCompare(fact) == .orderedSame
+                      })
+                else { return }
+                facts.append(fact)
+            }
+    }
+
     public func fillingTrailerMetadata(from fallback: MetaItem) -> MetaItem {
-        guard preferredTrailerURL == nil, fallback.preferredTrailerURL != nil else {
+        let needsPoster = poster == nil && fallback.poster != nil
+        let needsBackground = background == nil && fallback.background != nil
+        let needsDescription = normalizedMetadataValue(description) == nil
+            && normalizedMetadataValue(fallback.description) != nil
+        let needsReleaseInfo = normalizedMetadataValue(releaseInfo) == nil
+            && normalizedMetadataValue(fallback.releaseInfo) != nil
+        let needsVideos = (videos?.isEmpty != false)
+            && fallback.videos?.isEmpty == false
+        let needsTrailer = preferredTrailerURL == nil && fallback.preferredTrailerURL != nil
+        let needsCast = actorNames.isEmpty && !fallback.actorNames.isEmpty
+        let needsGenres = normalizedMetadataList(genres).isEmpty
+            && !normalizedMetadataList(fallback.genres).isEmpty
+        let needsRuntime = normalizedMetadataValue(runtime) == nil
+            && normalizedMetadataValue(fallback.runtime) != nil
+        let needsRating = normalizedMetadataValue(imdbRating) == nil
+            && normalizedMetadataValue(fallback.imdbRating) != nil
+        let needsDirector = normalizedMetadataList(director).isEmpty
+            && !normalizedMetadataList(fallback.director).isEmpty
+        let needsWriter = normalizedMetadataList(writer).isEmpty
+            && !normalizedMetadataList(fallback.writer).isEmpty
+        let needsCountry = normalizedMetadataValue(country) == nil
+            && normalizedMetadataValue(fallback.country) != nil
+        let needsLanguage = normalizedMetadataValue(language) == nil
+            && normalizedMetadataValue(fallback.language) != nil
+        let needsCertification = normalizedMetadataValue(certification) == nil
+            && normalizedMetadataValue(fallback.certification) != nil
+        let needsAwards = normalizedMetadataValue(awards) == nil
+            && normalizedMetadataValue(fallback.awards) != nil
+        let needsStatus = normalizedMetadataValue(status) == nil
+            && normalizedMetadataValue(fallback.status) != nil
+        let needsReleased = normalizedMetadataValue(released) == nil
+            && normalizedMetadataValue(fallback.released) != nil
+        let needsTrivia = normalizedMetadataList(trivia?.values).isEmpty
+            && !normalizedMetadataList(fallback.trivia?.values).isEmpty
+        let needsFunFacts = normalizedMetadataList(funFacts?.values).isEmpty
+            && !normalizedMetadataList(fallback.funFacts?.values).isEmpty
+        guard needsPoster || needsBackground || needsDescription || needsReleaseInfo
+            || needsVideos || needsTrailer || needsCast || needsGenres || needsRuntime || needsRating
+            || needsDirector || needsWriter || needsCountry || needsLanguage
+            || needsCertification || needsAwards || needsStatus || needsReleased
+            || needsTrivia || needsFunFacts else {
             return self
         }
         return MetaItem(
             id: id,
             type: type,
             name: name,
-            poster: poster,
-            background: background,
-            description: description,
-            releaseInfo: releaseInfo,
-            genres: genres,
-            videos: videos,
-            trailerStreams: fallback.trailerStreams,
-            trailers: fallback.trailers
+            poster: needsPoster ? fallback.poster : poster,
+            background: needsBackground ? fallback.background : background,
+            description: needsDescription ? fallback.description : description,
+            releaseInfo: needsReleaseInfo ? fallback.releaseInfo : releaseInfo,
+            genres: needsGenres ? fallback.genres : genres,
+            cast: needsCast ? fallback.cast : cast,
+            actors: needsCast ? fallback.actors : actors,
+            runtime: needsRuntime ? fallback.runtime : runtime,
+            imdbRating: needsRating ? fallback.imdbRating : imdbRating,
+            director: needsDirector ? fallback.director : director,
+            writer: needsWriter ? fallback.writer : writer,
+            country: needsCountry ? fallback.country : country,
+            language: needsLanguage ? fallback.language : language,
+            certification: needsCertification ? fallback.certification : certification,
+            awards: needsAwards ? fallback.awards : awards,
+            status: needsStatus ? fallback.status : status,
+            released: needsReleased ? fallback.released : released,
+            trivia: needsTrivia ? fallback.trivia?.values : trivia?.values,
+            funFacts: needsFunFacts ? fallback.funFacts?.values : funFacts?.values,
+            videos: needsVideos ? fallback.videos : videos,
+            trailerStreams: needsTrailer ? fallback.trailerStreams : trailerStreams,
+            trailers: needsTrailer ? fallback.trailers : trailers
         )
+    }
+
+    private func normalizedMetadataValue(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
+    private func normalizedMetadataList(_ values: [String]?) -> [String] {
+        (values ?? []).filter { normalizedMetadataValue($0) != nil }
     }
 }
 
@@ -241,6 +402,78 @@ public struct Video: Codable, Equatable, Identifiable, Hashable, Sendable {
     }
 }
 
+public struct PlaybackSkipSegment: Codable, Equatable, Hashable, Sendable {
+    public let start: TimeInterval
+    public let end: TimeInterval
+    public let type: String
+    public let title: String?
+    public let confidence: Double?
+    public let sampleSize: Int?
+
+    public init(
+        start: TimeInterval,
+        end: TimeInterval,
+        type: String,
+        title: String? = nil,
+        confidence: Double? = nil,
+        sampleSize: Int? = nil
+    ) {
+        self.start = start
+        self.end = end
+        self.type = type
+        self.title = title
+        self.confidence = confidence
+        self.sampleSize = sampleSize
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case start
+        case end
+        case startTime
+        case endTime
+        case type
+        case title
+        case confidence
+        case sampleSize
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        start = try values.decodeIfPresent(TimeInterval.self, forKey: .start)
+            ?? values.decode(TimeInterval.self, forKey: .startTime)
+        end = try values.decodeIfPresent(TimeInterval.self, forKey: .end)
+            ?? values.decode(TimeInterval.self, forKey: .endTime)
+        type = try values.decode(String.self, forKey: .type)
+        title = try values.decodeIfPresent(String.self, forKey: .title)
+        sampleSize = try values.decodeIfPresent(Int.self, forKey: .sampleSize)
+        if let numeric = try? values.decodeIfPresent(Double.self, forKey: .confidence) {
+            confidence = numeric
+        } else if let text = try? values.decodeIfPresent(String.self, forKey: .confidence) {
+            confidence = Double(text)
+        } else {
+            confidence = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(start, forKey: .start)
+        try values.encode(end, forKey: .end)
+        try values.encode(type, forKey: .type)
+        try values.encodeIfPresent(title, forKey: .title)
+        try values.encodeIfPresent(confidence, forKey: .confidence)
+        try values.encodeIfPresent(sampleSize, forKey: .sampleSize)
+    }
+}
+
+public struct StreamBehaviorHints: Codable, Equatable, Hashable, Sendable {
+    public let skipSegments: [PlaybackSkipSegment]?
+
+    public init(skipSegments: [PlaybackSkipSegment]? = nil) {
+        self.skipSegments = skipSegments
+    }
+}
+
 public struct Stream: Codable, Equatable, Identifiable, Hashable, Sendable {
     public let url: URL?
     public let externalUrl: URL?
@@ -250,6 +483,32 @@ public struct Stream: Codable, Equatable, Identifiable, Hashable, Sendable {
     public let infoHash: String?
     public let fileIdx: Int?
     public let sources: [String]?
+    public let skipSegments: [PlaybackSkipSegment]?
+    public let behaviorHints: StreamBehaviorHints?
+
+    public init(
+        url: URL?,
+        externalUrl: URL?,
+        name: String?,
+        title: String?,
+        description: String?,
+        infoHash: String?,
+        fileIdx: Int?,
+        sources: [String]?,
+        skipSegments: [PlaybackSkipSegment]? = nil,
+        behaviorHints: StreamBehaviorHints? = nil
+    ) {
+        self.url = url
+        self.externalUrl = externalUrl
+        self.name = name
+        self.title = title
+        self.description = description
+        self.infoHash = infoHash
+        self.fileIdx = fileIdx
+        self.sources = sources
+        self.skipSegments = skipSegments
+        self.behaviorHints = behaviorHints
+    }
 
     public var id: String {
         [
@@ -270,6 +529,12 @@ public struct Stream: Codable, Equatable, Identifiable, Hashable, Sendable {
 
     public var isDirectlyPlayable: Bool { url != nil }
     public var isTorrent: Bool { infoHash != nil }
+
+    public var introSkipSegment: PlaybackSkipSegment? {
+        IntroSkipPolicy.bestValidatedSegment(
+            from: (skipSegments ?? []) + (behaviorHints?.skipSegments ?? [])
+        )
+    }
 
     /// Streams that should be remuxed or transcoded before they reach AVPlayer.
     /// Torrent files are treated as unknown containers because the raw server URL

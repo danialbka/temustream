@@ -83,20 +83,55 @@ public enum EpisodeAutoplaySelector {
 }
 
 public enum EpisodeAutoplayPresentationPolicy {
-    /// Autoplay is tied to a true final callback near the media end rather
-    /// than the broader "watched" threshold used to hide resume cards.
+    public static let previewLeadTime: TimeInterval = 60
+    public static let endTolerance: TimeInterval = 2
+
+    /// Shows Up Next during the final minute. This is based on media time so
+    /// pausing or buffering cannot consume the countdown and skip content.
     public static func shouldPresent(
+        position: TimeInterval,
+        duration: TimeInterval
+    ) -> Bool {
+        guard position.isFinite,
+              duration.isFinite,
+              position >= 0,
+              duration >= PlaybackProgress.minimumResumePosition
+        else { return false }
+        return remainingTime(position: position, duration: duration) <= previewLeadTime
+    }
+
+    public static func countdownSeconds(
+        position: TimeInterval,
+        duration: TimeInterval
+    ) -> Int {
+        guard shouldPresent(position: position, duration: duration) else {
+            return Int(previewLeadTime)
+        }
+        return max(
+            0,
+            Int(ceil(remainingTime(position: position, duration: duration)))
+        )
+    }
+
+    /// Automatic navigation still requires the player's true final update;
+    /// entering the preview window alone never cuts the episode short.
+    public static func shouldStartNext(
         position: TimeInterval,
         duration: TimeInterval,
         isFinalUpdate: Bool
     ) -> Bool {
         guard isFinalUpdate,
-              position.isFinite,
-              duration.isFinite,
-              duration >= PlaybackProgress.minimumResumePosition
+              shouldPresent(position: position, duration: duration)
         else { return false }
-        let remaining = max(duration - position, 0)
-        return position >= duration * 0.995 || remaining <= 2
+        return position >= duration * 0.995
+            || remainingTime(position: position, duration: duration) <= endTolerance
+    }
+
+    private static func remainingTime(
+        position: TimeInterval,
+        duration: TimeInterval
+    ) -> TimeInterval {
+        max(duration - position, 0)
     }
 }
 

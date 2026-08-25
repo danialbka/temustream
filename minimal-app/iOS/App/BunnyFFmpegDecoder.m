@@ -125,9 +125,14 @@ static BOOL BunnyIs4KDimensions(int width, int height) {
     atomic_bool _started;
     atomic_bool _stopRequested;
     atomic_bool _seekInterrupt;
+    atomic_bool _mediaOpened;
     StremioBunnyClock *_rustClock;
 
     NSTimeInterval _pendingSeek;
+    NSTimeInterval _pendingAudioRendererRecoveryTime;
+    NSTimeInterval _scheduledAudioRendererRecoveryTime;
+    NSUInteger _audioRendererRecoveryGeneration;
+    BOOL _audioRendererRecoveryInFlight;
     NSInteger _requestedAudioIndex;
     NSInteger _requestedSubtitleIndex;
     float _desiredRate;
@@ -193,6 +198,9 @@ static BOOL BunnyIs4KDimensions(int width, int height) {
 - (void)reportAudioFailureAtStage:(NSString *)stage code:(NSInteger)code;
 - (void)drainPendingVideoSamples;
 - (void)drainPendingAudioSamples;
+- (void)audioRendererNeedsRecovery:(NSNotification *)notification;
+- (void)commitAudioRendererRecoveryGeneration:(NSUInteger)generation
+                                          name:(NSNotificationName)name;
 - (void)clearAndFlushRenderersRemovingImage:(BOOL)removeImage;
 - (BOOL)processControlRequests;
 - (BOOL)performSeek:(NSTimeInterval)time;
@@ -345,10 +353,15 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
         atomic_init(&_started, false);
         atomic_init(&_stopRequested, false);
         atomic_init(&_seekInterrupt, false);
+        atomic_init(&_mediaOpened, false);
         atomic_init(&_hardwareVideoDecode, false);
         atomic_init(&_hardwareVideoDecoderNegotiated, false);
         _rustClock = stremio_bunny_clock_create();
         _pendingSeek = NAN;
+        _pendingAudioRendererRecoveryTime = NAN;
+        _scheduledAudioRendererRecoveryTime = NAN;
+        _audioRendererRecoveryGeneration = 0;
+        _audioRendererRecoveryInFlight = NO;
         _requestedAudioIndex = BunnyDecoderNoSelectionRequest;
         _requestedSubtitleIndex = BunnyDecoderNoSelectionRequest;
         // Playback begins only after the Swift owner receives the first-frame
@@ -385,6 +398,16 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
         _synchronizer.delaysRateChangeUntilHasSufficientMediaData = YES;
         [_synchronizer setRate:0 time:kCMTimeZero];
 
+        NSNotificationCenter *notificationCenter = NSNotificationCenter.defaultCenter;
+        [notificationCenter addObserver:self
+                               selector:@selector(audioRendererNeedsRecovery:)
+                                   name:AVSampleBufferAudioRendererWasFlushedAutomaticallyNotification
+                                 object:_audioRenderer];
+        [notificationCenter addObserver:self
+                               selector:@selector(audioRendererNeedsRecovery:)
+                                   name:AVSampleBufferAudioRendererOutputConfigurationDidChangeNotification
+                                 object:_audioRenderer];
+
         __weak typeof(self) weakSelf = self;
         [_videoLayer requestMediaDataWhenReadyOnQueue:_videoRenderQueue usingBlock:^{
             [weakSelf drainPendingVideoSamples];
@@ -397,6 +420,7 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
 }
 
 - (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
     [self stop];
     stremio_bunny_clock_destroy(_rustClock);
     _rustClock = NULL;
@@ -443,6 +467,11 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
     }
     [_controlLock lock];
     _pendingSeek = boundedTime;
+    // A user seek already performs the required serialized renderer flush.
+    // Supersede any pending route recovery rather than seeking twice.
+    _pendingAudioRendererRecoveryTime = NAN;
+    _scheduledAudioRendererRecoveryTime = NAN;
+    _audioRendererRecoveryGeneration++;
     atomic_store(&_seekInterrupt, true);
     [_controlLock unlock];
     stremio_bunny_clock_seek(_rustClock, llround(boundedTime * 1000000));
@@ -473,6 +502,10 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
     [_controlLock lock];
     _desiredRate = 0;
     _waitingForPreroll = NO;
+    _pendingAudioRendererRecoveryTime = NAN;
+    _scheduledAudioRendererRecoveryTime = NAN;
+    _audioRendererRecoveryGeneration++;
+    _audioRendererRecoveryInFlight = NO;
     [_controlLock unlock];
     stremio_bunny_clock_set_rate(_rustClock, 0);
     [_synchronizer setRate:0 time:kCMTimeInvalid];
@@ -525,6 +558,74 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
     _audioRenderer.muted = muted;
 }
 
+- (void)audioRendererNeedsRecovery:(NSNotification *)notification {
+    if (notification.object != _audioRenderer
+        || !atomic_load(&_started)
+        || !atomic_load(&_mediaOpened)
+        || !_hasAudio
+        || atomic_load(&_stopRequested)) {
+        return;
+    }
+
+    CMTime rendererTime = _synchronizer.currentTime;
+    NSTimeInterval playhead = CMTimeGetSeconds(rendererTime);
+    if (!isfinite(playhead)) {
+        return;
+    }
+
+    [_controlLock lock];
+    if (_audioRendererRecoveryInFlight) {
+        [_controlLock unlock];
+        return;
+    }
+    _scheduledAudioRendererRecoveryTime = fmax(playhead, 0);
+    NSUInteger generation = ++_audioRendererRecoveryGeneration;
+    [_controlLock unlock];
+
+    // Route replacement commonly produces both renderer notifications.
+    // Promote only the final one into the decoder's serial control path.
+    __weak typeof(self) weakSelf = self;
+    NSNotificationName name = notification.name;
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.180 * NSEC_PER_SEC)),
+        dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+        ^{
+            [weakSelf commitAudioRendererRecoveryGeneration:generation name:name];
+        }
+    );
+}
+
+- (void)commitAudioRendererRecoveryGeneration:(NSUInteger)generation
+                                          name:(NSNotificationName)name {
+    if (atomic_load(&_stopRequested) || !atomic_load(&_mediaOpened)) {
+        return;
+    }
+    [_controlLock lock];
+    if (generation != _audioRendererRecoveryGeneration
+        || _audioRendererRecoveryInFlight
+        || !isfinite(_scheduledAudioRendererRecoveryTime)) {
+        [_controlLock unlock];
+        return;
+    }
+    NSTimeInterval playhead = CMTimeGetSeconds(_synchronizer.currentTime);
+    if (!isfinite(playhead)) {
+        playhead = _scheduledAudioRendererRecoveryTime;
+    }
+    playhead = fmax(playhead, 0);
+    if (_duration > 0) {
+        playhead = fmin(playhead, fmax(_duration - 0.05, 0));
+    }
+    _scheduledAudioRendererRecoveryTime = NAN;
+    _pendingAudioRendererRecoveryTime = playhead;
+    atomic_store(&_seekInterrupt, true);
+    [_controlLock unlock];
+    NSLog(
+        @"BUNNY_DECODER audio_renderer_recovery queued reason=%@ position=%.3f",
+        name,
+        playhead
+    );
+}
+
 - (void)runDecoder {
     NSError *error = nil;
     if (![self openInput:&error]) {
@@ -532,6 +633,7 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
         [self releaseFFmpegResources];
         return;
     }
+    atomic_store(&_mediaOpened, true);
 
     [self publishMediaInfo];
     AVPacket *packet = av_packet_alloc();
@@ -550,12 +652,13 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
             break;
         }
         BOOL hadControlRequest = atomic_load(&_seekInterrupt);
-        if ([self processControlRequests]) {
+        BOOL completedControlSeek = [self processControlRequests];
+        if (completedControlSeek) {
             // A successful seek after EOF starts a fresh demux/decode pass.
             reachedEnd = NO;
             decodersDrained = NO;
         }
-        if (hadControlRequest) {
+        if (hadControlRequest || completedControlSeek) {
             // Compressed packets belong to the old demux position and track
             // selection. Keeping them after a seek/audio switch can replay
             // stale media and defeats the exact renderer realignment.
@@ -645,9 +748,11 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
         }
         if (result < 0) {
             if (atomic_load(&_seekInterrupt)) {
-                if ([self processControlRequests]) {
+                BOOL completedInterruptedSeek = [self processControlRequests];
+                if (completedInterruptedSeek) {
                     reachedEnd = NO;
                     decodersDrained = NO;
+                    [self clearCompressedPackets];
                 }
                 av_packet_unref(packet);
                 continue;
@@ -1235,11 +1340,18 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
 
 - (BOOL)processControlRequests {
     NSTimeInterval seekTime = NAN;
+    NSTimeInterval audioRendererRecoveryTime = NAN;
     NSInteger requestedAudio = BunnyDecoderNoSelectionRequest;
     NSInteger requestedSubtitle = BunnyDecoderNoSelectionRequest;
     [_controlLock lock];
     seekTime = _pendingSeek;
     _pendingSeek = NAN;
+    audioRendererRecoveryTime = _pendingAudioRendererRecoveryTime;
+    _pendingAudioRendererRecoveryTime = NAN;
+    BOOL hasAudioRendererRecovery = isfinite(audioRendererRecoveryTime);
+    if (hasAudioRendererRecovery) {
+        _audioRendererRecoveryInFlight = YES;
+    }
     requestedAudio = _requestedAudioIndex;
     _requestedAudioIndex = BunnyDecoderNoSelectionRequest;
     requestedSubtitle = _requestedSubtitleIndex;
@@ -1253,6 +1365,19 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
     // decoder queue owns the request it must be cleared before invoking
     // avformat_seek_file, otherwise FFmpeg interrupts its own seek.
     BOOL didSeek = isfinite(seekTime) && [self performSeek:seekTime];
+
+    if (hasAudioRendererRecovery && !didSeek) {
+        // Both renderer notifications may arrive from arbitrary threads. The
+        // control request is consumed on the decode queue, and performSeek:
+        // synchronously flushes the audio render queue before re-enqueueing,
+        // exactly as AVFoundation requires for a route/configuration reset.
+        didSeek = [self performSeek:audioRendererRecoveryTime];
+        NSLog(
+            @"BUNNY_DECODER audio_renderer_recovery completed=%@ position=%.3f",
+            didSeek ? @"yes" : @"no",
+            audioRendererRecoveryTime
+        );
+    }
 
     if (requestedAudio != BunnyDecoderNoSelectionRequest
         && requestedAudio != _audioStreamIndex) {
@@ -1280,6 +1405,11 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
             && !didSeek) {
             didSeek = [self performSeek:selectionTime];
         }
+    }
+    if (hasAudioRendererRecovery) {
+        [_controlLock lock];
+        _audioRendererRecoveryInFlight = NO;
+        [_controlLock unlock];
     }
     return didSeek;
 }
@@ -2630,6 +2760,7 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
 }
 
 - (void)releaseFFmpegResources {
+    atomic_store(&_mediaOpened, false);
     sws_freeContext(_scaleContext);
     _scaleContext = NULL;
     swr_free(&_resampleContext);

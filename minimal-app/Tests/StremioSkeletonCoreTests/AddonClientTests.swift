@@ -30,7 +30,7 @@ final class AddonClientTests: XCTestCase {
             "/manifest.json": #"{"id":"org.test","version":"1.0.0","name":"Test","resources":["catalog","meta","stream"],"types":["movie"],"catalogs":[{"type":"movie","id":"public","name":"Public"}]}"#,
             "/catalog/movie/public.json": #"{"metas":[{"id":"tt1254207","type":"movie","name":"Big Buck Bunny"}]}"#,
             "/catalog/movie/public/skip=1.json": #"{"metas":[{"id":"tt0000002","type":"movie","name":"Second Page"}]}"#,
-            "/meta/movie/tt1254207.json": #"{"meta":{"id":"tt1254207","type":"movie","name":"Big Buck Bunny","description":"Open movie","trailerStreams":[{"title":"Official trailer","ytId":"yUQM7H4Swgw"}]}}"#,
+            "/meta/movie/tt1254207.json": #"{"meta":{"id":"tt1254207","type":"movie","name":"Big Buck Bunny","description":"Open movie","cast":["Bunny","Squirrel"],"trailerStreams":[{"title":"Official trailer","ytId":"yUQM7H4Swgw"}]}}"#,
             "/stream/movie/tt1254207.json": #"{"streams":[{"name":"Local MP4","url":"http://127.0.0.1:8765/sample.mp4"}]}"#,
         ])
         let endpoint = try AddonEndpoint(manifestInput: "https://example.com/manifest.json")
@@ -45,6 +45,7 @@ final class AddonClientTests: XCTestCase {
         XCTAssertEqual(manifest.name, "Test")
         XCTAssertEqual(catalog.map(\.name), ["Big Buck Bunny"])
         XCTAssertEqual(meta.description, "Open movie")
+        XCTAssertEqual(meta.actorNames, ["Bunny", "Squirrel"])
         XCTAssertEqual(
             meta.preferredTrailerURL?.absoluteString,
             "https://www.youtube.com/watch?v=yUQM7H4Swgw"
@@ -52,6 +53,37 @@ final class AddonClientTests: XCTestCase {
         XCTAssertEqual(streams.first?.displayName, "Local MP4")
         XCTAssertTrue(streams.first?.isDirectlyPlayable == true)
         XCTAssertEqual(secondPage.map(\.name), ["Second Page"])
+    }
+
+    func testMergesCastAndCommunityActorsWithoutDuplicates() throws {
+        let json = #"{"id":"tt-cast","type":"series","name":"Cast Fixture","cast":["Ada Star","Bo Ray"],"actors":[" ada star ","Cy Moon"]}"#
+
+        let meta = try JSONDecoder().decode(MetaItem.self, from: Data(json.utf8))
+
+        XCTAssertEqual(meta.actorNames, ["Ada Star", "Bo Ray", "Cy Moon"])
+    }
+
+    func testDecodesProviderTriviaAndRichFactFieldsWithoutBreakingMetadata() throws {
+        let json = #"{"id":"tt-trivia","type":"series","name":"Trivia Fixture","awards":"Won 3 awards.","status":"Continuing","released":"2020-05-04T00:00:00.000Z","trivia":"A provider supplied fact.","funFacts":["Another fact.","A provider supplied fact."]}"#
+
+        let meta = try JSONDecoder().decode(MetaItem.self, from: Data(json.utf8))
+
+        XCTAssertEqual(meta.awards, "Won 3 awards.")
+        XCTAssertEqual(meta.status, "Continuing")
+        XCTAssertEqual(meta.released, "2020-05-04T00:00:00.000Z")
+        XCTAssertEqual(meta.explicitTriviaFacts, [
+            "A provider supplied fact.",
+            "Another fact.",
+        ])
+    }
+
+    func testUnsupportedCommunityTriviaShapeDoesNotRejectTheTitle() throws {
+        let json = #"{"id":"tt-trivia-object","type":"movie","name":"Object Fixture","trivia":{"text":"Unknown shape"}}"#
+
+        let meta = try JSONDecoder().decode(MetaItem.self, from: Data(json.utf8))
+
+        XCTAssertEqual(meta.name, "Object Fixture")
+        XCTAssertTrue(meta.explicitTriviaFacts.isEmpty)
     }
 
     func testManifestMatchesStreamCapabilityByResourceAndType() throws {
@@ -71,7 +103,7 @@ final class AddonClientTests: XCTestCase {
     }
 
     func testLegacyTrailerAndMetadataFallbackResolveToPlayableURLs() throws {
-        let legacyJSON = #"{"id":"tt1","type":"movie","name":"Movie","trailers":[{"source":"abc_123-XYZ","type":"Trailer"}]}"#
+        let legacyJSON = #"{"id":"tt1","type":"movie","name":"Movie","cast":["Ari Actor","Sam Star"],"trailers":[{"source":"abc_123-XYZ","type":"Trailer"}]}"#
         let fallback = try JSONDecoder().decode(MetaItem.self, from: Data(legacyJSON.utf8))
         let providerDetail = MetaItem(
             id: "tt1",
@@ -83,6 +115,7 @@ final class AddonClientTests: XCTestCase {
         let enriched = providerDetail.fillingTrailerMetadata(from: fallback)
 
         XCTAssertEqual(enriched.description, "Provider description")
+        XCTAssertEqual(enriched.actorNames, ["Ari Actor", "Sam Star"])
         XCTAssertEqual(
             enriched.preferredTrailerURL?.absoluteString,
             "https://www.youtube.com/watch?v=abc_123-XYZ"
@@ -109,6 +142,45 @@ final class AddonClientTests: XCTestCase {
             enriched.preferredTrailerURL?.absoluteString,
             "https://www.youtube.com/watch?v=series_trailer_123"
         )
+    }
+
+    func testSparsePreferredSeriesFillsMissingPresentationAndEpisodeMetadata() throws {
+        let preferred = MetaItem(
+            id: "tt-series",
+            type: "series",
+            name: "Series",
+            description: "   ",
+            runtime: "48 min",
+            videos: []
+        )
+        let fallback = MetaItem(
+            id: "tt-series",
+            type: "series",
+            name: "Series",
+            poster: URL(string: "https://images.example/series-poster.jpg"),
+            background: URL(string: "https://images.example/series-background.jpg"),
+            description: "Fallback synopsis",
+            releaseInfo: "2024–",
+            runtime: "52 min",
+            videos: [
+                Video(
+                    id: "tt-series:1:1",
+                    title: "Pilot",
+                    season: 1,
+                    episode: 1,
+                    overview: "The story begins."
+                ),
+            ]
+        )
+
+        let enriched = preferred.fillingTrailerMetadata(from: fallback)
+
+        XCTAssertEqual(enriched.poster, fallback.poster)
+        XCTAssertEqual(enriched.background, fallback.background)
+        XCTAssertEqual(enriched.description, "Fallback synopsis")
+        XCTAssertEqual(enriched.releaseInfo, "2024–")
+        XCTAssertEqual(enriched.videos, fallback.videos)
+        XCTAssertEqual(enriched.runtime, "48 min", "Preferred non-empty values must still win")
     }
 
     func testDecodesEpisodeThumbnailFromSeriesMetadata() throws {

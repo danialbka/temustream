@@ -2,7 +2,8 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-BUILD_ROOT="${SKELETON_BUILD_ROOT:-/private/tmp/stremio-skeleton-build}"
+CACHE_ROOT="${STREMIO_BUILD_CACHE_ROOT:-/private/tmp/stremio-build-cache}"
+BUILD_ROOT="${SKELETON_BUILD_ROOT:-$CACHE_ROOT/products}"
 APP_DIR="$BUILD_ROOT/simulator/StremioSkeleton.app"
 BUNDLE_ID="local.stremio.skeleton"
 DEVICE_ID="${SIMULATOR_ID:-$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name == "iPhone 17 Pro")][0].udid')}"

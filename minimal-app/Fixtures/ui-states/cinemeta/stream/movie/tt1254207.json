@@ -1,6 +1,6 @@
 {
   "streams": [
-    { "name": "Local H.264 stream", "title": "1080p · Direct", "url": "http://127.0.0.1:18766/sample.mp4" },
+    { "name": "Local H.264 stream", "title": "1080p · Direct", "url": "http://127.0.0.1:18766/sample-content.mp4" },
     { "name": "Fixture torrent", "title": "1080p · Torrent", "infoHash": "08ada5a7a6183aae1e09d831df6748d566095a10", "fileIdx": 0 }
   ]
 }

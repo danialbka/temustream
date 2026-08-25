@@ -6,6 +6,9 @@ extension Notification.Name {
     static let playbackVoiceCaptureDidChange = Notification.Name(
         "TemuStream.playbackVoiceCaptureDidChange"
     )
+    static let playbackAudioOutputWasDisconnected = Notification.Name(
+        "TemuStream.playbackAudioOutputWasDisconnected"
+    )
 }
 
 /// Keeps movie playout and LiveKit capture under one AVAudioSession owner.
@@ -18,12 +21,14 @@ extension Notification.Name {
 enum PlaybackAudioSession {
     private static var playbackRequirement: SessionRequirementHandle?
     private static var fallbackPlaybackActive = false
+    private static var routeChangeObserver: NSObjectProtocol?
 
     static var isPlaybackActive: Bool {
         playbackRequirement != nil || fallbackPlaybackActive
     }
 
     static func beginPlayback() {
+        observeOutputRouteChangesIfNeeded()
         guard !isPlaybackActive else { return }
         do {
             playbackRequirement = try AudioManager.shared.acquireSessionRequirement(.playout)
@@ -74,6 +79,74 @@ enum PlaybackAudioSession {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
             NSLog("PLAYBACK_AUDIO_SESSION state=reactivate_failed error=%@", error.localizedDescription)
+        }
+    }
+
+    /// Bluetooth connections are ordinary route changes, not interruptions.
+    /// Reactivate the shared session immediately, then let the active player
+    /// rebuild its renderer at the current playhead.
+    @discardableResult
+    private static func recoverPlaybackAfterRouteChange(reasonRawValue rawReason: UInt) -> Bool {
+        guard isPlaybackActive else { return false }
+        guard let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason),
+              routeChangeNeedsPlaybackReactivation(reason)
+        else { return false }
+
+        reactivatePlayback()
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+            .map { $0.portType.rawValue }
+            .joined(separator: ",")
+        NSLog(
+            "PLAYBACK_AUDIO_SESSION route_change=%ld outputs=%@ recovery=requested",
+            rawReason,
+            outputs.isEmpty ? "none" : outputs
+        )
+        return true
+    }
+
+    private static func routeChangeNeedsPlaybackReactivation(
+        _ reason: AVAudioSession.RouteChangeReason
+    ) -> Bool {
+        switch reason {
+        case .newDeviceAvailable:
+            true
+        // Do not force playback onto the speaker after headphones disappear.
+        // AVPlayer/LiveKit retain ownership of their normal privacy pause.
+        case .unknown, .oldDeviceUnavailable, .categoryChange, .override,
+             .wakeFromSleep, .noSuitableRouteForCategory,
+             .routeConfigurationChange:
+            false
+        @unknown default:
+            false
+        }
+    }
+
+    private static func observeOutputRouteChangesIfNeeded() {
+        guard routeChangeObserver == nil else { return }
+        routeChangeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { notification in
+            guard let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey]
+                    as? UInt
+            else { return }
+            Task { @MainActor in
+                guard isPlaybackActive else { return }
+                guard let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason)
+                else { return }
+                if reason == .oldDeviceUnavailable {
+                    // Preserve Apple's headphones-unplug privacy behavior for
+                    // custom renderers that do not pause automatically.
+                    NotificationCenter.default.post(
+                        name: .playbackAudioOutputWasDisconnected,
+                        object: nil
+                    )
+                    NSLog("PLAYBACK_AUDIO_SESSION route_change=%ld privacy=pause", rawReason)
+                    return
+                }
+                _ = recoverPlaybackAfterRouteChange(reasonRawValue: rawReason)
+            }
         }
     }
 

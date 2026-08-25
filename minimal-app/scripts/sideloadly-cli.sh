@@ -4,6 +4,7 @@ umask 077
 
 script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
+retention_tool="$repo_root/scripts/build-cache-retention.sh"
 snapshot_path="${SIDELOADLY_SNAPSHOT:-$repo_root/config/sideloadly-orangeapple.snapshot.json}"
 support_dir="${HOME}/Library/Application Support/sideloadly"
 database_path="$support_dir/installations.db"
@@ -13,6 +14,7 @@ anisette_option_path="$support_dir/option-anisette-mode"
 zipstream_option_path="$support_dir/option-zipstream"
 chunk_option_path="$support_dir/option-custom-chunk-size"
 cli_tmp_dir=""
+cli_tmp_cache_registered=0
 queue_token=""
 silent_process_pid=""
 profile_captured=0
@@ -59,6 +61,11 @@ cleanup() {
     sqlite3 "$database_path" \
       "UPDATE installations SET enqueued_at=NULL, enqueue_token=NULL WHERE id=$installation_id AND enqueue_token='$escaped_cleanup_token';" \
       >/dev/null 2>&1 || true
+  fi
+  if (( cli_tmp_cache_registered == 1 )) && [[ -n "${cli_tmp_dir:-}" ]]; then
+    "$retention_tool" release --path "$cli_tmp_dir" --pid "$$" \
+      >/dev/null 2>&1 || true
+    cli_tmp_cache_registered=0
   fi
   if [[ -n "${cli_tmp_dir:-}" \
         && "$cli_tmp_dir" == /private/tmp/stremio-sideloadly-cli.* \
@@ -110,6 +117,10 @@ read_option() {
 ensure_tmp_dir() {
   if [[ -z "$cli_tmp_dir" ]]; then
     cli_tmp_dir="$(mktemp -d /private/tmp/stremio-sideloadly-cli.XXXXXX)"
+    "$retention_tool" register --kind transient --path "$cli_tmp_dir" --pid "$$" \
+      >/dev/null
+    cli_tmp_cache_registered=1
+    "$retention_tool" prune --apply --quiet --protect "$cli_tmp_dir"
   fi
 }
 

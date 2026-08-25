@@ -34,11 +34,38 @@ public enum EpisodePlaybackIdentity {
     }
 }
 
+public enum EpisodePlaybackCompletionTransition: Equatable, Sendable {
+    case noChange
+    case markIncomplete
+    case markCompleted
+}
+
+public enum EpisodePlaybackCompletionPolicy {
+    /// Selecting a completed episode is not enough to clear it. Once a replay
+    /// has produced meaningful progress, it becomes unfinished again until it
+    /// reaches the same completion threshold as a first viewing.
+    public static func transition(
+        isCompleted: Bool,
+        position: TimeInterval,
+        duration: TimeInterval
+    ) -> EpisodePlaybackCompletionTransition {
+        if PlaybackProgress.isCompleted(position: position, duration: duration) {
+            return .markCompleted
+        }
+        if isCompleted,
+           PlaybackProgress.shouldSave(position: position, duration: duration) {
+            return .markIncomplete
+        }
+        return .noChange
+    }
+}
+
 public actor PlaybackCompletionStore {
     private let fileURL: URL
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var cache: [PlaybackCompletion]?
+    private var latestUpdates: [String: Date] = [:]
 
     public init(fileURL: URL) {
         self.fileURL = fileURL
@@ -69,6 +96,11 @@ public actor PlaybackCompletionStore {
         .values
         .sorted { $0.completedAt > $1.completedAt }
         cache = current
+        latestUpdates = Dictionary(
+            uniqueKeysWithValues: current.map {
+                ($0.contentIdentifier, $0.completedAt)
+            }
+        )
         return current
     }
 
@@ -79,6 +111,10 @@ public actor PlaybackCompletionStore {
     ) throws -> [PlaybackCompletion] {
         var current = try items()
         guard !contentIdentifier.isEmpty else { return current }
+        if let latest = latestUpdates[contentIdentifier], latest > completedAt {
+            return current
+        }
+        latestUpdates[contentIdentifier] = completedAt
         if let existing = current.first(where: {
             $0.contentIdentifier == contentIdentifier
         }), existing.completedAt >= completedAt {
@@ -93,6 +129,25 @@ public actor PlaybackCompletionStore {
             )
         )
         current.sort { $0.completedAt > $1.completedAt }
+        try persist(current)
+        return current
+    }
+
+    @discardableResult
+    public func markIncomplete(
+        contentIdentifier: String,
+        updatedAt: Date = Date()
+    ) throws -> [PlaybackCompletion] {
+        var current = try items()
+        guard !contentIdentifier.isEmpty else { return current }
+        if let latest = latestUpdates[contentIdentifier], latest > updatedAt {
+            return current
+        }
+        latestUpdates[contentIdentifier] = updatedAt
+
+        let previousCount = current.count
+        current.removeAll { $0.contentIdentifier == contentIdentifier }
+        guard current.count != previousCount else { return current }
         try persist(current)
         return current
     }

@@ -13,6 +13,7 @@ struct BunnyPlayerScreen: View {
 
     let title: String
     private let onProgress: PlaybackProgressHandler?
+    private let onPlaybackReady: PlaybackReadyHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     private let watchChannel: WatchPlaybackControlChannel?
     private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
@@ -35,12 +36,14 @@ struct BunnyPlayerScreen: View {
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
+        onPlaybackReady: PlaybackReadyHandler? = nil,
         watchChannel: WatchPlaybackControlChannel? = nil,
         onControlsVisibilityChanged: PlaybackControlsVisibilityHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)? = nil
     ) {
         self.title = title
         self.onProgress = onProgress
+        self.onPlaybackReady = onPlaybackReady
         self.watchChannel = watchChannel
         self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
@@ -137,6 +140,10 @@ struct BunnyPlayerScreen: View {
         .onChange(of: viewportMode) { mode in
             NSLog("PLAYER_VIEWPORT engine=Bunny mode=%@", mode.rawValue)
         }
+        .onChange(of: model.noticeMessage) { message in
+            guard let message else { return }
+            showToast(message, duration: 4)
+        }
         .task(id: retryRevision) { await runPlayback() }
         .onAppear {
             onControlsVisibilityChanged?(controlsVisible)
@@ -144,7 +151,7 @@ struct BunnyPlayerScreen: View {
             if startsLandscapeForVerification {
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(350))
-                    BunnyPresentation.toggleOrientation()
+                    BunnyPresentation.ensureLandscape()
                 }
             }
         }
@@ -183,6 +190,11 @@ struct BunnyPlayerScreen: View {
             NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)
         ) { notification in
             model.handleAudioInterruption(notification)
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .playbackAudioOutputWasDisconnected)
+        ) { _ in
+            model.pauseAfterAudioOutputDisconnect()
         }
         .onReceive(
             NotificationCenter.default.publisher(for: .playbackVoiceCaptureDidChange)
@@ -234,8 +246,6 @@ struct BunnyPlayerScreen: View {
                 }
                 guard let nextMode, nextMode != viewportMode else { return }
                 viewportMode = nextMode
-                showToast(nextMode.notice)
-                scheduleControlsAutoHide()
             }
     }
 
@@ -287,6 +297,7 @@ struct BunnyPlayerScreen: View {
         do {
             try await model.prepare()
             guard !Task.isCancelled else { return }
+            onPlaybackReady?()
             #if targetEnvironment(simulator)
             await PlaybackAudioSession.startMicrophoneAuditIfRequested()
             #endif
@@ -349,11 +360,11 @@ struct BunnyPlayerScreen: View {
         }
     }
 
-    private func showToast(_ message: String) {
+    private func showToast(_ message: String, duration: TimeInterval = 1.4) {
         toastMessage = message
         let expected = message
         Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1.4))
+            try? await Task.sleep(for: .seconds(duration))
             if toastMessage == expected {
                 toastMessage = nil
             }
@@ -462,6 +473,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     @Published private(set) var pictureInPictureSupported = false
     @Published private(set) var debugSnapshot = BunnyDebugSnapshot.waiting
     @Published private(set) var usesCustomDecoder = false
+    @Published private(set) var noticeMessage: String?
 
     private let plan: PlaybackPlan
     private let title: String
@@ -490,6 +502,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private var customBufferedSeconds: TimeInterval = 0
     private var customDecodedFrames = 0
     private var customDroppedFrames = 0
+    private var customRenderedAudioFrames = 0
     private var customDisplayFPS: Double?
     private var customMetricsSampleTime = 0.0
     private var customMetricsSampleFrames = 0
@@ -499,6 +512,15 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private var captionRevision = 0
     private var applicationIsActive = true
     private var applicationLifecycleRevision = 0
+    private var pendingPlaybackNotice: String?
+
+    // FFmpeg's remote read timeout is 15 seconds. Resume seeks get one extra
+    // second for the completion callback to reach the main actor, followed by
+    // a separate window in which an actual post-seek frame must arrive.
+    private static let customResumeSeekTimeout: TimeInterval = 16
+    private static let customPostSeekMediaTimeout: TimeInterval = 8
+    private static let resumeFallbackNotice =
+        "Resume took too long, so Bunny started this stream from the beginning."
 
     init(
         plan: PlaybackPlan,
@@ -684,7 +706,13 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                     let target = itemDuration.isFinite && itemDuration > 0
                         ? min(resumePosition, max(itemDuration - 1, 0))
                         : resumePosition
-                    _ = await performSeek(to: target, resume: true)
+                    let restored = await performSeek(to: target, resume: true)
+                    if !restored {
+                        resumePosition = 0
+                        pendingPlaybackNotice = Self.resumeFallbackNotice
+                        _ = await seekCompletion(to: 0, tolerance: .zero)
+                        resumePlayback()
+                    }
                 }
 
                 if readyAt == nil {
@@ -699,6 +727,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                     currentTime = max(item.currentTime().seconds, 0)
                     isPreparing = false
                     statusMessage = ""
+                    publishPendingPlaybackNotice()
                     if !url.isFileURL {
                         item.preferredForwardBufferDuration = 8
                     }
@@ -729,42 +758,63 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         _ url: URL,
         preferHardwareVideoDecoding: Bool
     ) async throws {
-        do {
-            try await prepareCustomDecoder(
-                url,
-                preferHardwareVideoDecoding: preferHardwareVideoDecoding
-            )
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            let decoderError = error as NSError
-            let explicitlyRetryable = decoderError.userInfo[
-                BunnyFFmpegDecoderSoftwareRetryKey
-            ] as? Bool == true
-            let openedHardwareWithoutFrame = customOpenComplete
-                && customMediaInfo?.hasVideo == true
-                && !customFirstFrame
-                && customDecoder?.hardwareVideoDecoderNegotiated == true
-            guard preferHardwareVideoDecoding,
-                  explicitlyRetryable || openedHardwareWithoutFrame
-            else {
-                throw error
-            }
+        var useHardware = preferHardwareVideoDecoding
+        var didRestartAfterResumeFailure = false
 
-            softwareDecodeURLs.insert(url)
-            cleanupCurrentEngineForNextAttempt()
-            didRestorePosition = resumePosition <= 0
-            statusMessage = "Retrying with Bunny software decoder…"
-            NSLog(
-                "BUNNY_PLAYER decoder_fallback from=videotoolbox to=software host=%@ error=%@",
-                url.host ?? "local",
-                error.localizedDescription
-            )
-            try await prepareCustomDecoder(
-                url,
-                preferHardwareVideoDecoding: false
-            )
+        while !Task.isCancelled {
+            do {
+                try await prepareCustomDecoder(
+                    url,
+                    preferHardwareVideoDecoding: useHardware
+                )
+                return
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch BunnyPlaybackError.seekFailed
+                where resumePosition > 0 && !didRestartAfterResumeFailure {
+                didRestartAfterResumeFailure = true
+                let failedPosition = resumePosition
+                resumePosition = 0
+                pendingPlaybackNotice = Self.resumeFallbackNotice
+                cleanupCurrentEngineForNextAttempt()
+                didRestorePosition = true
+                statusMessage = "Starting this stream from the beginning…"
+                NSLog(
+                    "BUNNY_PLAYER resume_fallback=same_stream position=%.1f host=%@",
+                    failedPosition,
+                    url.host ?? "local"
+                )
+            } catch {
+                let decoderError = error as NSError
+                let explicitlyRetryable = decoderError.userInfo[
+                    BunnyFFmpegDecoderSoftwareRetryKey
+                ] as? Bool == true
+                let openedHardwareWithoutFrame = customOpenComplete
+                    && customMediaInfo?.hasVideo == true
+                    && !customFirstFrame
+                    && customDecoder?.hardwareVideoDecoderNegotiated == true
+                guard useHardware,
+                      explicitlyRetryable || openedHardwareWithoutFrame
+                else {
+                    if didRestartAfterResumeFailure {
+                        pendingPlaybackNotice = nil
+                    }
+                    throw error
+                }
+
+                useHardware = false
+                softwareDecodeURLs.insert(url)
+                cleanupCurrentEngineForNextAttempt()
+                didRestorePosition = resumePosition <= 0
+                statusMessage = "Retrying with Bunny software decoder…"
+                NSLog(
+                    "BUNNY_PLAYER decoder_fallback from=videotoolbox to=software host=%@ error=%@",
+                    url.host ?? "local",
+                    error.localizedDescription
+                )
+            }
         }
+        throw CancellationError()
     }
 
     private func prepareCustomDecoder(
@@ -790,6 +840,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         customBufferedSeconds = 0
         customDecodedFrames = 0
         customDroppedFrames = 0
+        customRenderedAudioFrames = 0
         customDisplayFPS = nil
         customMetricsSampleFrames = 0
         customMetricsSampleTime = ProcessInfo.processInfo.systemUptime
@@ -848,7 +899,9 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         }
         decoder.onSeekCompleted = { [weak self, weak decoder] position, succeeded in
             guard let self, let decoder, self.customDecoder === decoder else { return }
-            self.currentTime = max(position, 0)
+            if succeeded {
+                self.currentTime = max(position, 0)
+            }
             self.customSeekSucceeded = succeeded
             self.customSeekRevision += 1
             self.customMetricsSampleFrames = self.customDecodedFrames
@@ -857,7 +910,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                 self.customDisplayFPS = frameRate
             }
         }
-        decoder.onMetrics = { [weak self, weak decoder] decoded, dropped, _, buffered, _, _ in
+        decoder.onMetrics = { [weak self, weak decoder] decoded, dropped, renderedAudio, buffered, _, _ in
             guard let self, let decoder, self.customDecoder === decoder else { return }
             let now = ProcessInfo.processInfo.systemUptime
             let elapsed = now - self.customMetricsSampleTime
@@ -874,6 +927,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             }
             self.customDecodedFrames = decoded
             self.customDroppedFrames = dropped
+            self.customRenderedAudioFrames = renderedAudio
             self.customBufferedSeconds = max(buffered, 0)
         }
         decoder.onEnded = { [weak self, weak decoder] in
@@ -903,7 +957,12 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                     let target = duration > 0
                         ? min(resumePosition, max(duration - 1, 0))
                         : resumePosition
-                    guard await performSeek(to: target, resume: true) else {
+                    guard await performCustomSeek(
+                        to: target,
+                        resume: true,
+                        timeout: Self.customResumeSeekTimeout,
+                        postSeekMediaTimeout: Self.customPostSeekMediaTimeout
+                    ) else {
                         throw BunnyPlaybackError.seekFailed
                     }
                 } else {
@@ -917,6 +976,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                 wantsPlayback = true
                 isPreparing = false
                 statusMessage = ""
+                publishPendingPlaybackNotice()
                 refreshPlaybackState()
                 NSLog(
                     "BUNNY_PLAYER ready_ms=%.1f engine=custom_ffmpeg hardware=%@ requested=%@ container=%@ source=%@",
@@ -1216,7 +1276,12 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         return finished && abs(currentTime - target) <= 2.5
     }
 
-    private func performCustomSeek(to requestedTarget: TimeInterval, resume: Bool) async -> Bool {
+    private func performCustomSeek(
+        to requestedTarget: TimeInterval,
+        resume: Bool,
+        timeout: TimeInterval = 6,
+        postSeekMediaTimeout: TimeInterval? = nil
+    ) async -> Bool {
         guard let customDecoder else { return false }
         isSeeking = true
         let target = duration > 0
@@ -1227,28 +1292,67 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         customSeekSucceeded = false
         customDecoder.seek(toTime: target)
 
-        let deadline = ProcessInfo.processInfo.systemUptime + 6
+        let videoFramesBeforeSeek = customDecodedFrames
+        let audioFramesBeforeSeek = customRenderedAudioFrames
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
         while customSeekRevision < expectedRevision,
               ProcessInfo.processInfo.systemUptime < deadline,
               !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(25))
         }
-        let finished = customSeekRevision >= expectedRevision && customSeekSucceeded
-        currentTime = target
-        resumePosition = target
+        var finished = customSeekRevision >= expectedRevision && customSeekSucceeded
         wantsPlayback = resume
         if resume, finished {
             customDecoder.play(atRate: playbackRate)
         }
+        if finished, let postSeekMediaTimeout {
+            let mediaDeadline = ProcessInfo.processInfo.systemUptime + postSeekMediaTimeout
+            while !hasCustomMediaAdvanced(
+                videoFramesBeforeSeek: videoFramesBeforeSeek,
+                audioFramesBeforeSeek: audioFramesBeforeSeek
+            ), ProcessInfo.processInfo.systemUptime < mediaDeadline,
+                  customFailure == nil,
+                  !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+            finished = customFailure == nil && hasCustomMediaAdvanced(
+                videoFramesBeforeSeek: videoFramesBeforeSeek,
+                audioFramesBeforeSeek: audioFramesBeforeSeek
+            )
+        }
+        if finished {
+            currentTime = max(customDecoder.currentTime, target)
+            resumePosition = target
+        } else {
+            let decoderTime = customDecoder.currentTime
+            if decoderTime.isFinite {
+                currentTime = max(decoderTime, 0)
+            }
+        }
         isSeeking = false
         refreshPlaybackState()
         NSLog(
-            "BUNNY_PLAYER seek engine=custom_ffmpeg target=%.2f resume=%@ finished=%@",
+            "BUNNY_PLAYER seek engine=custom_ffmpeg target=%.2f resume=%@ timeout=%.1f post_frame=%@ finished=%@",
             target,
             resume ? "yes" : "no",
+            timeout,
+            postSeekMediaTimeout == nil ? "not-required" : "required",
             finished ? "yes" : "no"
         )
         return finished
+    }
+
+    private func hasCustomMediaAdvanced(
+        videoFramesBeforeSeek: Int,
+        audioFramesBeforeSeek: Int
+    ) -> Bool {
+        if customMediaInfo?.hasVideo == true {
+            return customDecodedFrames > videoFramesBeforeSeek
+        }
+        if customMediaInfo?.hasAudio == true {
+            return customRenderedAudioFrames > audioFramesBeforeSeek
+        }
+        return false
     }
 
     private func seekCompletion(to seconds: TimeInterval, tolerance: CMTime) async -> Bool {
@@ -1400,6 +1504,19 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         refreshPlaybackState()
     }
 
+    func pauseAfterAudioOutputDisconnect() {
+        guard wantsPlayback else { return }
+        wantsPlayback = false
+        if activeEngine == .customFFmpeg {
+            customDecoder?.pause()
+        } else {
+            player.pause()
+        }
+        refreshPlaybackState()
+        NSLog("BUNNY_PLAYER audio_route_disconnect action=pause")
+    }
+
+
     func applicationWillResignActive() {
         applicationIsActive = false
         applicationLifecycleRevision &+= 1
@@ -1472,6 +1589,8 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         selectedSubtitleID = nil
         usesCustomDecoder = false
         activeEngine = .native
+        noticeMessage = nil
+        pendingPlaybackNotice = nil
         customMediaInfo = nil
         customOpenComplete = false
         customFirstFrame = false
@@ -1482,12 +1601,19 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         customBufferedSeconds = 0
         customDecodedFrames = 0
         customDroppedFrames = 0
+        customRenderedAudioFrames = 0
         customDisplayFPS = nil
         customRecoveryAttempts = 0
         captionRevision += 1
         stallCount = 0
         didRestorePosition = resumePosition <= 0
         debugSnapshot = .waiting
+    }
+
+    private func publishPendingPlaybackNotice() {
+        guard let pendingPlaybackNotice else { return }
+        self.pendingPlaybackNotice = nil
+        noticeMessage = pendingPlaybackNotice
     }
 
     private func clearMediaOutputs() {
@@ -2816,6 +2942,20 @@ private enum BunnyPresentation {
         scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: target)) { error in
             NSLog("Bunny orientation update failed: %@", error.localizedDescription)
+        }
+    }
+
+    /// Idempotent simulator-verification entry point. Re-applying it for an
+    /// automatically presented episode keeps landscape instead of toggling
+    /// an already-landscape player back to portrait.
+    static func ensureLandscape() {
+        guard let scene = foregroundScene else { return }
+        let target = UIInterfaceOrientationMask.landscape
+        AppOrientationDelegate.supportedOrientations = target
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        guard !scene.effectiveGeometry.interfaceOrientation.isLandscape else { return }
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: target)) { error in
+            NSLog("Bunny landscape verification failed: %@", error.localizedDescription)
         }
     }
 

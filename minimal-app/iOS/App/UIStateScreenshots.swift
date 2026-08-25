@@ -14,6 +14,12 @@ struct UIStateScreenshotApp: App {
     init() {
         let environment = ProcessInfo.processInfo.environment
         let defaults = UserDefaults.standard
+        let requestedState = environment["UI_SCREENSHOT_STATE"] ?? "home-cinemeta"
+        if requestedState == "player-watch-together-enabled" {
+            defaults.set(true, forKey: WatchTogetherPreferences.enabledKey)
+        } else if requestedState == "player-watch-together-disabled" {
+            defaults.set(false, forKey: WatchTogetherPreferences.enabledKey)
+        }
         if let mode = environment["SKELETON_APPEARANCE_MODE"] {
             defaults.set(mode, forKey: AppearancePreferences.modeKey)
         }
@@ -56,7 +62,9 @@ private struct UIStateScreenshotRoot: View {
         [
             "home-cinemeta", "home-letterboxd", "home-series",
             "home-light-custom-theme", "catalog-error",
-            "details-streams", "details-resume", "details-series-episodes", "episode-streams",
+            "search-idle", "search-results",
+            "details-streams", "details-resume", "details-series-episodes",
+            "details-series-rewatch", "episode-streams",
             "episode-up-next",
             "details-trailer-active", "library-synced", "account-signed-in",
             "settings-player-legacy-av",
@@ -73,7 +81,34 @@ private struct UIStateScreenshotRoot: View {
             screenTab(label: "Home", systemImage: "rectangle.grid.2x2") {
                 NavigationStack { HomeView() }
             }
+        case "home-card-layout":
+            screenTab(label: "Home", systemImage: "rectangle.grid.2x2") {
+                NavigationStack {
+                    PosterCardLayoutSnapshotView(items: posterCardFixtureItems)
+                }
+            }
+        case "search-idle":
+            screenTab(label: "Search", systemImage: "magnifyingglass") {
+                NavigationStack { SearchView() }
+            }
+        case "search-results":
+            screenTab(label: "Search", systemImage: "magnifyingglass") {
+                NavigationStack { SearchView(initialQuery: "Big Buck Bunny") }
+            }
+        case "profiles-picker":
+            ViewingProfilePickerView(
+                snapshot: fixtureProfileSnapshot,
+                onSelect: { _ in },
+                onCreate: { _, _ in },
+                onUpdate: { _, _, _ in },
+                onArchive: { _ in },
+                onRestore: { _ in }
+            )
         case "details-streams":
+            NavigationStack {
+                DetailsView(seed: fixtureItem)
+            }
+        case "details-cast-movie":
             NavigationStack {
                 DetailsView(seed: fixtureItem)
             }
@@ -85,7 +120,11 @@ private struct UIStateScreenshotRoot: View {
             NavigationStack {
                 DetailsView(seed: fixtureItem)
             }
-        case "details-series-episodes":
+        case "details-series-episodes", "details-series-rewatch":
+            NavigationStack {
+                DetailsView(seed: fixtureSeriesItem)
+            }
+        case "details-cast-series":
             NavigationStack {
                 DetailsView(seed: fixtureSeriesItem)
             }
@@ -147,7 +186,7 @@ private struct UIStateScreenshotRoot: View {
                     .navigationTitle("Automatic recovery")
                     .navigationBarTitleDisplayMode(.inline)
             }
-        case "player-active":
+        case "player-active", "player-watch-together-disabled", "player-watch-together-enabled":
             NavigationStack {
                 PlayerScreen(url: fixtureVideoURL, title: "Big Buck Bunny")
             }
@@ -206,6 +245,9 @@ private struct UIStateScreenshotRoot: View {
                 )
             }
             prepared = true
+        case "search-idle", "search-results":
+            await model.start()
+            prepared = true
         case "details-resume":
             await model.start()
             model.recordPlaybackProgress(
@@ -256,6 +298,47 @@ private struct UIStateScreenshotRoot: View {
                 )
             )
             prepared = true
+        case "details-series-rewatch":
+            await model.start()
+            let identifier = EpisodePlaybackIdentity.contentIdentifier(
+                seriesID: fixtureSeriesItem.id,
+                videoID: fixtureEpisodeOne.id
+            )
+            let title = EpisodePlaybackIdentity.contentTitle(
+                seriesTitle: fixtureSeriesItem.name,
+                video: fixtureEpisodeOne
+            )
+            let metadata = PlaybackMediaMetadata.episode(
+                series: fixtureSeriesItem,
+                episode: fixtureEpisodeOne
+            )
+            model.recordPlaybackProgress(
+                contentIdentifier: identifier,
+                contentTitle: title,
+                stream: fixtureStream,
+                providerName: "Cinemeta Fixture",
+                position: 3_590,
+                duration: 3_600,
+                mediaMetadata: metadata
+            )
+            guard model.isEpisodeCompleted(fixtureEpisodeOne, in: fixtureSeriesItem) else {
+                fatalError("Fixture episode was not marked watched before replay")
+            }
+            model.recordPlaybackProgress(
+                contentIdentifier: identifier,
+                contentTitle: title,
+                stream: fixtureStream,
+                providerName: "Cinemeta Fixture",
+                position: 30,
+                duration: 3_600,
+                mediaMetadata: metadata
+            )
+            guard !model.isEpisodeCompleted(fixtureEpisodeOne, in: fixtureSeriesItem),
+                  model.episodeProgress(fixtureEpisodeOne, in: fixtureSeriesItem) != nil
+            else {
+                fatalError("Rewatch did not restore unfinished episode state")
+            }
+            prepared = true
         case "settings-player-legacy-av":
             let defaults = UserDefaults.standard
             defaults.set("avplayer", forKey: "preferredInternalPlayer")
@@ -278,8 +361,11 @@ private struct UIStateScreenshotRoot: View {
         if state == "episode-up-next" {
             readinessDelayMilliseconds = 3_000
         } else if state == "details-streams" || state == "details-resume"
-                    || state == "details-series-episodes" || state == "episode-streams"
-                    || state == "details-trailer-active" {
+                    || state == "details-series-episodes"
+                    || state == "details-series-rewatch" || state == "episode-streams"
+                    || state == "details-trailer-active" || state == "search-results"
+                    || state == "details-cast-movie" || state == "details-cast-series"
+                    || state == "home-card-layout" {
             readinessDelayMilliseconds = 1_500
         } else {
             readinessDelayMilliseconds = 650
@@ -300,7 +386,43 @@ private struct UIStateScreenshotRoot: View {
             poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-portrait.png"),
             description: "A cheerful open movie used to verify the complete playback workflow.",
             releaseInfo: "2008",
-            genres: ["Animation", "Comedy"]
+            genres: ["Animation", "Comedy"],
+            cast: ["Big Buck Bunny", "Frank the Flying Squirrel"],
+            runtime: "10 min",
+            imdbRating: "7.3",
+            director: ["Sacha Goedegebure"],
+            writer: ["Sacha Goedegebure"],
+            country: "Netherlands",
+            awards: "1 win.",
+            released: "2008-04-09T21:00:00.000Z",
+            trivia: ["The metadata provider identifies this as an open animated short."]
+        )
+    }
+
+    private var fixtureProfileSnapshot: ViewingProfileSnapshot {
+        let primaryID = UUID(uuidString: "E6472B2D-9BD7-4DCE-8014-5EED0419BFE2")!
+        return ViewingProfileSnapshot(
+            profiles: [
+                ViewingProfile(id: primaryID, name: "Danial", avatar: .lopBunny),
+                ViewingProfile(
+                    id: UUID(uuidString: "D1C19A55-D294-4B57-9309-B3B57F61AE46")!,
+                    name: "Avril",
+                    avatar: .avril
+                ),
+                ViewingProfile(
+                    id: UUID(uuidString: "52AE649F-C851-4A3F-8828-F3657D3DC178")!,
+                    name: "Sam",
+                    avatar: .sam
+                ),
+                ViewingProfile(
+                    id: UUID(uuidString: "DEB19D45-A01A-4F13-A640-46DF14D7D6DA")!,
+                    name: "Kids",
+                    avatar: .goldenPuppy
+                ),
+            ],
+            archivedProfiles: [],
+            activeProfileID: primaryID,
+            primaryProfileID: primaryID
         )
     }
 
@@ -317,11 +439,45 @@ private struct UIStateScreenshotRoot: View {
             description: "A deterministic series used to verify episode playback state.",
             releaseInfo: "2024–",
             genres: ["Drama", "Adventure"],
+            cast: ["Avery Stone", "Mina Reyes", "Theo Grant"],
+            runtime: "48 min",
+            imdbRating: "8.1",
+            writer: ["Morgan Reed", "Avery Quinn"],
+            country: "New Zealand",
+            awards: "Won 2 television awards.",
+            status: "Continuing",
+            released: "2024-01-05T00:00:00.000Z",
             videos: [fixtureEpisodeOne, fixtureEpisodeTwo],
             trailerStreams: [
                 TrailerStream(title: "Official trailer", youtubeID: "yUQM7H4Swgw")
             ]
         )
+    }
+
+    private var posterCardFixtureItems: [MetaItem] {
+        [
+            MetaItem(
+                id: "poster-wide",
+                type: "series",
+                name: "Short Title",
+                poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-wide.png"),
+                releaseInfo: "2024–"
+            ),
+            MetaItem(
+                id: "poster-tall",
+                type: "series",
+                name: "A Very Long Series Title That Needs Two Lines",
+                poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-tall.png"),
+                releaseInfo: "2025–"
+            ),
+            MetaItem(
+                id: "poster-standard",
+                type: "series",
+                name: "Medium Length Title",
+                poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-portrait.png"),
+                releaseInfo: "2026–"
+            ),
+        ]
     }
 
     private var fixtureEpisodeOne: Video {
@@ -417,6 +573,31 @@ private struct UIStateScreenshotRoot: View {
                 sourceID: "fixture-episode-one"
             )
         ]
+    }
+}
+
+private struct PosterCardLayoutSnapshotView: View {
+    let items: [MetaItem]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Poster cards")
+                    .font(.headline)
+                Text("Wide, tall, and standard source artwork")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(items) { item in
+                        PosterCard(item: item)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                }
+            }
+            .padding()
+        }
+        .navigationTitle("TV Series")
     }
 }
 

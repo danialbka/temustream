@@ -21,6 +21,20 @@
                ReferencedContainer = "container:StremioSkeleton.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "261AE2A568DD6F489B5B9B82"
+               BuildableName = "StremioSkeletonUITests.xctest"
+               BlueprintName = "StremioSkeletonUITests"
+               ReferencedContainer = "container:StremioSkeleton.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -39,7 +53,20 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "261AE2A568DD6F489B5B9B82"
+               BuildableName = "StremioSkeletonUITests.xctest"
+               BlueprintName = "StremioSkeletonUITests"
+               ReferencedContainer = "container:StremioSkeleton.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
+      <CommandLineArguments>
+      </CommandLineArguments>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Release"

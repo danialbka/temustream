@@ -2,17 +2,52 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-BUILD_ROOT="${SKELETON_BUILD_ROOT:-/private/tmp/stremio-skeleton-build}"
+CACHE_ROOT="${STREMIO_BUILD_CACHE_ROOT:-/private/tmp/stremio-build-cache}"
+BUILD_ROOT="${SKELETON_BUILD_ROOT:-$CACHE_ROOT/products}"
 BUILD_DIR="$BUILD_ROOT/device"
 APP_DIR="$BUILD_DIR/StremioSkeleton.app"
 ARCHIVE="$ROOT_DIR/build/StremioSkeleton-device.zip"
 IPA="$ROOT_DIR/build/StremioSkeleton-device.ipa"
 IPA_ROOT="$BUILD_ROOT/ipa"
-DERIVED_DATA="${SKELETON_DERIVED_DATA:-/private/tmp/stremio-skeleton-ks-derived}"
+DERIVED_DATA="${SKELETON_DERIVED_DATA:-$CACHE_ROOT/DerivedData}"
 BUILT_APP="$DERIVED_DATA/Build/Products/Release-iphoneos/StremioSkeleton.app"
 BUILD_LOG="$ROOT_DIR/build/build-device.log"
+BUILD_LOCK="${SKELETON_BUILD_LOCK:-$CACHE_ROOT/locks/xcode.lock}"
+RETENTION_TOOL="$ROOT_DIR/scripts/build-cache-retention.sh"
+SOURCE_ID="${STREMIO_SOURCE_ID:-unverified}"
+STAGED_APP="$BUILD_DIR/.StremioSkeleton.app.tmp.$$"
+IPA_TEMP="$ROOT_DIR/build/.StremioSkeleton-device.ipa.tmp.$$"
+PROVENANCE="$ROOT_DIR/build/StremioSkeleton-device.ipa.source.json"
+PRODUCT_CACHE_REGISTERED=0
+DERIVED_CACHE_REGISTERED=0
 
-rm -rf "$APP_DIR"
+. "$ROOT_DIR/scripts/build-support.sh"
+
+cleanup() {
+  status=$?
+  trap - EXIT INT TERM
+  rm -rf "$STAGED_APP"
+  rm -f "$IPA_TEMP" "$PROVENANCE.tmp.$$"
+  if [ "$DERIVED_CACHE_REGISTERED" -eq 1 ]; then
+    stremio_release_build_cache "$RETENTION_TOOL" "$DERIVED_DATA"
+  fi
+  if [ "$PRODUCT_CACHE_REGISTERED" -eq 1 ]; then
+    stremio_release_build_cache "$RETENTION_TOOL" "$BUILD_ROOT"
+  fi
+  stremio_release_lock "$BUILD_LOCK"
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+stremio_acquire_lock "$BUILD_LOCK" "the Stremio Xcode build workspace" 900
+stremio_register_build_cache "$RETENTION_TOOL" products "$BUILD_ROOT"
+PRODUCT_CACHE_REGISTERED=1
+stremio_register_build_cache "$RETENTION_TOOL" derived-data "$DERIVED_DATA"
+DERIVED_CACHE_REGISTERED=1
+stremio_prune_build_caches "$RETENTION_TOOL" \
+  --protect "$BUILD_ROOT" --protect "$DERIVED_DATA"
+
+rm -rf "$APP_DIR" "$STAGED_APP"
 mkdir -p "$BUILD_DIR" "$ROOT_DIR/build"
 
 cd "$ROOT_DIR"
@@ -29,11 +64,16 @@ if ! xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   ARCHS=arm64 \
   ONLY_ACTIVE_ARCH=YES \
+  STREMIO_SOURCE_ID="$SOURCE_ID" \
   build >"$BUILD_LOG" 2>&1; then
   tail -n 80 "$BUILD_LOG" >&2
   exit 1
 fi
-cp -R "$BUILT_APP" "$APP_DIR"
+test -s "$BUILT_APP/StremioSkeleton"
+ditto "$BUILT_APP" "$STAGED_APP"
+test -s "$STAGED_APP/StremioSkeleton"
+test "$(plutil -extract StremioSourceIdentity raw -o - "$STAGED_APP/Info.plist")" = "$SOURCE_ID"
+mv "$STAGED_APP" "$APP_DIR"
 
 # The vendored MobileVLCKit device framework still carries armv7 and armv7s
 # slices even though this app targets iOS 16+. Keep only arm64 in the device
@@ -90,9 +130,23 @@ fi
 rm -rf "$IPA_ROOT/Payload"
 mkdir -p "$IPA_ROOT/Payload"
 ditto "$APP_DIR" "$IPA_ROOT/Payload/StremioSkeleton.app"
-rm -f "$IPA"
+rm -f "$IPA_TEMP"
 (
   cd "$IPA_ROOT"
-  /usr/bin/zip -qry -y "$IPA" Payload
+  /usr/bin/zip -qry -y "$IPA_TEMP" Payload
 )
+unzip -tq "$IPA_TEMP" >/dev/null
+mv -f "$IPA_TEMP" "$IPA"
+
+IPA_SHA256="$(shasum -a 256 "$IPA" | awk '{print $1}')"
+IPA_SIZE="$(stat -f '%z' "$IPA")"
+jq -n \
+  --arg sourceID "$SOURCE_ID" \
+  --arg ipaSHA256 "$IPA_SHA256" \
+  --arg capturedAt "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+  --argjson ipaBytes "$IPA_SIZE" \
+  '{schemaVersion: 1, sourceID: $sourceID, ipaSHA256: $ipaSHA256, ipaBytes: $ipaBytes, capturedAt: $capturedAt}' \
+  > "$PROVENANCE.tmp.$$"
+mv -f "$PROVENANCE.tmp.$$" "$PROVENANCE"
 echo "Packaged $IPA"
+echo "Source identity $SOURCE_ID"

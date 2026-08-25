@@ -11,6 +11,7 @@ struct BunnyPlayerScreen: View {
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
+        onPlaybackReady: PlaybackReadyHandler? = nil,
         watchChannel: WatchPlaybackControlChannel? = nil,
         onControlsVisibilityChanged: (@MainActor (Bool) -> Void)? = nil,
         onExhausted: (@MainActor (Error) -> Void)? = nil

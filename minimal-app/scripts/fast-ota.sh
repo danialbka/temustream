@@ -4,12 +4,14 @@ umask 077
 
 script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
+retention_tool="$repo_root/scripts/build-cache-retention.sh"
 snapshot_path="${SIDELOADLY_SNAPSHOT:-$repo_root/config/sideloadly-orangeapple.snapshot.json}"
 sideloadly_support_dir="${HOME}/Library/Application Support/sideloadly"
 fast_ota_support_dir="${STREMIO_FAST_OTA_SUPPORT:-${HOME}/Library/Application Support/stremio-fast-ota}"
 profile_cache="$fast_ota_support_dir/profile.mobileprovision"
 
 work_dir=""
+work_cache_registered=0
 temporary_keychain=""
 search_list_changed=0
 original_keychains=()
@@ -35,6 +37,7 @@ usage() {
 Usage:
   ./scripts/fast-ota.sh doctor [--seed-ipa PATH]
   ./scripts/fast-ota.sh update [--skip-build] [--ipa PATH] [--seed-ipa PATH]
+                               [--expected-source-id SHA256]
                                [--dry-run] [--no-launch] [--no-stage]
 
 The fast updater checks OrangeApple before doing expensive work, locally signs
@@ -67,6 +70,11 @@ cleanup_signing_keychain() {
 cleanup() {
   local exit_status=$?
   cleanup_signing_keychain
+  if (( work_cache_registered == 1 )) && [[ -n "$work_dir" ]]; then
+    "$retention_tool" release --path "$work_dir" --pid "$$" \
+      >/dev/null 2>&1 || true
+    work_cache_registered=0
+  fi
   if [[ -n "$work_dir" \
         && "$work_dir" == /private/tmp/stremio-fast-ota.* \
         && -d "$work_dir" ]]; then
@@ -89,6 +97,10 @@ json_value() {
 ensure_work_dir() {
   if [[ -z "$work_dir" ]]; then
     work_dir="$(mktemp -d /private/tmp/stremio-fast-ota.XXXXXX)"
+    "$retention_tool" register --kind transient --path "$work_dir" --pid "$$" \
+      >/dev/null
+    work_cache_registered=1
+    "$retention_tool" prune --apply --quiet --protect "$work_dir"
   fi
 }
 
@@ -346,6 +358,7 @@ create_signing_keychain() {
 inspect_source_artifacts() {
   local ipa_path="$1" info_entry info_count unpacked_app_count
   local local_watch_config shipped_convex_url shipped_livekit_url
+  local provenance_path provenance_source_id provenance_ipa_sha256
   [[ -f "$ipa_path" ]] || fail "IPA not found: $ipa_path"
   unzip -tq "$ipa_path" >/dev/null || fail "IPA archive validation failed"
   ensure_work_dir
@@ -358,8 +371,14 @@ inspect_source_artifacts() {
   ipa_version="$(plutil -extract CFBundleShortVersionString raw -o - "$work_dir/ipa-Info.plist")"
   ipa_build="$(plutil -extract CFBundleVersion raw -o - "$work_dir/ipa-Info.plist")"
   ipa_name="$(plutil -extract CFBundleName raw -o - "$work_dir/ipa-Info.plist")"
+  ipa_source_id="$(plutil -extract StremioSourceIdentity raw -o - "$work_dir/ipa-Info.plist" 2>/dev/null || true)"
   [[ "$ipa_bundle_id" == "$source_bundle_id" ]] || fail \
     "IPA bundle ID is $ipa_bundle_id; expected $source_bundle_id"
+  [[ ${#ipa_source_id} == 64 && "$ipa_source_id" != *[^0-9a-f]* ]] || fail \
+    "IPA is missing a verified source identity; rebuild it with dev-workflow.sh"
+  if [[ -n "$expected_source_id" && "$ipa_source_id" != "$expected_source_id" ]]; then
+    fail "IPA source ${ipa_source_id[1,12]} does not match current source ${expected_source_id[1,12]}; refusing a stale install"
+  fi
 
   # WatchTogether.local.xcconfig is intentionally ignored because it is a
   # machine-local endpoint snapshot. Clean build copies must carry that file.
@@ -398,7 +417,18 @@ inspect_source_artifacts() {
   ipa_absolute_path="${ipa_path:A}"
   ipa_size="$(stat -f '%z' "$ipa_absolute_path")"
   ipa_md5="$(md5 -q "$ipa_absolute_path" | tr '[:upper:]' '[:lower:]')"
-  note "artifact: $ipa_name $ipa_version ($ipa_build), $ipa_size bytes"
+  ipa_sha256="$(shasum -a 256 "$ipa_absolute_path" | awk '{print $1}')"
+
+  provenance_path="$ipa_absolute_path.source.json"
+  if [[ -f "$provenance_path" ]]; then
+    provenance_source_id="$(jq -er '.sourceID' "$provenance_path")"
+    provenance_ipa_sha256="$(jq -er '.ipaSHA256' "$provenance_path")"
+    [[ "$provenance_source_id" == "$ipa_source_id" ]] || fail \
+      "IPA provenance source identity does not match its embedded identity"
+    [[ "$provenance_ipa_sha256" == "$ipa_sha256" ]] || fail \
+      "IPA bytes changed after provenance was recorded"
+  fi
+  note "artifact: $ipa_name $ipa_version ($ipa_build), source ${ipa_source_id[1,12]}, $ipa_size bytes"
 }
 
 sign_application() {
@@ -546,6 +576,8 @@ write_receipt() {
     --arg method "local-codesign+coredevice" \
     --arg sourceIPA "$ipa_absolute_path" \
     --arg sourceMD5 "$ipa_md5" \
+    --arg sourceSHA256 "$ipa_sha256" \
+    --arg sourceIdentity "$ipa_source_id" \
     --arg version "$ipa_version" \
     --arg build "$ipa_build" \
     --arg installedBundleID "$installed_bundle_id" \
@@ -577,6 +609,8 @@ write_receipt() {
       sourceIPA: $sourceIPA,
       sourceBytes: $sourceBytes,
       sourceMD5: $sourceMD5,
+      sourceSHA256: $sourceSHA256,
+      sourceIdentity: $sourceIdentity,
       profileExpiration: $profileExpiration,
       autoRefreshStaged: ($autoRefreshStaged == 1),
       timingsSeconds: {
@@ -595,7 +629,7 @@ write_receipt() {
   note "receipt: $receipt_path"
 }
 
-for dependency in jq plutil openssl security codesign xcrun ditto unzip curl md5 stat xattr find grep awk sed sort; do
+for dependency in jq plutil openssl security codesign xcrun ditto unzip curl md5 shasum stat xattr find grep awk sed sort; do
   require_command "$dependency"
 done
 load_snapshot
@@ -636,6 +670,7 @@ case "$command_name" in
     dry_run=0
     launch_after_install=1
     stage_auto_refresh=1
+    expected_source_id=""
     while (( $# > 0 )); do
       case "$1" in
         --ipa)
@@ -646,6 +681,13 @@ case "$command_name" in
         --seed-ipa)
           (( $# >= 2 )) || fail "--seed-ipa requires a path"
           seed_ipa="$2"
+          shift 2
+          ;;
+        --expected-source-id)
+          (( $# >= 2 )) || fail "--expected-source-id requires a SHA-256 value"
+          expected_source_id="${2:l}"
+          [[ ${#expected_source_id} == 64 && "$expected_source_id" != *[^0-9a-f]* ]] \
+            || fail "--expected-source-id must be exactly 64 hexadecimal characters"
           shift 2
           ;;
         --skip-build)
@@ -683,8 +725,19 @@ case "$command_name" in
 
     phase_started=$SECONDS
     if (( skip_build == 0 )); then
-      note "build: creating the current unsigned device app and handoff IPA"
-      SKELETON_SKIP_DEVICE_ZIP=1 "$repo_root/scripts/build-device.sh"
+      note "build: materializing current source outside File Provider and reusing local caches"
+      dev_metadata="$work_dir/dev-build.json"
+      STREMIO_DEV_METADATA_OUT="$dev_metadata" \
+        SKELETON_SKIP_DEVICE_ZIP=1 \
+        "$repo_root/scripts/dev-workflow.sh" build-device
+      ipa_path="$(jq -er '.artifact' "$dev_metadata")"
+      expected_source_id="$(jq -er '.sourceID' "$dev_metadata")"
+    elif [[ -z "$expected_source_id" ]]; then
+      note "source: checking the supplied IPA against the current materialized source"
+      dev_metadata="$work_dir/dev-source.json"
+      STREMIO_DEV_METADATA_OUT="$dev_metadata" \
+        "$repo_root/scripts/dev-workflow.sh" prepare
+      expected_source_id="$(jq -er '.sourceID' "$dev_metadata")"
     fi
     build_seconds=$((SECONDS - phase_started))
     inspect_source_artifacts "$ipa_path"

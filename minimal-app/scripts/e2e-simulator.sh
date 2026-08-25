@@ -3,7 +3,8 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 SERVER_DIR="$ROOT_DIR/build/e2e-server"
-BUILD_ROOT="${SKELETON_BUILD_ROOT:-/private/tmp/stremio-skeleton-build}"
+CACHE_ROOT="${STREMIO_BUILD_CACHE_ROOT:-/private/tmp/stremio-build-cache}"
+BUILD_ROOT="${SKELETON_BUILD_ROOT:-$CACHE_ROOT/products}"
 BASE_APP_DIR="$BUILD_ROOT/simulator/StremioSkeleton.app"
 APP_DIR="$BUILD_ROOT/e2e-simulator/StremioSkeletonE2E.app"
 BUNDLE_ID="local.stremio.skeleton.e2e"

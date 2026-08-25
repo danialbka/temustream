@@ -36,7 +36,7 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertTrue(result.isEmpty)
     }
 
-    func testRemoteSnapshotDoesNotRetainUnrelatedLocalItems() async throws {
+    func testCompleteRemoteSnapshotDoesNotRetainOmittedLocalItems() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         let store = LibraryStore(fileURL: directory.appendingPathComponent("library.json"))
@@ -46,7 +46,6 @@ final class LibraryStoreTests: XCTestCase {
 
         let result = try await store.replaceWithRemoteSnapshot([
             RemoteLibraryItem(item: remote, removed: false),
-            RemoteLibraryItem(item: local, removed: true),
         ])
 
         XCTAssertEqual(result, [remote])

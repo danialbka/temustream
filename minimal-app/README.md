@@ -1,4 +1,4 @@
-# Skeleton — minimal Stremio-compatible iOS client
+# Skeleton — minimal Stremio-compatible iOS and tvOS client
 
 Skeleton is a clean-room SwiftUI client for the public Stremio add-on protocol.
 It keeps the useful product shape while removing the bundled Node runtime,
@@ -53,6 +53,10 @@ Bunny and Performance rather than a deprecated standalone choice.
 - deterministic simulator E2E flow through manifest, catalog, details, stream,
   real H.264/AAC direct and torrent-route playback startup, library persistence,
   account login/pull/push contracts, and session save/load/delete persistence
+- a dedicated `TemuStreamTV` target with a collapsible tvOS sidebar, cinematic
+  hero and horizontal shelves, remote-focus cards, large-screen detail and
+  episode layouts, profiles, account/add-on management, ranked stream failover,
+  and the native AVKit transport UI for Siri Remote seeking, audio, and subtitles
 
 ## Deliberately omitted
 
@@ -73,6 +77,8 @@ licensed decoder before closed-source distribution.
 ```sh
 ./scripts/test.sh
 ./scripts/build-simulator.sh
+./scripts/dev-workflow.sh build-tvos
+./scripts/dev-workflow.sh typecheck-tvos
 ./scripts/build-device.sh
 ./scripts/fast-ota.sh doctor
 ./scripts/fast-ota.sh update
@@ -85,6 +91,12 @@ licensed decoder before closed-source distribution.
 ./scripts/configure-watch-together.sh
 ./scripts/verify.sh
 ```
+
+The Apple TV app requires tvOS 18 or later. Install the tvOS Simulator runtime
+from Xcode Settings > Components, then run `./scripts/dev-workflow.sh build-tvos`
+to produce `build/TemuStreamTV-simulator.zip`. The `typecheck-tvos` command
+validates the complete target against the installed tvOS SDK without requiring
+a runtime.
 
 ## Watch Together development setup
 

@@ -76,6 +76,42 @@ struct WatchTogetherConfiguration {
     }
 }
 
+/// The small, stable slice of Watch Together state rendered by player chrome.
+///
+/// Room playback heartbeats replace `WatchTogetherModel.activeRoom` frequently.
+/// Keeping the controls on their own observable projection both makes join,
+/// leave, and microphone changes redraw immediately and avoids rebuilding the
+/// controls for playback-only room updates.
+struct WatchPlayerControlsSnapshot: Equatable {
+    let activeRoomID: String?
+    let activeContentKey: String?
+    let realtimeConnected: Bool
+    let voiceState: WatchVoiceControlState
+
+    static let idle = Self(
+        activeRoomID: nil,
+        activeContentKey: nil,
+        realtimeConnected: false,
+        voiceState: .off
+    )
+}
+
+@MainActor
+final class WatchPlayerControlsModel: ObservableObject {
+    @Published private(set) var snapshot: WatchPlayerControlsSnapshot = .idle
+
+    fileprivate func update(_ next: WatchPlayerControlsSnapshot) {
+        guard next != snapshot else { return }
+        snapshot = next
+        NSLog(
+            "WATCH_PLAYER_CONTROLS room=%@ realtime=%@ voice=%@",
+            next.activeRoomID ?? "none",
+            next.realtimeConnected ? "yes" : "no",
+            next.voiceState.rawValue
+        )
+    }
+}
+
 @MainActor
 final class WatchPlaybackControlChannel: ObservableObject {
     typealias SampleProvider = @MainActor () -> WatchLocalPlaybackSample?
@@ -184,17 +220,26 @@ final class WatchPlaybackControlChannel: ObservableObject {
 
 @MainActor
 final class WatchTogetherModel: ObservableObject {
+    let playerControls = WatchPlayerControlsModel()
+
+    @Published private(set) var isFeatureEnabled = WatchTogetherPreferences.isEnabled()
     @Published private(set) var profile: WatchProfile?
     @Published private(set) var friends: [WatchProfile] = []
     @Published private(set) var friendRequests: [WatchFriendRequest] = []
     @Published private(set) var roomInvites: [WatchRoomInvite] = []
-    @Published private(set) var activeRoom: WatchRoom?
+    @Published private(set) var activeRoom: WatchRoom? {
+        didSet { synchronizePlayerControls() }
+    }
     @Published private(set) var convexConnected = false
-    @Published private(set) var liveKitConnected = false
+    @Published private(set) var liveKitConnected = false {
+        didSet { synchronizePlayerControls() }
+    }
     @Published private(set) var liveParticipantCount = 0
-    @Published private(set) var voiceState = WatchVoiceControlState.off
+    @Published private(set) var voiceState = WatchVoiceControlState.off {
+        didSet { synchronizePlayerControls() }
+    }
     @Published private(set) var isCreatingProfile = false
-    @Published private(set) var statusMessage = "Watch Together is not configured"
+    @Published private(set) var statusMessage = "Watch Together is off"
     @Published var errorMessage: String?
 
     private let configuration: WatchTogetherConfiguration?
@@ -218,6 +263,9 @@ final class WatchTogetherModel: ObservableObject {
     private var playerContentKey: String?
     private var reconciler: WatchPlaybackReconciler?
     private var started = false
+    #if targetEnvironment(simulator)
+    private var didRunPlayerControlsUIAudit = false
+    #endif
 
     init(configuration: WatchTogetherConfiguration? = .current) {
         self.configuration = configuration
@@ -226,7 +274,130 @@ final class WatchTogetherModel: ObservableObject {
 
     var isConfigured: Bool { client != nil }
 
+    private func synchronizePlayerControls() {
+        playerControls.update(
+            WatchPlayerControlsSnapshot(
+                activeRoomID: activeRoom?.id,
+                activeContentKey: activeRoom?.contentKey,
+                realtimeConnected: liveKitConnected,
+                voiceState: voiceState
+            )
+        )
+    }
+
+    /// Drives the production player controls through their room and voice
+    /// states without touching Convex, LiveKit, or the playback timeline.
+    /// This is simulator-only and must be explicitly enabled at launch.
+    func runPlayerControlsUIAuditIfRequested(contentKey: String) async {
+        #if targetEnvironment(simulator)
+        let environment = ProcessInfo.processInfo.environment
+        guard isFeatureEnabled,
+              environment["SKELETON_WATCH_CONTROLS_AUDIT"] == "1",
+              !didRunPlayerControlsUIAudit
+        else { return }
+        didRunPlayerControlsUIAudit = true
+
+        let interval = max(
+            Double(environment["SKELETON_WATCH_CONTROLS_AUDIT_INTERVAL"] ?? "4") ?? 4,
+            1
+        )
+        let auditRoom = WatchRoom(
+            id: "simulator-controls-audit",
+            code: "ROOM-AUDIT",
+            hostProfileId: "simulator-profile",
+            contentKey: contentKey,
+            contentType: "movie",
+            contentTitle: "Player controls observation audit",
+            playback: WatchRoomPlayback(
+                position: 0,
+                isPlaying: true,
+                rate: 1,
+                versionCounter: 1,
+                versionActor: "simulator-profile",
+                updatedAt: Self.nowMilliseconds
+            ),
+            participants: [
+                WatchRoomParticipant(
+                    id: "simulator-profile",
+                    displayName: "Simulator",
+                    isHost: true
+                )
+            ]
+        )
+
+        NSLog("WATCH_PLAYER_UI_AUDIT stage=idle")
+        try? await Task.sleep(for: .seconds(interval))
+        guard !Task.isCancelled else { return }
+        activeRoom = auditRoom
+        NSLog("WATCH_PLAYER_UI_AUDIT stage=joined")
+
+        try? await Task.sleep(for: .seconds(interval))
+        guard !Task.isCancelled else { return }
+        liveKitConnected = true
+        NSLog("WATCH_PLAYER_UI_AUDIT stage=connected")
+
+        try? await Task.sleep(for: .seconds(interval))
+        guard !Task.isCancelled else { return }
+        voiceState = .live
+        NSLog("WATCH_PLAYER_UI_AUDIT stage=mic_live")
+
+        try? await Task.sleep(for: .seconds(interval))
+        guard !Task.isCancelled else { return }
+        voiceState = .off
+        NSLog("WATCH_PLAYER_UI_AUDIT stage=mic_muted")
+
+        try? await Task.sleep(for: .seconds(interval))
+        guard !Task.isCancelled else { return }
+        liveKitConnected = false
+        activeRoom = nil
+        NSLog("WATCH_PLAYER_UI_AUDIT stage=left")
+        #endif
+    }
+
+    func setFeatureEnabled(_ enabled: Bool) async {
+        guard enabled != isFeatureEnabled || (enabled && !started) else { return }
+        isFeatureEnabled = enabled
+
+        if enabled {
+            statusMessage = "Connecting Watch Together…"
+            errorMessage = nil
+            await start()
+            return
+        }
+
+        if activeRoom != nil {
+            await leaveRoom()
+        } else {
+            await stopMicrophone(markUnavailable: false)
+            await room?.disconnect()
+            room = nil
+            liveKitDelegate = nil
+            liveKitConnected = false
+            liveParticipantCount = 0
+            roomSubscriptions.removeAll()
+        }
+
+        // A quick off-on toggle can re-enable the feature while the room
+        // disconnect above is awaiting LiveKit or Convex. Do not let the older
+        // disable task tear down the newer enabled session.
+        guard !isFeatureEnabled else { return }
+        playerChannel?.setEventHandler(nil)
+        playerChannel = nil
+        playerContentKey = nil
+        subscriptions.removeAll()
+        roomSubscriptions.removeAll()
+        roomInvites = []
+        convexConnected = false
+        started = false
+        statusMessage = "Watch Together is off"
+        errorMessage = nil
+    }
+
     func start() async {
+        guard isFeatureEnabled else {
+            statusMessage = "Watch Together is off"
+            return
+        }
         guard !started else { return }
         started = true
         guard let client else {
@@ -246,15 +417,18 @@ final class WatchTogetherModel: ObservableObject {
             let restored: WatchProfile = try await queryOnce(
                 "profiles:me", args: ["deviceSecret": deviceSecret], as: WatchProfile.self
             )
+            guard isFeatureEnabled else { return }
             profile = restored
             statusMessage = "Friends connected"
             subscribeToFriends()
         } catch {
+            guard isFeatureEnabled else { return }
             statusMessage = "Choose a display name to get your friend code"
         }
     }
 
     func createProfile(displayName: String) async {
+        guard isFeatureEnabled else { return }
         let normalizedName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard normalizedName.count >= 2 else {
             errorMessage = "Enter a display name with at least 2 characters."
@@ -287,6 +461,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     func sendFriendRequest(code: String) async {
+        guard isFeatureEnabled else { return }
         guard let client else { return }
         do {
             let _: IdentifierResult = try await client.mutation(
@@ -297,6 +472,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     func respondToFriendRequest(_ request: WatchFriendRequest, accept: Bool) async {
+        guard isFeatureEnabled else { return }
         guard let client else { return }
         do {
             let _: AcceptedResult = try await client.mutation(
@@ -308,6 +484,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     func createRoom(contentKey: String, contentType: String, contentTitle: String) async {
+        guard isFeatureEnabled else { return }
         guard let client else { return }
         if activeRoom != nil { await leaveRoom() }
         do {
@@ -325,6 +502,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     func invite(_ friend: WatchProfile) async {
+        guard isFeatureEnabled else { return }
         guard let client, let activeRoom else { return }
         do {
             let _: IdentifierResult = try await client.mutation(
@@ -336,6 +514,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     func joinRoom(code: String) async {
+        guard isFeatureEnabled else { return }
         guard let client else { return }
         if activeRoom != nil { await leaveRoom() }
         do {
@@ -367,6 +546,10 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     func toggleMicrophone() async {
+        guard isFeatureEnabled else {
+            voiceState = .off
+            return
+        }
         guard liveKitConnected, room != nil else {
             voiceState = .unavailable
             return
@@ -399,6 +582,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     func attachPlayer(_ channel: WatchPlaybackControlChannel, contentKey: String) {
+        guard isFeatureEnabled else { return }
         playerChannel = channel
         playerContentKey = contentKey
         channel.setEventHandler { [weak self] kind, sample in
@@ -415,6 +599,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     private func subscribeToFriends() {
+        guard isFeatureEnabled else { return }
         guard let client else { return }
         client.subscribe(
             to: "friends:list", with: ["deviceSecret": deviceSecret], yielding: WatchFriendsPayload.self
@@ -449,6 +634,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     private func activateRoom(_ value: WatchRoom) async {
+        guard isFeatureEnabled else { return }
         errorMessage = nil
         activeRoom = value
         reconciler = WatchPlaybackReconciler(
@@ -485,6 +671,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     private func connectLiveKit(roomID: String) async {
+        guard isFeatureEnabled else { return }
         guard let client else { return }
         do {
             let token: LiveKitToken = try await client.action(
@@ -509,7 +696,8 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     private func publishLocal(kind: WatchPlaybackEventKind, sample: WatchLocalPlaybackSample) async {
-        guard let activeRoom,
+        guard isFeatureEnabled,
+              let activeRoom,
               activeRoom.contentKey == playerContentKey,
               var currentReconciler = reconciler
         else { return }
@@ -550,7 +738,8 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     fileprivate func receiveLiveKitData(_ data: Data, topic: String) {
-        guard topic == "temustream.playback.v1",
+        guard isFeatureEnabled,
+              topic == "temustream.playback.v1",
               let wireEvent = try? JSONDecoder().decode(WatchPlaybackEvent.self, from: data)
         else { return }
         // Participant wall clocks are not guaranteed to agree. Reliable LiveKit
@@ -616,6 +805,7 @@ final class WatchTogetherModel: ObservableObject {
     }
 
     fileprivate func liveKitConnectionChanged(_ room: Room, connected: Bool) {
+        guard isFeatureEnabled else { return }
         liveKitConnected = connected
         refreshLiveParticipants(room)
         if connected {

@@ -9,6 +9,7 @@ ARCHIVE="$CACHE_DIR/MobileVLCKit-3.7.3-319ed2c0-79128878.tar.xz"
 SOURCE_URL="https://download.videolan.org/pub/cocoapods/prod/MobileVLCKit-3.7.3-319ed2c0-79128878.tar.xz"
 EXPECTED_SHA256="0d04059906962ddc9a7bd1ebaa12e1f9ae85eb2466116a97a2f46886dd27a0a9"
 EXPECTED_FRAMEWORK_SHA256="bd4bf0517e94b20002b3d6c60623e979ff3882191b93a12fc4cce6bea18d87bc"
+VALIDATION_STAMP="$DEPENDENCY_DIR/MobileVLCKit.validation"
 
 framework_sha256() {
   framework_path="$1"
@@ -24,9 +25,38 @@ framework_sha256() {
   ) | shasum -a 256 | awk '{print $1}'
 }
 
+framework_metadata_sha256() {
+  framework_path="$1"
+  [ -d "$framework_path" ] || return 1
+  (
+    cd "$framework_path"
+    find . -type f ! -path '*/dSYMs/*' -exec stat -f '%N\t%z\t%m\t%c\t%i' {} + \
+      | LC_ALL=C sort
+  ) | shasum -a 256 | awk '{print $1}'
+}
+
 if [ -d "$FRAMEWORK_DIR" ]; then
+  if [ "${SKELETON_VLC_VALIDATION_CACHE:-0}" = "1" ] && [ -s "$VALIDATION_STAMP" ]; then
+    CACHED_CONTENT_SHA="$(sed -n '1p' "$VALIDATION_STAMP")"
+    CACHED_METADATA_SHA="$(sed -n '2p' "$VALIDATION_STAMP")"
+    CURRENT_METADATA_SHA="$(framework_metadata_sha256 "$FRAMEWORK_DIR" || true)"
+    if [ "$CACHED_CONTENT_SHA" = "$EXPECTED_FRAMEWORK_SHA256" ] \
+        && [ -n "$CURRENT_METADATA_SHA" ] \
+        && [ "$CACHED_METADATA_SHA" = "$CURRENT_METADATA_SHA" ]; then
+      echo "Reused validated MobileVLCKit 3.7.3"
+      exit 0
+    fi
+  fi
   CURRENT_FRAMEWORK_SHA256="$(framework_sha256 "$FRAMEWORK_DIR" || true)"
   if [ "$CURRENT_FRAMEWORK_SHA256" = "$EXPECTED_FRAMEWORK_SHA256" ]; then
+    if [ "${SKELETON_VLC_VALIDATION_CACHE:-0}" = "1" ]; then
+      CURRENT_METADATA_SHA="$(framework_metadata_sha256 "$FRAMEWORK_DIR")"
+      {
+        printf '%s\n' "$EXPECTED_FRAMEWORK_SHA256"
+        printf '%s\n' "$CURRENT_METADATA_SHA"
+      } > "$VALIDATION_STAMP.tmp.$$"
+      mv -f "$VALIDATION_STAMP.tmp.$$" "$VALIDATION_STAMP"
+    fi
     exit 0
   fi
   echo "Cached MobileVLCKit failed integrity verification; restoring it from the verified archive" >&2
@@ -68,4 +98,12 @@ if [ "$STAGED_FRAMEWORK_SHA256" != "$EXPECTED_FRAMEWORK_SHA256" ]; then
 fi
 rm -rf "$FRAMEWORK_DIR"
 mv "$STAGED_FRAMEWORK" "$FRAMEWORK_DIR"
+if [ "${SKELETON_VLC_VALIDATION_CACHE:-0}" = "1" ]; then
+  CURRENT_METADATA_SHA="$(framework_metadata_sha256 "$FRAMEWORK_DIR")"
+  {
+    printf '%s\n' "$EXPECTED_FRAMEWORK_SHA256"
+    printf '%s\n' "$CURRENT_METADATA_SHA"
+  } > "$VALIDATION_STAMP.tmp.$$"
+  mv -f "$VALIDATION_STAMP.tmp.$$" "$VALIDATION_STAMP"
+fi
 echo "Fetched official MobileVLCKit 3.7.3 into $FRAMEWORK_DIR"

@@ -666,6 +666,18 @@ private enum BunnyPlayerStressBenchmark {
             throw PlayerStressError.invalidDuration(duration)
         }
 
+        #if targetEnvironment(simulator)
+        if ProcessInfo.processInfo.environment[
+            "SKELETON_BUNNY_AUDIO_ROUTE_AUDIT"
+        ] == "1" {
+            try await auditAudioRendererRecovery(
+                decoder: decoder,
+                probe: probe,
+                info: info
+            )
+        }
+        #endif
+
         var seekLatencies = [Double]()
         var seekSyncLatencies = [Double]()
         var successfulSeeks = 0
@@ -866,6 +878,40 @@ private enum BunnyPlayerStressBenchmark {
         }
         throw PlayerStressError.timedOut
     }
+
+    #if targetEnvironment(simulator)
+    /// Exercises the same automatic renderer-flush signal iOS emits while
+    /// moving custom sample-buffer audio to a Bluetooth destination.
+    private static func auditAudioRendererRecovery(
+        decoder: BunnyFFmpegDecoder,
+        probe: BunnyStressProbe,
+        info: BunnyFFmpegMediaInfo
+    ) async throws {
+        guard info.hasAudio else { throw PlayerStressError.missingAudioOutput }
+        let revision = probe.seekRevision
+        let position = decoder.currentTime
+        let renderedAudioFrames = probe.renderedAudioFrames
+
+        NotificationCenter.default.post(
+            name: .AVSampleBufferAudioRendererWasFlushedAutomatically,
+            object: decoder.audioRenderer
+        )
+        try await waitUntil(timeout: 8, probe: probe) {
+            probe.seekRevision > revision && probe.seekSucceeded
+        }
+        decoder.play(atRate: 1)
+        try await waitUntil(timeout: 8, probe: probe) {
+            decoder.currentTime >= position + 0.20
+                && probe.renderedAudioFrames > renderedAudioFrames
+        }
+        NSLog(
+            "BUNNY_AUDIO_ROUTE_AUDIT PASS position=%.3f recovered=%.3f audio_frames=%ld",
+            position,
+            decoder.currentTime,
+            probe.renderedAudioFrames
+        )
+    }
+    #endif
 
     private static func percentile(
         _ values: [Double],

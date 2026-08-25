@@ -16,6 +16,7 @@ typealias PlaybackProgressHandler = @MainActor (
 ) -> Void
 
 typealias PlaybackControlsVisibilityHandler = @MainActor (_ isVisible: Bool) -> Void
+typealias PlaybackReadyHandler = @MainActor () -> Void
 
 /// Mutable playback progress that does not participate in SwiftUI observation.
 /// Checkpoint updates must never recreate the active decoder or its parent view.
@@ -580,6 +581,27 @@ final class AppOrientationDelegate: NSObject, UIApplicationDelegate {
     }
 }
 
+/// Reference-backed handoff state shared by a resolving screen and its active
+/// player. Unlike a value passed through a SwiftUI body update, this is armed
+/// synchronously before navigation and cannot be stale when onDisappear runs.
+@MainActor
+final class PlayerOrientationHandoff: ObservableObject {
+    private var pendingOrientation: UIInterfaceOrientationMask?
+
+    func armForNextPlayer() {
+        pendingOrientation = PlayerPresentation.currentOrientationMask
+        NSLog(
+            "PLAYER_LAYOUT armed episode handoff orientation=%@",
+            pendingOrientation == .portrait ? "portrait" : "landscape"
+        )
+    }
+
+    func consumePendingOrientation() -> UIInterfaceOrientationMask? {
+        defer { pendingOrientation = nil }
+        return pendingOrientation
+    }
+}
+
 @MainActor
 private enum PlayerPresentation {
     static func prepareAudioSession() {
@@ -623,7 +645,39 @@ private enum PlayerPresentation {
         )
     }
 
+    static var currentOrientationMask: UIInterfaceOrientationMask {
+        guard let scene = foregroundScene else {
+            return AppOrientationDelegate.supportedOrientations
+        }
+        let orientation = scene.effectiveGeometry.interfaceOrientation
+        guard orientation != .unknown else {
+            return AppOrientationDelegate.supportedOrientations
+        }
+        return orientation.isLandscape ? .landscape : .portrait
+    }
+
+    static func preserve(_ orientationMask: UIInterfaceOrientationMask) {
+        AppOrientationDelegate.supportedOrientations = orientationMask
+        guard let scene = foregroundScene else { return }
+        scene.keyWindow?.rootViewController?
+            .setNeedsUpdateOfSupportedInterfaceOrientations()
+        let current = scene.effectiveGeometry.interfaceOrientation
+        let alreadyMatches = orientationMask == .portrait
+            ? current.isPortrait
+            : current.isLandscape
+        if !alreadyMatches {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientationMask)) { error in
+                NSLog("Player orientation preservation failed: %@", error.localizedDescription)
+            }
+        }
+        NSLog(
+            "PLAYER_LAYOUT preserved orientation=%@",
+            orientationMask == .portrait ? "portrait" : "landscape"
+        )
+    }
+
     static func restorePortrait() {
+        NSLog("PLAYER_LAYOUT restoring orientation=portrait")
         AppOrientationDelegate.supportedOrientations = .portrait
         guard let scene = foregroundScene else { return }
         scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
@@ -731,6 +785,7 @@ struct KSPlayerScreen: View {
     private let plan: PlaybackPlan
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
+    private let onPlaybackReady: PlaybackReadyHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     private let watchChannel: WatchPlaybackControlChannel?
     private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
@@ -745,6 +800,7 @@ struct KSPlayerScreen: View {
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
+        onPlaybackReady: PlaybackReadyHandler? = nil,
         watchChannel: WatchPlaybackControlChannel? = nil,
         onControlsVisibilityChanged: PlaybackControlsVisibilityHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)? = nil
@@ -753,6 +809,7 @@ struct KSPlayerScreen: View {
         self.title = title
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.onPlaybackReady = onPlaybackReady
         self.watchChannel = watchChannel
         self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
@@ -803,6 +860,7 @@ struct KSPlayerScreen: View {
                     initialPosition: retryPosition,
                     performancePolicy: playbackPolicy,
                     onProgress: onProgress,
+                    onPlaybackReady: onPlaybackReady,
                     watchChannel: watchChannel,
                     onControlsVisibilityChanged: onControlsVisibilityChanged,
                     onFailure: advanceOrFail
@@ -879,6 +937,7 @@ private struct KSPlaybackAttempt: View {
     let initialPosition: TimeInterval
     let performancePolicy: PlaybackPerformancePolicy
     let onProgress: PlaybackProgressHandler?
+    let onPlaybackReady: PlaybackReadyHandler?
     let watchChannel: WatchPlaybackControlChannel?
     let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
     let onFailure: @MainActor (Error) -> Void
@@ -912,6 +971,7 @@ private struct KSPlaybackAttempt: View {
         initialPosition: TimeInterval,
         performancePolicy: PlaybackPerformancePolicy,
         onProgress: PlaybackProgressHandler?,
+        onPlaybackReady: PlaybackReadyHandler?,
         watchChannel: WatchPlaybackControlChannel?,
         onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?,
         onFailure: @escaping @MainActor (Error) -> Void
@@ -923,6 +983,7 @@ private struct KSPlaybackAttempt: View {
         self.initialPosition = initialPosition
         self.performancePolicy = performancePolicy
         self.onProgress = onProgress
+        self.onPlaybackReady = onPlaybackReady
         self.watchChannel = watchChannel
         self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onFailure = onFailure
@@ -1174,8 +1235,10 @@ private struct KSPlaybackAttempt: View {
                 }
 
                 if frameVisible {
+                    let isFirstVisibleFrame = !didProduceMedia
                     didProduceVideoFrame = true
                     didProduceMedia = true
+                    if isFirstVisibleFrame { onPlaybackReady?() }
                     recordStartupIfNeeded(currentTime: currentTime)
                     if !didRunParityVerification, paritySmokeRequested {
                         didRunParityVerification = true
@@ -1184,7 +1247,9 @@ private struct KSPlaybackAttempt: View {
                         }
                     }
                 } else if !hasVideo, hasAudio, currentTime > 0.10 {
+                    let isFirstAudibleFrame = !didProduceMedia
                     didProduceMedia = true
+                    if isFirstAudibleFrame { onPlaybackReady?() }
                     recordStartupIfNeeded(currentTime: currentTime)
                 }
 
@@ -2539,6 +2604,7 @@ struct AVPlayerScreen: View {
     private let benchmarkEngineName: String
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
+    private let onPlaybackReady: PlaybackReadyHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     private let watchChannel: WatchPlaybackControlChannel?
     private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
@@ -2562,6 +2628,7 @@ struct AVPlayerScreen: View {
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
+        onPlaybackReady: PlaybackReadyHandler? = nil,
         watchChannel: WatchPlaybackControlChannel? = nil,
         onControlsVisibilityChanged: PlaybackControlsVisibilityHandler? = nil,
         debugEngineName: String = "AVPlayer",
@@ -2574,6 +2641,7 @@ struct AVPlayerScreen: View {
         self.benchmarkEngineName = benchmarkEngineName
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.onPlaybackReady = onPlaybackReady
         self.watchChannel = watchChannel
         self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
@@ -2865,6 +2933,7 @@ struct AVPlayerScreen: View {
                     }
                 }
                 statusMessage = ""
+                onPlaybackReady?()
                 let elapsed = (ProcessInfo.processInfo.systemUptime - startupStartedAt) * 1_000
                 NSLog(
                     "PLAYER_BENCHMARK playing_ms=%.1f engine=%@ title=%@",
@@ -3225,7 +3294,7 @@ private final class VLCPlaybackModel: NSObject, ObservableObject, VLCMediaPlayer
             if player.isPlaying,
                usesBoundedRenderer
                     ? hasRenderedFrame
-                    : (player.hasVideoOut || currentTime > 0.10) {
+                    : (player.hasVideoOut && currentTime > 0.10) {
                 if duration > 0, duration < minimumVideoDuration {
                     throw VLCPlaybackError.unexpectedShortVideo(duration)
                 }
@@ -3719,6 +3788,7 @@ private struct VLCPlayerScreen: View {
     private let initialPosition: TimeInterval
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
+    private let onPlaybackReady: PlaybackReadyHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     private let watchChannel: WatchPlaybackControlChannel?
     private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
@@ -3731,6 +3801,7 @@ private struct VLCPlayerScreen: View {
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval,
         onProgress: PlaybackProgressHandler? = nil,
+        onPlaybackReady: PlaybackReadyHandler? = nil,
         watchChannel: WatchPlaybackControlChannel? = nil,
         onControlsVisibilityChanged: PlaybackControlsVisibilityHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)?
@@ -3740,6 +3811,7 @@ private struct VLCPlayerScreen: View {
         self.initialPosition = max(initialPosition, 0)
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.onPlaybackReady = onPlaybackReady
         self.watchChannel = watchChannel
         self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
@@ -3768,6 +3840,7 @@ private struct VLCPlayerScreen: View {
                 initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: onProgress,
+                onPlaybackReady: onPlaybackReady,
                 watchChannel: watchChannel,
                 onControlsVisibilityChanged: onControlsVisibilityChanged,
                 debugEngineName: "VLC Native",
@@ -3790,6 +3863,7 @@ private struct VLCPlayerScreen: View {
                 initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: onProgress,
+                onPlaybackReady: onPlaybackReady,
                 watchChannel: watchChannel,
                 onControlsVisibilityChanged: onControlsVisibilityChanged,
                 onExhausted: onExhausted
@@ -3811,6 +3885,7 @@ private struct VLCCompatibilityPlayerScreen: View {
     private let plan: PlaybackPlan
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
+    private let onPlaybackReady: PlaybackReadyHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     private let watchChannel: WatchPlaybackControlChannel?
     private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
@@ -3836,6 +3911,7 @@ private struct VLCCompatibilityPlayerScreen: View {
         initialPosition: TimeInterval = 0,
         minimumVideoDuration: TimeInterval,
         onProgress: PlaybackProgressHandler? = nil,
+        onPlaybackReady: PlaybackReadyHandler? = nil,
         watchChannel: WatchPlaybackControlChannel? = nil,
         onControlsVisibilityChanged: PlaybackControlsVisibilityHandler? = nil,
         onExhausted: (@MainActor (Error) -> Void)?
@@ -3849,6 +3925,7 @@ private struct VLCCompatibilityPlayerScreen: View {
         self.title = title
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.onPlaybackReady = onPlaybackReady
         self.watchChannel = watchChannel
         self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
@@ -4346,6 +4423,7 @@ private struct VLCCompatibilityPlayerScreen: View {
                 _ = await model.seekAndWait(to: progressReference.position)
                 model.play()
             }
+            onPlaybackReady?()
             let elapsed = (ProcessInfo.processInfo.systemUptime - startupStartedAt) * 1_000
             NSLog(
                 "PLAYER_BENCHMARK playing_ms=%.1f engine=vlckit title=%@",
@@ -4520,6 +4598,7 @@ private struct PerformancePlayerScreen: View {
     private let initialPosition: TimeInterval
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
+    private let onPlaybackReady: PlaybackReadyHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
     private let watchChannel: WatchPlaybackControlChannel?
     private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
@@ -4531,6 +4610,7 @@ private struct PerformancePlayerScreen: View {
         initialPosition: TimeInterval,
         minimumVideoDuration: TimeInterval,
         onProgress: PlaybackProgressHandler?,
+        onPlaybackReady: PlaybackReadyHandler?,
         watchChannel: WatchPlaybackControlChannel?,
         onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?,
         onExhausted: (@MainActor (Error) -> Void)?
@@ -4540,6 +4620,7 @@ private struct PerformancePlayerScreen: View {
         self.initialPosition = max(initialPosition, 0)
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.onPlaybackReady = onPlaybackReady
         self.watchChannel = watchChannel
         self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
@@ -4560,6 +4641,7 @@ private struct PerformancePlayerScreen: View {
                 initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: onProgress,
+                onPlaybackReady: onPlaybackReady,
                 watchChannel: watchChannel,
                 onControlsVisibilityChanged: onControlsVisibilityChanged,
                 onExhausted: onExhausted
@@ -4572,6 +4654,7 @@ private struct PerformancePlayerScreen: View {
                 initialPosition: initialPosition,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: onProgress,
+                onPlaybackReady: onPlaybackReady,
                 watchChannel: watchChannel,
                 onControlsVisibilityChanged: onControlsVisibilityChanged,
                 onExhausted: onExhausted
@@ -4593,6 +4676,7 @@ private struct PerformancePlayerScreen: View {
             initialPosition: initialPosition,
             minimumVideoDuration: minimumVideoDuration,
             onProgress: onProgress,
+            onPlaybackReady: onPlaybackReady,
             watchChannel: watchChannel,
             onControlsVisibilityChanged: onControlsVisibilityChanged,
             onExhausted: onExhausted
@@ -4604,6 +4688,7 @@ private struct PerformancePlayerScreen: View {
             initialPosition: initialPosition,
             minimumVideoDuration: minimumVideoDuration,
             onProgress: onProgress,
+            onPlaybackReady: onPlaybackReady,
             watchChannel: watchChannel,
             onControlsVisibilityChanged: onControlsVisibilityChanged,
             onExhausted: onExhausted
@@ -4653,6 +4738,8 @@ private enum StremioPlayerBridge {
 
 struct PlayerScreen: View {
     @EnvironmentObject private var watchTogether: WatchTogetherModel
+    @AppStorage(WatchTogetherPreferences.enabledKey)
+    private var watchTogetherEnabled = WatchTogetherPreferences.defaultEnabled
     let title: String
     private let plan: PlaybackPlan
     private let contentKey: String
@@ -4660,7 +4747,11 @@ struct PlayerScreen: View {
     private let watchContentTitle: String
     private let minimumVideoDuration: TimeInterval
     private let onProgress: PlaybackProgressHandler?
+    private let onPlaybackReady: PlaybackReadyHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
+    private let introSkipSegment: PlaybackSkipSegment?
+    private let restoresPortraitOnDisappear: Bool
+    private let orientationHandoff: PlayerOrientationHandoff?
     private let playerOrder: [StremioInternalPlayer]
     @State private var activePlayerIndex = 0
     @State private var bridgeFailureMessage: String?
@@ -4669,6 +4760,9 @@ struct PlayerScreen: View {
     @State private var progressReference: PlaybackProgressReference
     @State private var didRunSimulatorPlayerSwitch = false
     @State private var playerChromeVisible = true
+    @State private var introSkipVisible = false
+    @State private var didSkipIntro = false
+    @State private var isSkippingIntro = false
     @State private var watchRoomPresented = false
     @StateObject private var watchChannel = WatchPlaybackControlChannel()
 
@@ -4681,7 +4775,11 @@ struct PlayerScreen: View {
         watchContentTitle: String? = nil,
         minimumVideoDuration: TimeInterval = 4,
         onProgress: PlaybackProgressHandler? = nil,
-        onExhausted: (@MainActor (Error) -> Void)? = nil
+        onPlaybackReady: PlaybackReadyHandler? = nil,
+        onExhausted: (@MainActor (Error) -> Void)? = nil,
+        introSkipSegment: PlaybackSkipSegment? = nil,
+        restoresPortraitOnDisappear: Bool = true,
+        orientationHandoff: PlayerOrientationHandoff? = nil
     ) {
         self.plan = plan
         self.title = title
@@ -4690,7 +4788,11 @@ struct PlayerScreen: View {
         self.watchContentTitle = watchContentTitle ?? title
         self.minimumVideoDuration = minimumVideoDuration
         self.onProgress = onProgress
+        self.onPlaybackReady = onPlaybackReady
         self.onExhausted = onExhausted
+        self.introSkipSegment = introSkipSegment
+        self.restoresPortraitOnDisappear = restoresPortraitOnDisappear
+        self.orientationHandoff = orientationHandoff
         playerOrder = StremioPlayerBridge.order(
             preferred: StremioInternalPlayer.selected,
             sourceURL: plan.primaryURL,
@@ -4711,6 +4813,13 @@ struct PlayerScreen: View {
     @ViewBuilder
     var body: some View {
         ZStack(alignment: .top) {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .accessibilityElement()
+                .accessibilityLabel("Player screen")
+                .accessibilityIdentifier("player-screen-\(contentKey)")
+                .allowsHitTesting(false)
+
             if let bridgeFailureMessage {
                 bridgeFailure(message: bridgeFailureMessage)
             } else {
@@ -4730,12 +4839,17 @@ struct PlayerScreen: View {
                     .accessibilityIdentifier("player-bridge-status")
             }
 
-            if playerChromeVisible, bridgeFailureMessage == nil {
+            if watchTogetherEnabled, playerChromeVisible, bridgeFailureMessage == nil {
                 VStack {
                     HStack {
                         Spacer()
-                        WatchRoomVoiceButton(contentKey: contentKey)
+                        WatchRoomVoiceButton(
+                            watch: watchTogether,
+                            controls: watchTogether.playerControls,
+                            contentKey: contentKey
+                        )
                         WatchRoomPlayerButton(
+                            controls: watchTogether.playerControls,
                             contentKey: contentKey,
                             contentType: contentType,
                             contentTitle: watchContentTitle,
@@ -4749,10 +4863,54 @@ struct PlayerScreen: View {
                 .transition(.opacity)
             }
 
+            if introSkipVisible,
+               let introSkipSegment,
+               bridgeFailureMessage == nil {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button {
+                            Task { await skipIntro(introSkipSegment) }
+                        } label: {
+                            HStack(spacing: 9) {
+                                if isSkippingIntro {
+                                    ProgressView()
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: "forward.end.fill")
+                                }
+                                Text(introSkipSegment.title ?? "Skip Intro")
+                                    .font(.subheadline.weight(.bold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .frame(minHeight: 48)
+                            .background(.black.opacity(0.82), in: Capsule())
+                            .overlay {
+                                Capsule().stroke(Color.white.opacity(0.34), lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isSkippingIntro)
+                        .accessibilityLabel("Skip Intro")
+                        .accessibilityHint("Jumps to the exact end of the intro")
+                        .accessibilityIdentifier("player-skip-intro")
+                    }
+                }
+                .padding(.trailing, 22)
+                .padding(.bottom, playerChromeVisible ? 104 : 30)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(6)
+            }
+
         }
+        .animation(.easeOut(duration: 0.18), value: introSkipVisible)
         .onAppear {
             PlayerPresentation.synchronizeWithCurrentOrientation()
-            watchTogether.attachPlayer(watchChannel, contentKey: contentKey)
+            if watchTogetherEnabled {
+                watchTogether.attachPlayer(watchChannel, contentKey: contentKey)
+            }
         }
         .onChange(of: activePlayerIndex) { _ in
             playerChromeVisible = true
@@ -4760,12 +4918,37 @@ struct PlayerScreen: View {
         }
         .onDisappear {
             watchTogether.detachPlayer(watchChannel)
-            PlayerPresentation.restorePortrait()
+            if let preservedOrientation = orientationHandoff?.consumePendingOrientation() {
+                PlayerPresentation.preserve(preservedOrientation)
+                NSLog("PLAYER_LAYOUT preserved orientation for episode autoplay")
+            } else if restoresPortraitOnDisappear {
+                PlayerPresentation.restorePortrait()
+            }
+        }
+        .onChange(of: watchTogetherEnabled) { enabled in
+            if enabled {
+                Task {
+                    await watchTogether.setFeatureEnabled(true)
+                    watchTogether.attachPlayer(watchChannel, contentKey: contentKey)
+                }
+            } else {
+                watchRoomPresented = false
+                watchTogether.detachPlayer(watchChannel)
+                Task { await watchTogether.setFeatureEnabled(false) }
+            }
         }
         .task {
             await runSimulatorPlayerSwitchIfRequested()
+            if watchTogetherEnabled {
+                await watchTogether.start()
+                await watchTogether.runPlayerControlsUIAuditIfRequested(contentKey: contentKey)
+            }
+        }
+        .task(id: introSkipSegment) {
+            await monitorIntroSkipAvailability()
         }
         .watchTogetherRoomSheet(
+            watch: watchTogether,
             isPresented: $watchRoomPresented,
             contentKey: contentKey,
             contentType: contentType,
@@ -4792,6 +4975,7 @@ struct PlayerScreen: View {
                 initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
+                onPlaybackReady: onPlaybackReady,
                 watchChannel: watchChannel,
                 onControlsVisibilityChanged: updatePlayerChromeVisibility,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
@@ -4803,6 +4987,7 @@ struct PlayerScreen: View {
                 initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
+                onPlaybackReady: onPlaybackReady,
                 watchChannel: watchChannel,
                 onControlsVisibilityChanged: updatePlayerChromeVisibility,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
@@ -4815,6 +5000,7 @@ struct PlayerScreen: View {
                 initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
+                onPlaybackReady: onPlaybackReady,
                 watchChannel: watchChannel,
                 onControlsVisibilityChanged: updatePlayerChromeVisibility,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
@@ -4832,6 +5018,7 @@ struct PlayerScreen: View {
                 initialPosition: progressReference.position,
                 minimumVideoDuration: minimumVideoDuration,
                 onProgress: handleProgress,
+                onPlaybackReady: onPlaybackReady,
                 watchChannel: watchChannel,
                 onControlsVisibilityChanged: updatePlayerChromeVisibility,
                 onExhausted: { handlePlayerFailure(player: player, error: $0) }
@@ -4848,6 +5035,47 @@ struct PlayerScreen: View {
     @MainActor
     private func updatePlayerChromeVisibility(_ isVisible: Bool) {
         playerChromeVisible = isVisible
+    }
+
+    @MainActor
+    private func monitorIntroSkipAvailability() async {
+        introSkipVisible = false
+        guard let introSkipSegment else { return }
+        while !Task.isCancelled, !didSkipIntro {
+            let shouldShow = watchChannel.sample().map {
+                IntroSkipPolicy.shouldOfferSkip(
+                    for: introSkipSegment,
+                    position: $0.position
+                )
+            } ?? false
+            if introSkipVisible != shouldShow {
+                introSkipVisible = shouldShow
+            }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+    }
+
+    @MainActor
+    private func skipIntro(_ segment: PlaybackSkipSegment) async {
+        guard !isSkippingIntro,
+              let target = IntroSkipPolicy.targetPosition(for: segment)
+        else { return }
+        let sample = watchChannel.sample()
+        isSkippingIntro = true
+        introSkipVisible = false
+        didSkipIntro = true
+        await watchChannel.applyRemote(
+            WatchPlaybackAdjustment(targetPosition: target),
+            baselineRate: sample?.rate ?? 1
+        )
+        isSkippingIntro = false
+        NSLog(
+            "PLAYER_SKIP intro from=%.3f to=%.3f confidence=%@ samples=%@",
+            sample?.position ?? segment.start,
+            target,
+            segment.confidence.map { String(format: "%.3f", $0) } ?? "provider",
+            segment.sampleSize.map(String.init) ?? "unknown"
+        )
     }
 
     @ViewBuilder
@@ -5021,6 +5249,66 @@ struct StreamPlaybackCandidate: Identifiable {
         self.initialPosition = max(initialPosition, 0)
         self.mediaMetadata = mediaMetadata
     }
+
+    var playbackContentIdentity: PlaybackContentIdentity? {
+        if let mediaMetadata {
+            if let episodeID = mediaMetadata.episodeID {
+                return .episode(
+                    seriesID: mediaMetadata.mediaID,
+                    videoID: episodeID
+                )
+            }
+            return .movie(catalogID: mediaMetadata.mediaID)
+        }
+        guard let contentIdentifier else { return nil }
+        if contentIdentifier.hasPrefix("series:"),
+           let marker = contentIdentifier.range(of: ":episode:") {
+            let seriesID = String(
+                contentIdentifier[
+                    contentIdentifier.index(
+                        contentIdentifier.startIndex,
+                        offsetBy: "series:".count
+                    )..<marker.lowerBound
+                ]
+            )
+            let videoID = String(contentIdentifier[marker.upperBound...])
+            return .episode(seriesID: seriesID, videoID: videoID)
+        }
+        if contentIdentifier.hasPrefix("movie:") {
+            return .movie(catalogID: String(contentIdentifier.dropFirst("movie:".count)))
+        }
+        return nil
+    }
+
+    var playbackPreferenceKey: PlaybackStreamPreferenceKey? {
+        PlaybackStreamPreferenceKey(
+            providerName: providerName,
+            streamName: stream.name,
+            streamTitle: stream.title,
+            torrentInfoHash: stream.infoHash,
+            fileIndex: stream.fileIdx
+        )
+    }
+}
+
+/// Applies the last proven provider/stream only after the current provider
+/// responses have been ranked. It never resolves or revives a saved URL.
+func lastSuccessfulPlaybackCandidates(
+    from candidates: [StreamPlaybackCandidate],
+    store: LastSuccessfulPlaybackPreferenceStore = .shared
+) -> [StreamPlaybackCandidate] {
+    guard let identity = candidates.first?.playbackContentIdentity,
+          candidates.allSatisfy({ $0.playbackContentIdentity == identity })
+    else {
+        return candidates
+    }
+    let preference = store.preference(for: identity)
+    return LastSuccessfulPlaybackRanker.rank(
+        candidates,
+        identity: identity,
+        preference: preference,
+        key: \StreamPlaybackCandidate.playbackPreferenceKey
+    )
 }
 
 struct EpisodeAutoplayContext {
@@ -5051,13 +5339,20 @@ struct ResolvingPlayerScreen: View {
     @State private var countdownRemaining = StreamFailoverPolicy.countdownSeconds
     @State private var resumePosition: TimeInterval
     @State private var pendingEpisodeAutoplay: PendingEpisodeAutoplay?
-    @State private var episodeAutoplayCountdown = 8
+    @State private var episodeAutoplayCountdown = Int(
+        EpisodeAutoplayPresentationPolicy.previewLeadTime
+    )
     @State private var nextEpisodeCandidates: [StreamPlaybackCandidate] = []
     @State private var nextEpisodeLoadError: String?
     @State private var isLoadingNextEpisode = false
     @State private var didOfferEpisodeAutoplay = false
+    @State private var shouldStartNextEpisode = false
     @State private var episodeAutoplayDestination: EpisodeAutoplayDestination?
     @State private var isPresentingNextEpisode = false
+    @StateObject private var orientationHandoff = PlayerOrientationHandoff()
+    @State private var resolutionRequestID: UUID?
+    @State private var performanceTraceID: PerformanceTraceID?
+    @State private var didRecordCandidateSuccess = false
 
     private struct PendingStreamFailover: Identifiable, Equatable {
         let id = UUID()
@@ -5121,6 +5416,11 @@ struct ResolvingPlayerScreen: View {
         ZStack {
             Group {
                 if let playbackPlan {
+                    let readyRequestID = resolutionRequestID
+                    let readyCandidateID = activeCandidate.id
+                    let readyTraceID = performanceTraceID
+                    let readyIdentity = activeCandidate.playbackContentIdentity
+                    let readyPreferenceKey = activeCandidate.playbackPreferenceKey
                     PlayerScreen(
                         plan: playbackPlan,
                         title: playbackTitle,
@@ -5130,7 +5430,24 @@ struct ResolvingPlayerScreen: View {
                         watchContentTitle: activeCandidate.contentTitle,
                         minimumVideoDuration: minimumVideoDuration,
                         onProgress: recordProgress,
-                        onExhausted: beginSourceFailover
+                        onPlaybackReady: {
+                            recordFirstVisibleFrame(
+                                requestID: readyRequestID,
+                                candidateID: readyCandidateID,
+                                traceID: readyTraceID,
+                                identity: readyIdentity,
+                                preferenceKey: readyPreferenceKey
+                            )
+                        },
+                        onExhausted: { playbackError in
+                            handlePlaybackExhausted(
+                                playbackError,
+                                requestID: readyRequestID,
+                                candidateID: readyCandidateID
+                            )
+                        },
+                        introSkipSegment: activeStream.introSkipSegment,
+                        orientationHandoff: orientationHandoff
                     )
                 } else if let error, pendingFailover == nil {
                     VStack(spacing: 12) {
@@ -5159,7 +5476,7 @@ struct ResolvingPlayerScreen: View {
         .toolbar(.hidden, for: .tabBar)
         .animation(.easeOut(duration: 0.18), value: pendingFailover)
         .animation(.easeOut(duration: 0.22), value: pendingEpisodeAutoplay?.id)
-        .task(id: activeCandidate.id) {
+        .task(id: activeCandidateIndex) {
             await resolveActiveSource()
         }
         .task(id: pendingFailover?.id) {
@@ -5169,10 +5486,6 @@ struct ResolvingPlayerScreen: View {
         .task(id: pendingEpisodeAutoplay?.id) {
             guard let pendingEpisodeAutoplay else { return }
             await prepareNextEpisode(for: pendingEpisodeAutoplay)
-        }
-        .task(id: pendingEpisodeAutoplay?.id) {
-            guard let pendingEpisodeAutoplay else { return }
-            await runEpisodeAutoplayCountdown(pendingEpisodeAutoplay)
         }
         .task {
             await showEpisodeAutoplayPreviewIfRequested()
@@ -5207,6 +5520,17 @@ struct ResolvingPlayerScreen: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                     }
+                    if let overview = pending.episode.overview?.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ),
+                       !overview.isEmpty {
+                        Text(overview)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.72))
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("episode-up-next-summary")
+                    }
                 }
                 Spacer(minLength: 0)
             }
@@ -5234,7 +5558,7 @@ struct ResolvingPlayerScreen: View {
                 .tint(.white.opacity(0.72))
 
                 Button {
-                    playNextEpisodeIfReady()
+                    requestNextEpisodeNow()
                 } label: {
                     Label(
                         isLoadingNextEpisode ? "Preparing" : "Play Now",
@@ -5359,21 +5683,45 @@ struct ResolvingPlayerScreen: View {
     private func resolveActiveSource() async {
         playbackPlan = nil
         error = nil
+        didRecordCandidateSuccess = false
+        let requestID = UUID()
+        resolutionRequestID = requestID
+        let candidateID = activeCandidate.id
+        let traceID = PerformanceMilestoneRecorder.shared.begin(
+            flow: .playback,
+            identity: activeCandidate.playbackContentIdentity?.storageKey
+                ?? "playback-source-\(activeCandidateIndex)"
+        )
+        performanceTraceID = traceID
         let startedAt = ProcessInfo.processInfo.systemUptime
         do {
-            playbackPlan = try await model.playbackPlan(
+            let resolvedPlan = try await model.playbackPlan(
                 for: activeStream,
                 providerName: activeCandidate.providerName
             )
+            guard !Task.isCancelled,
+                  resolutionRequestID == requestID,
+                  activeCandidate.id == candidateID
+            else { return }
+            playbackPlan = resolvedPlan
             let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+            let milestoneElapsed = PerformanceMilestoneRecorder.shared.mark(
+                .streamResolved,
+                for: traceID
+            ) ?? elapsed
             NSLog(
-                "STREAM_BENCHMARK resolve_ms=%.1f source=%ld/%ld title=%@",
+                "STREAM_BENCHMARK resolve_ms=%.1f milestone_ms=%.1f source=%ld/%ld title=%@",
                 elapsed,
+                milestoneElapsed,
                 activeCandidateIndex + 1,
                 candidates.count,
                 playbackTitle
             )
         } catch let resolutionError {
+            guard !Task.isCancelled,
+                  resolutionRequestID == requestID,
+                  activeCandidate.id == candidateID
+            else { return }
             let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
             NSLog(
                 "STREAM_BENCHMARK failed_ms=%.1f source=%ld/%ld title=%@ error=%@",
@@ -5385,6 +5733,57 @@ struct ResolvingPlayerScreen: View {
             )
             beginSourceFailover(resolutionError)
         }
+    }
+
+    @MainActor
+    private func recordFirstVisibleFrame(
+        requestID: UUID?,
+        candidateID: String,
+        traceID: PerformanceTraceID?,
+        identity: PlaybackContentIdentity?,
+        preferenceKey: PlaybackStreamPreferenceKey?
+    ) {
+        guard let requestID,
+              resolutionRequestID == requestID,
+              activeCandidate.id == candidateID,
+              performanceTraceID == traceID,
+              playbackPlan != nil
+        else { return }
+        guard !didRecordCandidateSuccess else { return }
+        didRecordCandidateSuccess = true
+        if let traceID,
+           let elapsed = PerformanceMilestoneRecorder.shared.mark(
+               .firstVisibleFrame,
+               for: traceID
+           ) {
+            NSLog(
+                "STREAM_BENCHMARK first_visible_frame_ms=%.1f source=%ld/%ld",
+                elapsed,
+                activeCandidateIndex + 1,
+                candidates.count
+            )
+        }
+        guard let identity,
+              let preferenceKey
+        else { return }
+        LastSuccessfulPlaybackPreferenceStore.shared.recordSuccess(
+            identity: identity,
+            key: preferenceKey
+        )
+    }
+
+    @MainActor
+    private func handlePlaybackExhausted(
+        _ playbackError: Error,
+        requestID: UUID?,
+        candidateID: String
+    ) {
+        guard let requestID,
+              resolutionRequestID == requestID,
+              activeCandidate.id == candidateID,
+              playbackPlan != nil
+        else { return }
+        beginSourceFailover(playbackError)
     }
 
     private var playbackTitle: String {
@@ -5420,24 +5819,43 @@ struct ResolvingPlayerScreen: View {
         )
         if EpisodeAutoplayPresentationPolicy.shouldPresent(
             position: position,
-            duration: duration,
-            isFinalUpdate: updateKind == .final
+            duration: duration
         ) {
-            beginEpisodeAutoplayIfAvailable()
+            let countdown = EpisodeAutoplayPresentationPolicy.countdownSeconds(
+                position: position,
+                duration: duration
+            )
+            beginEpisodeAutoplayIfAvailable(initialCountdown: countdown)
+            episodeAutoplayCountdown = countdown
+            if EpisodeAutoplayPresentationPolicy.shouldStartNext(
+                position: position,
+                duration: duration,
+                isFinalUpdate: updateKind == .final
+            ) {
+                shouldStartNextEpisode = true
+                playNextEpisodeIfReady()
+            }
+        } else {
+            resetEpisodeAutoplayAfterLeavingPreview()
         }
     }
 
     @MainActor
-    private func beginEpisodeAutoplayIfAvailable() {
+    private func beginEpisodeAutoplayIfAvailable(
+        initialCountdown: Int = Int(
+            EpisodeAutoplayPresentationPolicy.previewLeadTime
+        )
+    ) {
         guard !didOfferEpisodeAutoplay,
               pendingEpisodeAutoplay == nil,
               let nextEpisode = episodeAutoplayContext?.nextEpisode
         else { return }
         didOfferEpisodeAutoplay = true
-        episodeAutoplayCountdown = 8
+        episodeAutoplayCountdown = max(initialCountdown, 0)
         nextEpisodeCandidates = []
         nextEpisodeLoadError = nil
         isLoadingNextEpisode = true
+        shouldStartNextEpisode = false
         pendingEpisodeAutoplay = PendingEpisodeAutoplay(episode: nextEpisode)
         NSLog(
             "EPISODE_AUTOPLAY offered current=%@ next=%@",
@@ -5449,6 +5867,40 @@ struct ResolvingPlayerScreen: View {
     @MainActor
     private func prepareNextEpisode(for pending: PendingEpisodeAutoplay) async {
         guard let context = episodeAutoplayContext else { return }
+        #if targetEnvironment(simulator)
+        if ProcessInfo.processInfo.environment[
+            "SKELETON_EPISODE_AUTOPLAY_REUSE_FIXTURE_STREAM"
+        ] == "1" {
+            nextEpisodeCandidates = [
+                StreamPlaybackCandidate(
+                    stream: activeStream,
+                    providerName: activeCandidate.providerName,
+                    contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
+                        seriesID: context.series.id,
+                        videoID: pending.episode.id
+                    ),
+                    contentTitle: EpisodePlaybackIdentity.contentTitle(
+                        seriesTitle: context.series.name,
+                        video: pending.episode
+                    ),
+                    mediaMetadata: .episode(
+                        series: context.series,
+                        episode: pending.episode
+                    ),
+                    sourceID: "simulator-autoplay-next-\(pending.episode.id)"
+                ),
+            ]
+            isLoadingNextEpisode = false
+            NSLog(
+                "EPISODE_AUTOPLAY ready next=%@ streams=1 provider=simulator-fixture",
+                pending.episode.id
+            )
+            if shouldStartNextEpisode {
+                playNextEpisodeIfReady()
+            }
+            return
+        }
+        #endif
         let providers = await model.streamProviders(
             for: context.series,
             videoID: pending.episode.id
@@ -5470,7 +5922,7 @@ struct ResolvingPlayerScreen: View {
         let preferred = playable.first {
             $0.providerName == activeCandidate.providerName
         } ?? playable[0]
-        nextEpisodeCandidates = orderedPlaybackCandidates(
+        let orderedCandidates = orderedPlaybackCandidates(
             from: playable,
             startingAt: preferred.id,
             contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
@@ -5487,6 +5939,9 @@ struct ResolvingPlayerScreen: View {
                 episode: pending.episode
             )
         )
+        nextEpisodeCandidates = lastSuccessfulPlaybackCandidates(
+            from: orderedCandidates
+        )
         isLoadingNextEpisode = false
         NSLog(
             "EPISODE_AUTOPLAY ready next=%@ streams=%ld provider=%@",
@@ -5494,29 +5949,14 @@ struct ResolvingPlayerScreen: View {
             nextEpisodeCandidates.count,
             preferred.providerName
         )
-        if episodeAutoplayCountdown == 0 {
+        if shouldStartNextEpisode {
             playNextEpisodeIfReady()
         }
     }
 
     @MainActor
-    private func runEpisodeAutoplayCountdown(
-        _ pending: PendingEpisodeAutoplay
-    ) async {
-        for value in stride(from: 8, through: 1, by: -1) {
-            guard pendingEpisodeAutoplay?.id == pending.id,
-                  !Task.isCancelled
-            else { return }
-            episodeAutoplayCountdown = value
-            do {
-                try await Task.sleep(for: .seconds(1))
-            } catch {
-                return
-            }
-        }
-        guard pendingEpisodeAutoplay?.id == pending.id,
-              !Task.isCancelled
-        else { return }
+    private func requestNextEpisodeNow() {
+        shouldStartNextEpisode = true
         episodeAutoplayCountdown = 0
         playNextEpisodeIfReady()
     }
@@ -5534,6 +5974,8 @@ struct ResolvingPlayerScreen: View {
             context: context.advancing(to: pending.episode),
             candidates: nextEpisodeCandidates
         )
+        orientationHandoff.armForNextPlayer()
+        shouldStartNextEpisode = false
         pendingEpisodeAutoplay = nil
         isPresentingNextEpisode = true
         NSLog("EPISODE_AUTOPLAY playing next=%@", pending.episode.id)
@@ -5545,7 +5987,23 @@ struct ResolvingPlayerScreen: View {
         nextEpisodeCandidates = []
         nextEpisodeLoadError = nil
         isLoadingNextEpisode = false
+        shouldStartNextEpisode = false
         NSLog("EPISODE_AUTOPLAY cancelled")
+    }
+
+    @MainActor
+    private func resetEpisodeAutoplayAfterLeavingPreview() {
+        guard pendingEpisodeAutoplay != nil else { return }
+        pendingEpisodeAutoplay = nil
+        nextEpisodeCandidates = []
+        nextEpisodeLoadError = nil
+        isLoadingNextEpisode = false
+        shouldStartNextEpisode = false
+        didOfferEpisodeAutoplay = false
+        episodeAutoplayCountdown = Int(
+            EpisodeAutoplayPresentationPolicy.previewLeadTime
+        )
+        NSLog("EPISODE_AUTOPLAY hidden_outside_preview")
     }
 
     private func episodeLabel(_ episode: Video) -> String {
@@ -5572,6 +6030,7 @@ struct ResolvingPlayerScreen: View {
     @MainActor
     private func beginSourceFailover(_ playbackError: Error) {
         guard pendingFailover == nil else { return }
+        resolutionRequestID = nil
         playbackPlan = nil
         guard let nextIndex = StreamFailoverPolicy.nextSourceIndex(
             after: activeCandidateIndex,

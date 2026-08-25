@@ -6,6 +6,7 @@ let package = Package(
     name: "StremioSkeleton",
     platforms: [
         .iOS(.v16),
+        .tvOS(.v18),
         .macOS(.v14),
     ],
     products: [

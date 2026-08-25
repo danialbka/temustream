@@ -3,6 +3,8 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 IPA="${1:-$ROOT_DIR/../artifacts/stremio_iOS-2.0.3-18.ipa}"
+CACHE_ROOT="${STREMIO_BUILD_CACHE_ROOT:-/private/tmp/stremio-build-cache}"
+BUILD_ROOT="${SKELETON_BUILD_ROOT:-$CACHE_ROOT/products}"
 
 if [ ! -f "$IPA" ]; then
   echo "Usage: $0 /path/to/reference.ipa" >&2
@@ -11,8 +13,8 @@ fi
 
 KS_BYTES="$(unzip -l "$IPA" | awk '$4 ~ /Frameworks\/KSPlayer.framework\/KSPlayer$/ {print $1}')"
 VLC_BYTES="$(unzip -l "$IPA" | awk '$4 ~ /Frameworks\/MobileVLCKit.framework\/MobileVLCKit$/ {print $1}')"
-APP_BYTES="$(stat -f '%z' "${SKELETON_BUILD_ROOT:-/private/tmp/stremio-skeleton-build}/device/StremioSkeleton.app/StremioSkeleton" 2>/dev/null || echo 0)"
-APP_DIR="${SKELETON_BUILD_ROOT:-/private/tmp/stremio-skeleton-build}/device/StremioSkeleton.app"
+APP_BYTES="$(stat -f '%z' "$BUILD_ROOT/device/StremioSkeleton.app/StremioSkeleton" 2>/dev/null || echo 0)"
+APP_DIR="$BUILD_ROOT/device/StremioSkeleton.app"
 APP_BUNDLE_BYTES="$(du -sk "$APP_DIR" 2>/dev/null | awk '{print $1 * 1024}' || echo 0)"
 REFERENCE_PLAYER_BYTES="$((${KS_BYTES:-0} + ${VLC_BYTES:-0}))"
 

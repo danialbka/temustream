@@ -3,6 +3,8 @@ import UIKit
 
 struct FriendsView: View {
     @EnvironmentObject private var watch: WatchTogetherModel
+    @AppStorage(WatchTogetherPreferences.enabledKey)
+    private var watchTogetherEnabled = WatchTogetherPreferences.defaultEnabled
     @State private var displayName = ""
     @State private var friendCode = ""
     @State private var roomCode = ""
@@ -10,24 +12,37 @@ struct FriendsView: View {
 
     var body: some View {
         Form {
-            statusSection
-            if watch.profile == nil {
-                profileSetup
+            if watchTogetherEnabled {
+                statusSection
+                if watch.profile == nil {
+                    profileSetup
+                } else {
+                    myProfile
+                    addFriend
+                    pendingRequests
+                    friends
+                    roomInvitations
+                    joinRoom
+                    activeRoom
+                }
+                if let error = watch.errorMessage {
+                    Section { Text(error).foregroundStyle(.red) }
+                }
             } else {
-                myProfile
-                addFriend
-                pendingRequests
-                friends
-                roomInvitations
-                joinRoom
-                activeRoom
-            }
-            if let error = watch.errorMessage {
-                Section { Text(error).foregroundStyle(.red) }
+                Section {
+                    Label("Watch Together is off", systemImage: "person.2.slash")
+                    Text("Turn it on under Settings → Social Playback to create a profile, add friends, or join a room.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .navigationTitle("Friends")
-        .task { await watch.start() }
+        .task {
+            if watchTogetherEnabled {
+                await watch.start()
+            }
+        }
     }
 
     private var statusSection: some View {
@@ -204,18 +219,22 @@ struct FriendsView: View {
 }
 
 struct WatchRoomPlayerButton: View {
-    @EnvironmentObject private var watch: WatchTogetherModel
+    @ObservedObject var controls: WatchPlayerControlsModel
     let contentKey: String
     let contentType: String
     let contentTitle: String
     @Binding var showsRoom: Bool
 
+    private var hasMatchingRoom: Bool {
+        controls.snapshot.activeContentKey == contentKey
+    }
+
     var body: some View {
         Button { showsRoom = true } label: {
             HStack(spacing: 6) {
-                Image(systemName: watch.liveKitConnected ? "person.2.fill" : "person.2")
-                if watch.activeRoom?.contentKey == contentKey {
-                    Text(watch.liveKitConnected ? "Together" : "Room")
+                Image(systemName: controls.snapshot.realtimeConnected ? "person.2.fill" : "person.2")
+                if hasMatchingRoom {
+                    Text(controls.snapshot.realtimeConnected ? "Together" : "Room")
                 }
             }
             .font(.caption.weight(.semibold))
@@ -225,8 +244,13 @@ struct WatchRoomPlayerButton: View {
             .overlay { Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1) }
         }
         .buttonStyle(.plain)
-        .foregroundStyle(watch.liveKitConnected ? Color.appAccent : .white)
+        .foregroundStyle(controls.snapshot.realtimeConnected ? Color.appAccent : .white)
         .accessibilityLabel("Watch Together")
+        .accessibilityValue(
+            hasMatchingRoom
+                ? (controls.snapshot.realtimeConnected ? "Realtime connected" : "Room joined")
+                : "No active room"
+        )
         .accessibilityIdentifier("watch-together-player-button")
     }
 }
@@ -236,6 +260,7 @@ extension View {
     /// Removing a sheet's presenting control from the hierarchy dismisses it,
     /// which previously made Watch Together close as soon as playback chrome hid.
     func watchTogetherRoomSheet(
+        watch: WatchTogetherModel,
         isPresented: Binding<Bool>,
         contentKey: String,
         contentType: String,
@@ -244,6 +269,7 @@ extension View {
         sheet(isPresented: isPresented) {
             NavigationStack {
                 WatchRoomPlayerSheet(
+                    watch: watch,
                     contentKey: contentKey,
                     contentType: contentType,
                     contentTitle: contentTitle
@@ -255,12 +281,16 @@ extension View {
 }
 
 struct WatchRoomVoiceButton: View {
-    @EnvironmentObject private var watch: WatchTogetherModel
+    let watch: WatchTogetherModel
+    @ObservedObject var controls: WatchPlayerControlsModel
     let contentKey: String
 
-    private var hasMatchingRoom: Bool { watch.activeRoom?.contentKey == contentKey }
+    private var hasMatchingRoom: Bool { controls.snapshot.activeContentKey == contentKey }
     private var enabled: Bool {
-        hasMatchingRoom && watch.voiceState.canToggle(roomConnected: watch.liveKitConnected)
+        hasMatchingRoom
+            && controls.snapshot.voiceState.canToggle(
+                roomConnected: controls.snapshot.realtimeConnected
+            )
     }
 
     var body: some View {
@@ -269,7 +299,7 @@ struct WatchRoomVoiceButton: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: systemImage)
-                Text(hasMatchingRoom ? watch.voiceState.controlText : "Voice")
+                Text(hasMatchingRoom ? controls.snapshot.voiceState.controlText : "Voice")
             }
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 11)
@@ -278,16 +308,16 @@ struct WatchRoomVoiceButton: View {
             .overlay { Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1) }
         }
         .buttonStyle(.plain)
-        .foregroundStyle(watch.voiceState == .live ? .green : .white)
+        .foregroundStyle(controls.snapshot.voiceState == .live ? .green : .white)
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.55)
-        .accessibilityLabel(watch.voiceState.statusText)
+        .accessibilityLabel(controls.snapshot.voiceState.statusText)
         .accessibilityHint(hasMatchingRoom ? "Toggles room voice" : "Join a Watch Together room to use voice")
         .accessibilityIdentifier("watch-together-microphone-toggle")
     }
 
     private var systemImage: String {
-        switch watch.voiceState {
+        switch controls.snapshot.voiceState {
         case .off: "mic.slash"
         case .enabling: "ellipsis"
         case .live: "mic.fill"
@@ -299,7 +329,7 @@ struct WatchRoomVoiceButton: View {
 
 private struct WatchRoomPlayerSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var watch: WatchTogetherModel
+    @ObservedObject var watch: WatchTogetherModel
     let contentKey: String
     let contentType: String
     let contentTitle: String
