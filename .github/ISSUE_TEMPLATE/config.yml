@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/danialbka/temustream/security/policy
+    about: Read the private vulnerability reporting instructions before sharing details.
+  - name: Support guide
+    url: https://github.com/danialbka/temustream/blob/main/SUPPORT.md
+    about: Check what information to include and where provider questions belong.

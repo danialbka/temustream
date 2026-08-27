@@ -84,7 +84,8 @@ DERIVED_CACHE_REGISTERED=1
 stremio_prune_build_caches "$RETENTION_TOOL" \
   --protect "$BUILD_ROOT" --protect "$DERIVED_DATA"
 
-rm -rf "$APP_DIR" "$STAGED_APP"
+# Keep dependency caches, but never package files left in an older app bundle.
+rm -rf "$APP_DIR" "$STAGED_APP" "$BUILT_APP" "$BUILT_APP.dSYM"
 mkdir -p "$BUILD_DIR" "$ROOT_DIR/build"
 
 cd "$ROOT_DIR"

@@ -11,16 +11,20 @@
 		00F34A5CF05EBA29B215B0E3 /* TVArtwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52EA22BD3D40B2E914A87ED5 /* TVArtwork.swift */; };
 		015EB54D558C62C8D9C754C8 /* TVPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E276A47CE1C891D04E5614D2 /* TVPlayerView.swift */; };
 		028FE593B6FA5FB270382650 /* StremioAccountClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76BC44034EB5CB12127AC2DB /* StremioAccountClient.swift */; };
+		02E284FB57E3F5F6BCF5AFAC /* LocalRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 657B875064E2A3C5EEDED0CF /* LocalRecommendations.swift */; };
 		0500E3DBF402B5C96AC348DA /* TVHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BA806F771E2B2556420CC1D /* TVHomeView.swift */; };
 		053CD76D454254727C0ECDB0 /* PlaybackPerformance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EB985E95FF715EBA7679594 /* PlaybackPerformance.swift */; };
 		06A7441FEACC375CF48F27D4 /* LibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */; };
 		07F292F566B3B17FE316AAAB /* AddonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C66DC93D56D584B637C0F01F /* AddonClient.swift */; };
 		09FE991F737FDE0A59DCF886 /* WatchTogetherViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCB8982E59B993CEDE4C575B /* WatchTogetherViews.swift */; };
+		0C6D3C10C65CEA00E3266F35 /* EpisodeResumeSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 460AEF93CC334BDCF6CBD994 /* EpisodeResumeSelection.swift */; };
 		0DD8BEDB9D63491BAF47DE35 /* PlaybackAudioSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9359927B37AD919E2861C80 /* PlaybackAudioSession.swift */; };
 		0F88AD37A7AD4199F8C15E5B /* PlaybackViewportMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5EFD9F724CAC9771285F997 /* PlaybackViewportMode.swift */; };
 		128AAE2522F94D5800653E4C /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = CF821B7ADD29BE7D7C8930AC /* KSPlayer */; };
 		14C99D949BC218C407119A03 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D845BAABF69E61C0D51B653 /* PlayerView.swift */; };
+		14E2D90C28B05B6530DD09E4 /* AddonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C66DC93D56D584B637C0F01F /* AddonClient.swift */; };
 		15AAD0E732450B4D3F3EC0A9 /* MediaContainerSniffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */; };
+		1679B5339662B59F4FA32E8D /* WatchRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 236EF95728FBFF748F0EF40B /* WatchRootView.swift */; };
 		18022D4324795BD0175AB6AC /* WatchTogetherPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FF56FDD57F7E2A21773BD4 /* WatchTogetherPreferences.swift */; };
 		1927140619BE49221D6B796B /* UIStateBunnyPlayerStub.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB0713DA2898B4307BFD5085 /* UIStateBunnyPlayerStub.swift */; };
 		1B15C14C7634EE672CA41DAA /* WatchPlaybackSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = E67CADA6805601E394F3DF32 /* WatchPlaybackSync.swift */; };
@@ -28,42 +32,66 @@
 		26ED3F186AA726B62898E355 /* IntroSkipPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C39E112D93F448842052ADE /* IntroSkipPolicy.swift */; };
 		271AC0DA4A6EF3FFBBD5430B /* Libswscale in Frameworks */ = {isa = PBXBuildFile; productRef = 1EDB8E9524B7031BB54B5A3D /* Libswscale */; };
 		2828583DACBC80473C094A07 /* PlaybackPerformanceCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3DDC8105E3ACC202BC100A /* PlaybackPerformanceCore.swift */; };
+		282A3D4F2D3F6F8E7B5E09C3 /* CatalogPaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 524A29523E9B036217F6D8B4 /* CatalogPaging.swift */; };
 		2907CD432F2C60A5D1FB8DB5 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92DDACDA7F728CAAF6D6CF77 /* AppModel.swift */; };
+		2A4BDA2E1C0AAFA3B9F2B0E9 /* TorrentStreamingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */; };
 		2BE91B611A4814C251B1E786 /* TVSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF3D162E2B8C6C250614C528 /* TVSearchView.swift */; };
 		30C5028A6D2EE15041EA9310 /* AddonEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80BD475FE77AB54F9BCCC6A /* AddonEndpoint.swift */; };
 		32AACF13557407910BBDDABD /* AppearancePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7449EC87A28BFE958019C687 /* AppearancePreferences.swift */; };
 		337100816896D422CF40066C /* LocalRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 657B875064E2A3C5EEDED0CF /* LocalRecommendations.swift */; };
+		368A6FBA2B8DAE519968310D /* AddonEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = F80BD475FE77AB54F9BCCC6A /* AddonEndpoint.swift */; };
 		3823FD2F413AAED50D96344A /* DiscoveryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7114F36057BC13AEFED9660 /* DiscoveryPresentation.swift */; };
 		38245866A82E0464B4719346 /* ConvexMobile in Frameworks */ = {isa = PBXBuildFile; productRef = 8DE6E8AA2E74BC6D33338944 /* ConvexMobile */; };
+		3CF59BB593025BF5CCDF67FF /* LibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */; };
+		3D96FBBCA8D8943658489B50 /* WatchStreamCompatibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16CB743D97ED75A97BB3652E /* WatchStreamCompatibility.swift */; };
 		3E006AA43C2FEB3FBE9E46B0 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAD90D9901EB74BA61FFE593 /* Views.swift */; };
 		3E73ED49E09965EAD6DE0256 /* EpisodeResumeSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 460AEF93CC334BDCF6CBD994 /* EpisodeResumeSelection.swift */; };
+		4142BC9819BE365C4DA968D4 /* IntroSkipPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C39E112D93F448842052ADE /* IntroSkipPolicy.swift */; };
 		4408C8555F6DE22B29D68C4D /* LastSuccessfulPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89F40502D369348BB85B3550 /* LastSuccessfulPlayback.swift */; };
 		44FCC7455D5F682C3BA1D586 /* ArtworkCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14F9D925B9945C75F7D5D5D0 /* ArtworkCache.swift */; };
 		45047A8A0E9C0F450BEC704F /* TVNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115FF623BC924FE979A5C265 /* TVNavigation.swift */; };
+		46888570EEAD56D1685F0A0A /* TemuStremioWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B345D8753EA539ED0E7F24B3 /* TemuStremioWatchApp.swift */; };
+		474532411F59B79BCEBA2BC3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B2EC32063F0DF3A93F01B7D0 /* Assets.xcassets */; };
 		4946953326D5D054D82159FD /* TemuStreamTVUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A4C2DE2DD9636E39BF04BB4 /* TemuStreamTVUITests.swift */; };
 		50769A5D4E22B6480AFDE5D2 /* TorrentStreamingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */; };
+		515FC9CDF9439EB996433446 /* ViewingProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB6614469B0EC8C53F2A008 /* ViewingProfiles.swift */; };
+		5243B55D3B8BE88BCA59FB0D /* WatchPlaybackFallback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34290A737D0AA77BA2BBA457 /* WatchPlaybackFallback.swift */; };
 		52813AEFE1DC43FFA4976061 /* StremioSkeletonPlayerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41633D87E87727585EAEEC67 /* StremioSkeletonPlayerUITests.swift */; };
 		5375AAE734D2F31A0606E705 /* DiscoveryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7114F36057BC13AEFED9660 /* DiscoveryPresentation.swift */; };
 		57781119C19F36F58CE33852 /* MobileVLCKit.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		58E6FDEFC1F6D94530F36242 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92DDACDA7F728CAAF6D6CF77 /* AppModel.swift */; };
 		5E0D57EBAA32CBFF0B400904 /* PlaybackPerformance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EB985E95FF715EBA7679594 /* PlaybackPerformance.swift */; };
 		5F34A6D0F53B2634F1A49AE2 /* MediaContainerSniffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */; };
+		61980DD740A8C835B3AC5562 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 62F56829E6FEA5A52A0B2C68 /* PrivacyInfo.xcprivacy */; };
+		655C90073CBC4672C31A0607 /* TorBoxStreamSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */; };
 		66B3B2392A2DF8449149BCFC /* TitleTrivia.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDD50F29A4874DA58E6C23BE /* TitleTrivia.swift */; };
 		67276B1A5BFFB5B071B82A83 /* BunnyFFmpegDecoder.m in Sources */ = {isa = PBXBuildFile; fileRef = 9B336BE4644ACD78D123FDB5 /* BunnyFFmpegDecoder.m */; };
 		677807F725A111C9AB600D4D /* CatalogPaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 524A29523E9B036217F6D8B4 /* CatalogPaging.swift */; };
+		6841B174CC0D753CE38F5D1A /* LastSuccessfulPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89F40502D369348BB85B3550 /* LastSuccessfulPlayback.swift */; };
 		68FB9CF30638ECE62FAEC739 /* StremioAccountClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76BC44034EB5CB12127AC2DB /* StremioAccountClient.swift */; };
 		7093365DD7D27F80CE45F97B /* StremioPlaybackCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 546F368855314461B504B462 /* StremioPlaybackCore.xcframework */; };
+		755F3346B8F4681943391ED1 /* TitleTrivia.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDD50F29A4874DA58E6C23BE /* TitleTrivia.swift */; };
+		759EB3A38A6DEFB5D4169DAF /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 62F56829E6FEA5A52A0B2C68 /* PrivacyInfo.xcprivacy */; };
 		78CCCD30CC1531B412B709B8 /* TVAddonsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7632D31BF3F5BF76AC8BAB0E /* TVAddonsView.swift */; };
+		78FC94D4AC0D4794F769EF73 /* WatchPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0B0E5A7F080D74D0744EC7 /* WatchPlayerView.swift */; };
 		7E07A8FA7C426596123CFC88 /* AppTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BDA780202FF0514FF2095CA /* AppTheme.swift */; };
 		7F2E4953D6CA81A3C631C61C /* CatalogPaging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 524A29523E9B036217F6D8B4 /* CatalogPaging.swift */; };
 		80E94309BD60F2F03E0E53AD /* UIStateWatchTogetherStub.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24E6F5471C47FE0B2F4D0F10 /* UIStateWatchTogetherStub.swift */; };
+		82294693C29F58C3A53B32D7 /* WatchStreamCompatibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16CB743D97ED75A97BB3652E /* WatchStreamCompatibility.swift */; };
+		88AEEAA3FF8E715C48422772 /* DiscoveryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7114F36057BC13AEFED9660 /* DiscoveryPresentation.swift */; };
+		8913955E05C8A8E6CDE9F85C /* PlaybackCompletionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943C8D683B84D44314618B4B /* PlaybackCompletionStore.swift */; };
 		8BE7B311FD2232E256A6EF70 /* LocalRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 657B875064E2A3C5EEDED0CF /* LocalRecommendations.swift */; };
 		8C8ED734CF335039F9A44521 /* WatchTogetherModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C611CA93396CF3AEBB880FB /* WatchTogetherModel.swift */; };
+		8CA23CFFC946384B2FF6FBF8 /* PlaybackProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F41290FB3D04E854F302B17E /* PlaybackProgressStore.swift */; };
+		8CFFD0B97395F1E32D3FE1AE /* WikipediaTrivia.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA077A081D0F510E782BE1E2 /* WikipediaTrivia.swift */; };
+		8D01B202D33AF1FA06926967 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80A2FE21D2D44501F475EC70 /* Models.swift */; };
+		8E535B8FA1DFCC1DC4DD34C6 /* WatchSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A73814FCCD93485B5ABF131A /* WatchSessionStore.swift */; };
 		91A572830B997B2B3EED2996 /* TVStreamViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14E85FA6093641AC95B70739 /* TVStreamViews.swift */; };
 		96FD0F0431D04B1A2E074FE1 /* TorBoxPlaybackResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */; };
 		9723DF41A7D8E7F75B02B1C2 /* ViewingProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB6614469B0EC8C53F2A008 /* ViewingProfiles.swift */; };
 		979DC325862C2F3A476A1EC4 /* StremioSkeletonRecommendationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78105990BB56E7D20ECFC494 /* StremioSkeletonRecommendationUITests.swift */; };
 		9827D66EECF67B26A1F44B8D /* Libavformat in Frameworks */ = {isa = PBXBuildFile; productRef = 0870106A3B670B85BEC83F50 /* Libavformat */; };
+		9927D4CA9A8945B26F81DAD8 /* WatchAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6260F90482F6ADFC3D9AA0F /* WatchAppModel.swift */; };
 		9997DCA09069B202121989D4 /* SubtitlePlacement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 678C989627087987EEE1A91C /* SubtitlePlacement.swift */; };
 		9B2A9768EC7A1B4CD6DDAD36 /* TorBoxPlaybackResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */; };
 		9CC2C3A1910D8AF547959D16 /* MobileVLCKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */; };
@@ -77,8 +105,10 @@
 		A840DE1E376E0F89835D400A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9A287360C6BB2F0BDEC601BC /* Assets.xcassets */; };
 		A9890D53A34F0439AE8942E2 /* StremioSkeletonApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62DB074CBE862325B4337472 /* StremioSkeletonApp.swift */; };
 		AA298044E82ED14FFB4CA264 /* PlaybackProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F41290FB3D04E854F302B17E /* PlaybackProgressStore.swift */; };
+		AA3B21CCF36AB9C267A27FBA /* WikipediaTrivia.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA077A081D0F510E782BE1E2 /* WikipediaTrivia.swift */; };
 		AC05EA363D56E2A98F1BBF5B /* Libavcodec in Frameworks */ = {isa = PBXBuildFile; productRef = 210729C6F0C989705BAE4F93 /* Libavcodec */; };
 		ADB739BD9A4BA4B4DB02D223 /* PlaybackViewportMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5EFD9F724CAC9771285F997 /* PlaybackViewportMode.swift */; };
+		AE8917B2A92C85A727088A16 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0200ADABBC0E8D8825CC259A /* Assets.xcassets */; };
 		AEEAB4584EA839A215743DBF /* TorBoxStreamSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */; };
 		AFA68ADCB78E5841063B0182 /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = D3907A3551A9A8003A917297 /* LiveKit */; };
 		B0D9439C0F01597F3E33BD3A /* PlayerDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F159C8CD01833BCBB337842 /* PlayerDiagnostics.swift */; };
@@ -86,29 +116,42 @@
 		B175B12950745BA890EC5C38 /* TVProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D49DB0804473D9C134176A6F /* TVProfilesView.swift */; };
 		B1E1779E39B7DE24F0DFB73A /* Libswresample in Frameworks */ = {isa = PBXBuildFile; productRef = 2A9CCFC1954E109AB9BFC4C3 /* Libswresample */; };
 		B68863E1EF1EA5F29BD10120 /* IntroSkipPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C39E112D93F448842052ADE /* IntroSkipPolicy.swift */; };
+		B6F2EE0FA65584BCAE09A497 /* WatchMediaViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C7DCCED2D55E3D6671BB9AD /* WatchMediaViews.swift */; };
 		B73B3DDDB60F980A34BAD08D /* BunnyPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44120F14991693927D816340 /* BunnyPlayerView.swift */; };
 		B7ED239B05938A85437B7AB9 /* SubtitlePlacement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 678C989627087987EEE1A91C /* SubtitlePlacement.swift */; };
+		BA999B8F2B5494397819C79D /* WikipediaTrivia.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA077A081D0F510E782BE1E2 /* WikipediaTrivia.swift */; };
 		BB81810366F95923ECD1BE2A /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80A2FE21D2D44501F475EC70 /* Models.swift */; };
 		BDECE20EEEE3B43AD7A63BF3 /* StreamTransportBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF4419C84972F1AEE3CFEF98 /* StreamTransportBridge.swift */; };
 		C1968BABBAE6CFE4D2E0C6AB /* ProfileViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57DD9787FAD00548A6DA0B3F /* ProfileViews.swift */; };
 		C2A10ADB9140E2015DBFB710 /* TorBoxStreamSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */; };
+		C3BB7427380C7E7965ACC623 /* PlaybackPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 004AD26B7D9856D9AA52F8EC /* PlaybackPreferences.swift */; };
 		C3C0882F7009B050E6699744 /* PlaybackPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 004AD26B7D9856D9AA52F8EC /* PlaybackPreferences.swift */; };
+		C6BE0CE7D7295C93F462A465 /* MediaContainerSniffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */; };
 		C7C4A7DF8DD371384FED5914 /* WatchPlaybackSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = E67CADA6805601E394F3DF32 /* WatchPlaybackSync.swift */; };
+		C9F1CC11076F35BE9F633F3E /* StremioAccountClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76BC44034EB5CB12127AC2DB /* StremioAccountClient.swift */; };
 		D04FC9CF86C03BE6E66713A2 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80A2FE21D2D44501F475EC70 /* Models.swift */; };
 		D2C5E17FFE5F1943108E1D5A /* TVTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EE196D316E14ED18EE56B6F /* TVTheme.swift */; };
+		D35AF6D2CFD956532B536D4D /* TorBoxPlaybackResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */; };
 		D3B357C6D3BAFF383BBE2B01 /* TVDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0C8DDFB34863B72F0F869C2 /* TVDetailsView.swift */; };
 		D4FF03B0AD74C8F0EA1007DB /* PlaybackPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 004AD26B7D9856D9AA52F8EC /* PlaybackPreferences.swift */; };
+		D8A25FA92C37611A31CC17AF /* WatchSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6939F0DC14FC38828F977EC9 /* WatchSettingsView.swift */; };
 		D9A23E6C603D85C066AFB531 /* LibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */; };
 		DAE08E15EC10E0FAA3CF069D /* TemuStreamTVApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F569A47B37ABB3E3A442851 /* TemuStreamTVApp.swift */; };
 		DDFCDB3195002CC9F8AB62EA /* LastSuccessfulPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89F40502D369348BB85B3550 /* LastSuccessfulPlayback.swift */; };
 		E2A80288E11F9DCEFCAB792D /* TVLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE81C22444A0FD62BC9C080F /* TVLibraryView.swift */; };
+		E2BDF8264A6C77F7FBC0ACC8 /* TemuStremioWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = BCA53AECD21F03657EC92B92 /* TemuStremioWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		E5A6CB7521AB14EC3537BD09 /* WatchProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FBAB4418925292DC58510C1 /* WatchProfilesView.swift */; };
+		E8832C4FE3DFA6562CF0A10B /* WatchPlaybackFallback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34290A737D0AA77BA2BBA457 /* WatchPlaybackFallback.swift */; };
 		EFA5F42492B422622A20697F /* TitleTrivia.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDD50F29A4874DA58E6C23BE /* TitleTrivia.swift */; };
 		EFEEFE653C3ADF27F7315180 /* Libavutil in Frameworks */ = {isa = PBXBuildFile; productRef = 797691F8BEE241B5EDCBF767 /* Libavutil */; };
+		F7B48B5C4CE148703305623C /* WatchStreamCompatibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16CB743D97ED75A97BB3652E /* WatchStreamCompatibility.swift */; };
 		F81F461A3513FC79AE8952BD /* PlaybackProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F41290FB3D04E854F302B17E /* PlaybackProgressStore.swift */; };
 		F8E100B4B4E1B03EC12A1E69 /* ViewingProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB6614469B0EC8C53F2A008 /* ViewingProfiles.swift */; };
 		F960D11E301E7DC05FD9A290 /* AddonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C66DC93D56D584B637C0F01F /* AddonClient.swift */; };
 		F9FF72B15383FB54E45E017D /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B27A3BF40F89EDE5C96D671 /* SessionStore.swift */; };
 		FA7959F257A57400167AFC41 /* PlaybackCompletionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943C8D683B84D44314618B4B /* PlaybackCompletionStore.swift */; };
+		FE8B447CDE2036B4B2803AA3 /* WatchPlaybackFallback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34290A737D0AA77BA2BBA457 /* WatchPlaybackFallback.swift */; };
+		FFAFB245D83E2F1FC20DEBCC /* WatchTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4CB125BC2B61AA4D14F0F83 /* WatchTheme.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -126,6 +169,13 @@
 			remoteGlobalIDString = 0C5042954853D302119EC1C0;
 			remoteInfo = TemuStreamTV;
 		};
+		C23FCE50010C01543D9BA0EC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6307CAF7A103CF4E2E628483 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = DD8A3C37057EC43B0D58F3F6;
+			remoteInfo = TemuStremioWatch;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -140,22 +190,37 @@
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FA7D97A35CBD2BE945BB4580 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				E2BDF8264A6C77F7FBC0ACC8 /* TemuStremioWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		004AD26B7D9856D9AA52F8EC /* PlaybackPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPreferences.swift; sourceTree = "<group>"; };
+		0200ADABBC0E8D8825CC259A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0A4C2DE2DD9636E39BF04BB4 /* TemuStreamTVUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemuStreamTVUITests.swift; sourceTree = "<group>"; };
 		0D845BAABF69E61C0D51B653 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
 		115FF623BC924FE979A5C265 /* TVNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVNavigation.swift; sourceTree = "<group>"; };
 		14E85FA6093641AC95B70739 /* TVStreamViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVStreamViews.swift; sourceTree = "<group>"; };
 		14F9D925B9945C75F7D5D5D0 /* ArtworkCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtworkCache.swift; sourceTree = "<group>"; };
+		16CB743D97ED75A97BB3652E /* WatchStreamCompatibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchStreamCompatibility.swift; sourceTree = "<group>"; };
 		1BA806F771E2B2556420CC1D /* TVHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVHomeView.swift; sourceTree = "<group>"; };
 		1BDA780202FF0514FF2095CA /* AppTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTheme.swift; sourceTree = "<group>"; };
 		1C611CA93396CF3AEBB880FB /* WatchTogetherModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogetherModel.swift; sourceTree = "<group>"; };
 		1EE196D316E14ED18EE56B6F /* TVTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVTheme.swift; sourceTree = "<group>"; };
+		236EF95728FBFF748F0EF40B /* WatchRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchRootView.swift; sourceTree = "<group>"; };
 		24E6F5471C47FE0B2F4D0F10 /* UIStateWatchTogetherStub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIStateWatchTogetherStub.swift; sourceTree = "<group>"; };
 		2795FB8117CAB98537E54E18 /* MobileVLCKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MobileVLCKit.xcframework; path = build/dependencies/MobileVLCKit.xcframework; sourceTree = "<group>"; };
 		2EB985E95FF715EBA7679594 /* PlaybackPerformance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPerformance.swift; sourceTree = "<group>"; };
+		34290A737D0AA77BA2BBA457 /* WatchPlaybackFallback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPlaybackFallback.swift; sourceTree = "<group>"; };
 		3CAED137EB68745CF1797482 /* StremioSkeleton.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = StremioSkeleton.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3FCFB6F29507B9C8739D7F6A /* TorBoxPlaybackResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorBoxPlaybackResolver.swift; sourceTree = "<group>"; };
 		41633D87E87727585EAEEC67 /* StremioSkeletonPlayerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioSkeletonPlayerUITests.swift; sourceTree = "<group>"; };
@@ -167,12 +232,16 @@
 		546F368855314461B504B462 /* StremioPlaybackCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = StremioPlaybackCore.xcframework; path = build/dependencies/StremioPlaybackCore.xcframework; sourceTree = "<group>"; };
 		57DD9787FAD00548A6DA0B3F /* ProfileViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileViews.swift; sourceTree = "<group>"; };
 		5B27A3BF40F89EDE5C96D671 /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
+		5C7DCCED2D55E3D6671BB9AD /* WatchMediaViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchMediaViews.swift; sourceTree = "<group>"; };
 		5FB6614469B0EC8C53F2A008 /* ViewingProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewingProfiles.swift; sourceTree = "<group>"; };
 		62DB074CBE862325B4337472 /* StremioSkeletonApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioSkeletonApp.swift; sourceTree = "<group>"; };
+		62F56829E6FEA5A52A0B2C68 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		657B875064E2A3C5EEDED0CF /* LocalRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalRecommendations.swift; sourceTree = "<group>"; };
 		666B3E359DF6C38C173D7ED1 /* TVRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVRootView.swift; sourceTree = "<group>"; };
 		678C989627087987EEE1A91C /* SubtitlePlacement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitlePlacement.swift; sourceTree = "<group>"; };
+		6939F0DC14FC38828F977EC9 /* WatchSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSettingsView.swift; sourceTree = "<group>"; };
 		6B3488CA92E5E1C37D515AE9 /* MediaContainerSniffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaContainerSniffer.swift; sourceTree = "<group>"; };
+		6FBAB4418925292DC58510C1 /* WatchProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchProfilesView.swift; sourceTree = "<group>"; };
 		7449EC87A28BFE958019C687 /* AppearancePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearancePreferences.swift; sourceTree = "<group>"; };
 		75CCC31778EA4D9C3C4561B9 /* KSPlayer */ = {isa = PBXFileReference; lastKnownFileType = folder; name = KSPlayer; path = Vendor/KSPlayer; sourceTree = SOURCE_ROOT; };
 		7632D31BF3F5BF76AC8BAB0E /* TVAddonsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVAddonsView.swift; sourceTree = "<group>"; };
@@ -181,6 +250,7 @@
 		80A2FE21D2D44501F475EC70 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		87487CD7B982C0F2CBD85E12 /* LibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryStore.swift; sourceTree = "<group>"; };
 		89F40502D369348BB85B3550 /* LastSuccessfulPlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LastSuccessfulPlayback.swift; sourceTree = "<group>"; };
+		8B0B0E5A7F080D74D0744EC7 /* WatchPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPlayerView.swift; sourceTree = "<group>"; };
 		8F159C8CD01833BCBB337842 /* PlayerDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerDiagnostics.swift; sourceTree = "<group>"; };
 		92DDACDA7F728CAAF6D6CF77 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		943C8D683B84D44314618B4B /* PlaybackCompletionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackCompletionStore.swift; sourceTree = "<group>"; };
@@ -188,15 +258,23 @@
 		9B336BE4644ACD78D123FDB5 /* BunnyFFmpegDecoder.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = BunnyFFmpegDecoder.m; sourceTree = "<group>"; };
 		9C39E112D93F448842052ADE /* IntroSkipPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntroSkipPolicy.swift; sourceTree = "<group>"; };
 		A1FF56FDD57F7E2A21773BD4 /* WatchTogetherPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogetherPreferences.swift; sourceTree = "<group>"; };
+		A4CB125BC2B61AA4D14F0F83 /* WatchTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTheme.swift; sourceTree = "<group>"; };
+		A6260F90482F6ADFC3D9AA0F /* WatchAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchAppModel.swift; sourceTree = "<group>"; };
+		A73814FCCD93485B5ABF131A /* WatchSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSessionStore.swift; sourceTree = "<group>"; };
 		AC6D313012E369A273294309 /* TVSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVSettingsView.swift; sourceTree = "<group>"; };
 		AF4419C84972F1AEE3CFEF98 /* StreamTransportBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamTransportBridge.swift; sourceTree = "<group>"; };
 		AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TorrentStreamingClient.swift; sourceTree = "<group>"; };
 		B0C8DDFB34863B72F0F869C2 /* TVDetailsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVDetailsView.swift; sourceTree = "<group>"; };
+		B2EC32063F0DF3A93F01B7D0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B345D8753EA539ED0E7F24B3 /* TemuStremioWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemuStremioWatchApp.swift; sourceTree = "<group>"; };
 		B5EFD9F724CAC9771285F997 /* PlaybackViewportMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackViewportMode.swift; sourceTree = "<group>"; };
+		BA077A081D0F510E782BE1E2 /* WikipediaTrivia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WikipediaTrivia.swift; sourceTree = "<group>"; };
+		BCA53AECD21F03657EC92B92 /* TemuStremioWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TemuStremioWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BE81C22444A0FD62BC9C080F /* TVLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVLibraryView.swift; sourceTree = "<group>"; };
 		C232DE83E2D6EAF131790095 /* StremioSkeleton-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "StremioSkeleton-Bridging-Header.h"; sourceTree = "<group>"; };
 		C289EB2211B160B29B489F5A /* TemuStreamTV.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TemuStreamTV.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C66DC93D56D584B637C0F01F /* AddonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddonClient.swift; sourceTree = "<group>"; };
+		C7465B8DC8085D4D479387E8 /* TemuStremioWatchContainer.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TemuStremioWatchContainer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CAD90D9901EB74BA61FFE593 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
 		D49DB0804473D9C134176A6F /* TVProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVProfilesView.swift; sourceTree = "<group>"; };
 		D7114F36057BC13AEFED9660 /* DiscoveryPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryPresentation.swift; sourceTree = "<group>"; };
@@ -244,9 +322,12 @@
 			children = (
 				F9F8FECF9E920E7FD503BC7D /* App */,
 				BA06957E1FB443E4180F33BF /* App */,
+				A4DB54AFCD90C7BCFFAE4DE7 /* App */,
 				F56A59FD0CDCA10B0C956624 /* config */,
 				D632989DDF21E4D09C054ED9 /* Packages */,
 				477A839685716B2CB90FFE5C /* Resources */,
+				D382BC2E329DC21ED1F6914D /* Resources */,
+				5358F99F4A17203E926D4BBD /* Resources */,
 				F487699F38004DD5AD864466 /* StremioSkeletonCore */,
 				896AAD634002E5FCC00DFAF2 /* UITests */,
 				43833929DDAB63633AB9A803 /* UITests */,
@@ -268,6 +349,7 @@
 			isa = PBXGroup;
 			children = (
 				9A287360C6BB2F0BDEC601BC /* Assets.xcassets */,
+				62F56829E6FEA5A52A0B2C68 /* PrivacyInfo.xcprivacy */,
 			);
 			name = Resources;
 			path = iOS/Resources;
@@ -282,6 +364,15 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		5358F99F4A17203E926D4BBD /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				B2EC32063F0DF3A93F01B7D0 /* Assets.xcassets */,
+			);
+			name = Resources;
+			path = watchOS/Resources;
+			sourceTree = "<group>";
+		};
 		71EF0A8EAE3C7A7AFAA9AD4C /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -289,6 +380,8 @@
 				DCBAC22E2B04D9AC26BF65A4 /* StremioSkeletonUITests.xctest */,
 				C289EB2211B160B29B489F5A /* TemuStreamTV.app */,
 				FBB07234D273DA388EA45305 /* TemuStreamTVUITests.xctest */,
+				BCA53AECD21F03657EC92B92 /* TemuStremioWatch.app */,
+				C7465B8DC8085D4D479387E8 /* TemuStremioWatchContainer.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -301,6 +394,23 @@
 			);
 			name = UITests;
 			path = iOS/UITests;
+			sourceTree = "<group>";
+		};
+		A4DB54AFCD90C7BCFFAE4DE7 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				B345D8753EA539ED0E7F24B3 /* TemuStremioWatchApp.swift */,
+				A6260F90482F6ADFC3D9AA0F /* WatchAppModel.swift */,
+				5C7DCCED2D55E3D6671BB9AD /* WatchMediaViews.swift */,
+				8B0B0E5A7F080D74D0744EC7 /* WatchPlayerView.swift */,
+				6FBAB4418925292DC58510C1 /* WatchProfilesView.swift */,
+				236EF95728FBFF748F0EF40B /* WatchRootView.swift */,
+				A73814FCCD93485B5ABF131A /* WatchSessionStore.swift */,
+				6939F0DC14FC38828F977EC9 /* WatchSettingsView.swift */,
+				A4CB125BC2B61AA4D14F0F83 /* WatchTheme.swift */,
+			);
+			name = App;
+			path = watchOS/App;
 			sourceTree = "<group>";
 		};
 		BA06957E1FB443E4180F33BF /* App */ = {
@@ -323,6 +433,15 @@
 			);
 			name = App;
 			path = tvOS/App;
+			sourceTree = "<group>";
+		};
+		D382BC2E329DC21ED1F6914D /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				0200ADABBC0E8D8825CC259A /* Assets.xcassets */,
+			);
+			name = Resources;
+			path = tvOS/Resources;
 			sourceTree = "<group>";
 		};
 		D632989DDF21E4D09C054ED9 /* Packages */ = {
@@ -359,8 +478,11 @@
 				F26723B7DF0B23896AA5BE44 /* TorBoxStreamSelection.swift */,
 				AFF21417ABFE14626351469D /* TorrentStreamingClient.swift */,
 				5FB6614469B0EC8C53F2A008 /* ViewingProfiles.swift */,
+				34290A737D0AA77BA2BBA457 /* WatchPlaybackFallback.swift */,
 				E67CADA6805601E394F3DF32 /* WatchPlaybackSync.swift */,
+				16CB743D97ED75A97BB3652E /* WatchStreamCompatibility.swift */,
 				A1FF56FDD57F7E2A21773BD4 /* WatchTogetherPreferences.swift */,
+				BA077A081D0F510E782BE1E2 /* WikipediaTrivia.swift */,
 			);
 			name = StremioSkeletonCore;
 			path = Sources/StremioSkeletonCore;
@@ -412,6 +534,7 @@
 			buildConfigurationList = F9148680BBDB079AE62808FC /* Build configuration list for PBXNativeTarget "TemuStreamTV" */;
 			buildPhases = (
 				CD99452D4B19905551D6F71C /* Sources */,
+				128BECD1AA5D36CEF1286F89 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -470,6 +593,43 @@
 			productReference = DCBAC22E2B04D9AC26BF65A4 /* StremioSkeletonUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		74616D6DB68D4C774D2EDC07 /* TemuStremioWatchContainer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 951127D3ABF376CD8BAC3EA3 /* Build configuration list for PBXNativeTarget "TemuStremioWatchContainer" */;
+			buildPhases = (
+				D77548D82E81A4FCD81D6854 /* Sources */,
+				FA7D97A35CBD2BE945BB4580 /* Embed Watch Content */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				225DFF3E57F4E52B79D6392B /* PBXTargetDependency */,
+			);
+			name = TemuStremioWatchContainer;
+			packageProductDependencies = (
+			);
+			productName = TemuStremioWatchContainer;
+			productReference = C7465B8DC8085D4D479387E8 /* TemuStremioWatchContainer.app */;
+			productType = "com.apple.product-type.application.watchapp2-container";
+		};
+		DD8A3C37057EC43B0D58F3F6 /* TemuStremioWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7EF679B508A97252EA2F3694 /* Build configuration list for PBXNativeTarget "TemuStremioWatch" */;
+			buildPhases = (
+				F83D07377E57728930967914 /* Sources */,
+				224A2976CD0AC59C9B4AD00C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TemuStremioWatch;
+			packageProductDependencies = (
+			);
+			productName = TemuStremioWatch;
+			productReference = BCA53AECD21F03657EC92B92 /* TemuStremioWatch.app */;
+			productType = "com.apple.product-type.application";
+		};
 		F52847F07978E0BB6890BBD2 /* TemuStreamTVUITests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = B5380E5DFDDCFC0BDB750DBD /* Build configuration list for PBXNativeTarget "TemuStreamTVUITests" */;
@@ -510,6 +670,14 @@
 						ProvisioningStyle = Automatic;
 						TestTargetID = 1A5A0B95AD8723998190FA62;
 					};
+					74616D6DB68D4C774D2EDC07 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					DD8A3C37057EC43B0D58F3F6 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
 					F52847F07978E0BB6890BBD2 = {
 						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
@@ -541,16 +709,36 @@
 				261AE2A568DD6F489B5B9B82 /* StremioSkeletonUITests */,
 				0C5042954853D302119EC1C0 /* TemuStreamTV */,
 				F52847F07978E0BB6890BBD2 /* TemuStreamTVUITests */,
+				DD8A3C37057EC43B0D58F3F6 /* TemuStremioWatch */,
+				74616D6DB68D4C774D2EDC07 /* TemuStremioWatchContainer */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		128BECD1AA5D36CEF1286F89 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AE8917B2A92C85A727088A16 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		161EAB26A830391230A7C540 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				A840DE1E376E0F89835D400A /* Assets.xcassets in Resources */,
+				61980DD740A8C835B3AC5562 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		224A2976CD0AC59C9B4AD00C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				474532411F59B79BCEBA2BC3 /* Assets.xcassets in Resources */,
+				759EB3A38A6DEFB5D4169DAF /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -602,10 +790,13 @@
 				80E94309BD60F2F03E0E53AD /* UIStateWatchTogetherStub.swift in Sources */,
 				F8E100B4B4E1B03EC12A1E69 /* ViewingProfiles.swift in Sources */,
 				3E006AA43C2FEB3FBE9E46B0 /* Views.swift in Sources */,
+				FE8B447CDE2036B4B2803AA3 /* WatchPlaybackFallback.swift in Sources */,
 				1B15C14C7634EE672CA41DAA /* WatchPlaybackSync.swift in Sources */,
+				82294693C29F58C3A53B32D7 /* WatchStreamCompatibility.swift in Sources */,
 				8C8ED734CF335039F9A44521 /* WatchTogetherModel.swift in Sources */,
 				A71D9699786D136FA875292E /* WatchTogetherPreferences.swift in Sources */,
 				09FE991F737FDE0A59DCF886 /* WatchTogetherViews.swift in Sources */,
+				AA3B21CCF36AB9C267A27FBA /* WikipediaTrivia.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -662,8 +853,18 @@
 				AEEAB4584EA839A215743DBF /* TorBoxStreamSelection.swift in Sources */,
 				9CECC3C538EF7940DF710C23 /* TorrentStreamingClient.swift in Sources */,
 				9723DF41A7D8E7F75B02B1C2 /* ViewingProfiles.swift in Sources */,
+				5243B55D3B8BE88BCA59FB0D /* WatchPlaybackFallback.swift in Sources */,
 				C7C4A7DF8DD371384FED5914 /* WatchPlaybackSync.swift in Sources */,
+				3D96FBBCA8D8943658489B50 /* WatchStreamCompatibility.swift in Sources */,
 				18022D4324795BD0175AB6AC /* WatchTogetherPreferences.swift in Sources */,
+				BA999B8F2B5494397819C79D /* WikipediaTrivia.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D77548D82E81A4FCD81D6854 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -675,9 +876,53 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F83D07377E57728930967914 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				14E2D90C28B05B6530DD09E4 /* AddonClient.swift in Sources */,
+				368A6FBA2B8DAE519968310D /* AddonEndpoint.swift in Sources */,
+				282A3D4F2D3F6F8E7B5E09C3 /* CatalogPaging.swift in Sources */,
+				88AEEAA3FF8E715C48422772 /* DiscoveryPresentation.swift in Sources */,
+				0C6D3C10C65CEA00E3266F35 /* EpisodeResumeSelection.swift in Sources */,
+				4142BC9819BE365C4DA968D4 /* IntroSkipPolicy.swift in Sources */,
+				6841B174CC0D753CE38F5D1A /* LastSuccessfulPlayback.swift in Sources */,
+				3CF59BB593025BF5CCDF67FF /* LibraryStore.swift in Sources */,
+				02E284FB57E3F5F6BCF5AFAC /* LocalRecommendations.swift in Sources */,
+				C6BE0CE7D7295C93F462A465 /* MediaContainerSniffer.swift in Sources */,
+				8D01B202D33AF1FA06926967 /* Models.swift in Sources */,
+				8913955E05C8A8E6CDE9F85C /* PlaybackCompletionStore.swift in Sources */,
+				C3BB7427380C7E7965ACC623 /* PlaybackPreferences.swift in Sources */,
+				8CA23CFFC946384B2FF6FBF8 /* PlaybackProgressStore.swift in Sources */,
+				C9F1CC11076F35BE9F633F3E /* StremioAccountClient.swift in Sources */,
+				46888570EEAD56D1685F0A0A /* TemuStremioWatchApp.swift in Sources */,
+				755F3346B8F4681943391ED1 /* TitleTrivia.swift in Sources */,
+				D35AF6D2CFD956532B536D4D /* TorBoxPlaybackResolver.swift in Sources */,
+				655C90073CBC4672C31A0607 /* TorBoxStreamSelection.swift in Sources */,
+				2A4BDA2E1C0AAFA3B9F2B0E9 /* TorrentStreamingClient.swift in Sources */,
+				515FC9CDF9439EB996433446 /* ViewingProfiles.swift in Sources */,
+				9927D4CA9A8945B26F81DAD8 /* WatchAppModel.swift in Sources */,
+				B6F2EE0FA65584BCAE09A497 /* WatchMediaViews.swift in Sources */,
+				E8832C4FE3DFA6562CF0A10B /* WatchPlaybackFallback.swift in Sources */,
+				78FC94D4AC0D4794F769EF73 /* WatchPlayerView.swift in Sources */,
+				E5A6CB7521AB14EC3537BD09 /* WatchProfilesView.swift in Sources */,
+				1679B5339662B59F4FA32E8D /* WatchRootView.swift in Sources */,
+				8E535B8FA1DFCC1DC4DD34C6 /* WatchSessionStore.swift in Sources */,
+				D8A25FA92C37611A31CC17AF /* WatchSettingsView.swift in Sources */,
+				F7B48B5C4CE148703305623C /* WatchStreamCompatibility.swift in Sources */,
+				FFAFB245D83E2F1FC20DEBCC /* WatchTheme.swift in Sources */,
+				8CFFD0B97395F1E32D3FE1AE /* WikipediaTrivia.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		225DFF3E57F4E52B79D6392B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = DD8A3C37057EC43B0D58F3F6 /* TemuStremioWatch */;
+			targetProxy = C23FCE50010C01543D9BA0EC /* PBXContainerItemProxy */;
+		};
 		637D17A1EA97C2A040AFE29D /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 0C5042954853D302119EC1C0 /* TemuStreamTV */;
@@ -691,6 +936,26 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		250F0506FA7C46A85E26674A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = TemuStremioWatchAppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				INFOPLIST_FILE = watchOS/Resources/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = local.stremio.skeleton.watch.watchkitapp;
+				PRODUCT_NAME = TemuStremioWatch;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
 		6ACA2F76ED3B45491974FC60 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -733,6 +998,26 @@
 			};
 			name = Release;
 		};
+		87AD9C9E7E23363C80E4AEEB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = TemuStremioWatchAppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				INFOPLIST_FILE = watchOS/Resources/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = local.stremio.skeleton.watch.watchkitapp;
+				PRODUCT_NAME = TemuStremioWatch;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
 		89A57FB9A88BCC29DF27EF5C /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -754,11 +1039,30 @@
 			};
 			name = Debug;
 		};
+		8DC34EFECFEBD48342936B6C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				INFOPLIST_FILE = watchOS/Container/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = local.stremio.skeleton.watch;
+				PRODUCT_NAME = TemuStremioWatchContainer;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		964C850B3C2208050D9DED5C /* Release */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = ED956DBDB8F34B2319BADCD1 /* WatchTogether.xcconfig */;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = TemuStremioAppIcon;
 				CODE_SIGN_ENTITLEMENTS = iOS/Resources/StremioSkeleton.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
@@ -810,7 +1114,7 @@
 		B8471655ADFCF965A4CB2B2B /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_APPICON_NAME = TemuStremioTVAppIcon;
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = "";
@@ -835,7 +1139,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = ED956DBDB8F34B2319BADCD1 /* WatchTogether.xcconfig */;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = TemuStremioAppIcon;
 				CODE_SIGN_ENTITLEMENTS = iOS/Resources/StremioSkeleton.entitlements;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
@@ -859,6 +1163,25 @@
 				SWIFT_OBJC_BRIDGING_HEADER = "iOS/App/StremioSkeleton-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CD40CD12C5DB28BEA4765DBE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				INFOPLIST_FILE = watchOS/Container/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = local.stremio.skeleton.watch;
+				PRODUCT_NAME = TemuStremioWatchContainer;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -923,13 +1246,14 @@
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				TVOS_DEPLOYMENT_TARGET = 18.0;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
 			name = Debug;
 		};
 		EAC5B7ECAC8D2ADA0281A193 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_APPICON_NAME = TemuStremioTVAppIcon;
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = "";
@@ -1003,6 +1327,7 @@
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
 				TVOS_DEPLOYMENT_TARGET = 18.0;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
 			name = Release;
 		};
@@ -1032,6 +1357,24 @@
 			buildConfigurations = (
 				B94B527A9479A99CF14015F0 /* Debug */,
 				964C850B3C2208050D9DED5C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		7EF679B508A97252EA2F3694 /* Build configuration list for PBXNativeTarget "TemuStremioWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				87AD9C9E7E23363C80E4AEEB /* Debug */,
+				250F0506FA7C46A85E26674A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		951127D3ABF376CD8BAC3EA3 /* Build configuration list for PBXNativeTarget "TemuStremioWatchContainer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CD40CD12C5DB28BEA4765DBE /* Debug */,
+				8DC34EFECFEBD48342936B6C /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

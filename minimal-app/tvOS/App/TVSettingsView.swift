@@ -190,7 +190,7 @@ struct TVSettingsView: View {
     settingsCard {
       HStack {
         VStack(alignment: .leading, spacing: 8) {
-          Text("TemuStream for Apple TV")
+          Text("TemuStremio for Apple TV")
             .font(.title2.bold())
           Text("Version 1.3 (18)")
             .font(.headline)

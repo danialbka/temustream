@@ -199,8 +199,10 @@ is_sensitive_path() {
     return 1
   fi
   case "$1" in
-    .env|.env.*|*/.env|*/.env.*|*.p12|*.pfx|*.pem|*.key|*.mobileprovision|*.provisionprofile|\
-    *credentials*.json|*credential*.json|*sideloadly*snapshot*.json|*WatchTogether.local.xcconfig)
+    .env|.env.*|*/.env|*/.env.*|*.p8|*.p12|*.pfx|*.pem|*.key|*.jks|*.keystore|*.kdbx|\
+    *.mobileprovision|*.provisionprofile|*credentials*.json|*credential*.json|\
+    *sideloadly*snapshot*.json|*WatchTogether.local.xcconfig|*Signing.local.xcconfig|\
+    *ExportOptions.local.plist)
       return 0
       ;;
   esac
@@ -375,7 +377,7 @@ while IFS= read -r HEALTH_PATH; do
 done <"$HEALTH_ALL"
 
 printf '\nHigh-confidence credential markers\n'
-HEALTH_SECRET_PATTERN='-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk_live_[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,}'
+HEALTH_SECRET_PATTERN='-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{30,}|pypi-AgEIcH[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9]{16,}|sk-proj-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,}'
 : >"$HEALTH_SECRET_MATCHES"
 
 while IFS= read -r HEALTH_PATH; do

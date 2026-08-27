@@ -260,11 +260,18 @@ public enum LastSuccessfulPlaybackRanker {
         guard let preference, preference.identity == identity else {
             return candidates
         }
-        return candidates.enumerated().sorted { lhs, rhs in
-            let lhsScore = score(key(lhs.element), preference: preference)
-            let rhsScore = score(key(rhs.element), preference: preference)
-            return lhsScore == rhsScore ? lhs.offset < rhs.offset : lhsScore < rhsScore
-        }.map(\.element)
+        // Preference keys may hash stable stream metadata. Compute each key
+        // once before sorting instead of repeating that work for every sort
+        // comparison (O(n log n) key generation for large provider lists).
+        let scored: [(offset: Int, element: C, score: Int)] = candidates.enumerated()
+            .map { candidate in
+                let candidateScore = score(key(candidate.element), preference: preference)
+                return (candidate.offset, candidate.element, candidateScore)
+            }
+        let sorted = scored.sorted { lhs, rhs in
+            lhs.score == rhs.score ? lhs.offset < rhs.offset : lhs.score < rhs.score
+        }
+        return sorted.map(\.element)
     }
 
     private static func score(

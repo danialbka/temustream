@@ -65,7 +65,7 @@ test entry points reuse `/private/tmp/stremio-build-cache` unless
 ```
 
 The cache report is safe and read-only. Automatic pruning requires a valid
-TemuStream ownership marker, respects live PID leases, retains the two newest
+project ownership marker, respects live PID leases, retains the two newest
 caches per kind, and gives inactive entries a 30-minute grace period. Unmarked
 legacy `stremio-*` folders are reported but never automatically removed. See
 `docs/BUILD_CACHE_RETENTION.md` for the full policy.

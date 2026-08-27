@@ -24,7 +24,7 @@ struct TVSearchView: View {
         .frame(width: 430)
       }
 
-      TextField("Search TemuStream", text: $query)
+      TextField("Search TemuStremio", text: $query)
         .submitLabel(.search)
         .onSubmit { runSearch(query) }
         .accessibilityIdentifier("tvos-search-field")

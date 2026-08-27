@@ -438,12 +438,14 @@ private struct ViewingProfileEditorView: View {
 private extension ViewingProfileAvatar {
     var assetName: String? {
         switch self {
-        case .avril: return "ProfileAvril"
-        case .sam: return "ProfileSam"
-        case .lopBunny: return "ProfileLopBunny"
-        case .goldenPuppy: return "ProfileGoldenPuppy"
-        case .tabbyKitten: return "ProfileTabbyKitten"
-        case .seaOtter: return "ProfileSeaOtter"
+        // Keep the persisted enum cases for existing users, but map them to
+        // original public-release artwork and neutral display names.
+        case .avril: return "ProfileRedPanda"
+        case .sam: return "ProfileArcticFox"
+        case .lopBunny: return "ProfileLopBunnyOriginal"
+        case .goldenPuppy: return "ProfileGoldenPuppyOriginal"
+        case .tabbyKitten: return "ProfileTabbyKittenOriginal"
+        case .seaOtter: return "ProfileSeaOtterOriginal"
         case .bunny, .carrot, .moon, .star, .popcorn, .rocket: return nil
         }
     }
@@ -473,8 +475,8 @@ private extension ViewingProfileAvatar {
         case .star: return "Star"
         case .popcorn: return "Popcorn"
         case .rocket: return "Rocket"
-        case .avril: return "Avril Lavigne"
-        case .sam: return "Sam Altman"
+        case .avril: return "Red panda"
+        case .sam: return "Arctic fox"
         case .lopBunny: return "Lop bunny"
         case .goldenPuppy: return "Golden puppy"
         case .tabbyKitten: return "Tabby kitten"

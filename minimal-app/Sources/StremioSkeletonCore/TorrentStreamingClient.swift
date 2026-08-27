@@ -43,6 +43,11 @@ public struct StreamingServerEndpoint: Equatable, Sendable {
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: trimmed),
               let scheme = url.scheme?.lowercased(),
+              url.host != nil,
+              url.user == nil,
+              url.password == nil,
+              url.query == nil,
+              url.fragment == nil,
               scheme == "https" || (scheme == "http" && url.host?.isLocalNetworkHost == true)
         else { throw StreamingServerError.invalidServerURL }
         baseURL = url

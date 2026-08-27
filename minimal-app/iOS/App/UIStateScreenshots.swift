@@ -64,6 +64,7 @@ private struct UIStateScreenshotRoot: View {
             "home-light-custom-theme", "catalog-error",
             "search-idle", "search-results",
             "details-streams", "details-resume", "details-series-episodes",
+            "details-performance-heavy",
             "details-series-rewatch", "episode-streams",
             "episode-up-next",
             "details-trailer-active", "library-synced", "account-signed-in",
@@ -108,9 +109,35 @@ private struct UIStateScreenshotRoot: View {
             NavigationStack {
                 DetailsView(seed: fixtureItem)
             }
+        case "details-performance-heavy":
+            NavigationStack {
+                DetailsView(seed: heavyDetailsFixtureItem)
+            }
         case "details-cast-movie":
             NavigationStack {
                 DetailsView(seed: fixtureItem)
+            }
+        case "details-trivia-expanded":
+            NavigationStack {
+                DetailsView(
+                    seed: fixtureItem,
+                    triviaAndAwardsInitiallyExpanded: true
+                )
+            }
+        case "details-trivia":
+            NavigationStack {
+                TitleTriviaListView(
+                    item: fixtureItem,
+                    facts: TitleTriviaBuilder.facts(for: fixtureItem),
+                    wikipediaTrivia: fixtureWikipediaTrivia
+                )
+            }
+        case "details-trivia-live":
+            NavigationStack {
+                TitleTriviaListView(
+                    item: liveWikipediaItem,
+                    facts: []
+                )
             }
         case "details-resume":
             NavigationStack {
@@ -222,8 +249,11 @@ private struct UIStateScreenshotRoot: View {
         switch state {
         case "home-cinemeta", "home-letterboxd", "home-series",
              "home-light-custom-theme", "catalog-error",
-             "details-streams", "details-trailer-active":
+             "details-streams", "details-trailer-active", "details-performance-heavy":
             await model.start()
+            if state == "details-performance-heavy" {
+                model.prepareDetailsPerformanceFixture()
+            }
             if state == "home-series" {
                 model.recordPlaybackProgress(
                     contentIdentifier: EpisodePlaybackIdentity.contentIdentifier(
@@ -358,13 +388,19 @@ private struct UIStateScreenshotRoot: View {
         // The Up Next card is presented by a child task after the player first appears,
         // so its fixture needs an additional render turn before declaring itself ready.
         let readinessDelayMilliseconds: Int
-        if state == "episode-up-next" {
+        if state == "details-performance-heavy" {
+            readinessDelayMilliseconds = 5_000
+        } else if state == "details-trivia-live" {
+            readinessDelayMilliseconds = 10_000
+        } else if state == "episode-up-next" {
             readinessDelayMilliseconds = 3_000
         } else if state == "details-streams" || state == "details-resume"
                     || state == "details-series-episodes"
                     || state == "details-series-rewatch" || state == "episode-streams"
                     || state == "details-trailer-active" || state == "search-results"
                     || state == "details-cast-movie" || state == "details-cast-series"
+                    || state == "details-trivia-expanded"
+                    || state == "details-trivia"
                     || state == "home-card-layout" {
             readinessDelayMilliseconds = 1_500
         } else {
@@ -395,7 +431,83 @@ private struct UIStateScreenshotRoot: View {
             country: "Netherlands",
             awards: "1 win.",
             released: "2008-04-09T21:00:00.000Z",
-            trivia: ["The metadata provider identifies this as an open animated short."]
+            trivia: [
+                "The metadata provider identifies this as an open animated short.",
+                "The production used open tools throughout its animation pipeline.",
+                "SPOILER: The final confrontation ends when the forest animals work together.",
+            ]
+        )
+    }
+
+    private var heavyDetailsFixtureItem: MetaItem {
+        MetaItem(
+            id: "tt-heavy-details",
+            type: "movie",
+            name: "Details Performance Movie",
+            description: "A deterministic movie with a large recommendation and stream set.",
+            releaseInfo: "2026",
+            genres: ["Animation", "Comedy"],
+            cast: ["Fixture Performer"],
+            runtime: "120 min",
+            imdbRating: "8.4",
+            awards: "Won 4 fixture awards.",
+            trivia: ["This title exercises the heavy details-page presentation path."]
+        )
+    }
+
+    private var liveWikipediaItem: MetaItem {
+        let environment = ProcessInfo.processInfo.environment
+        let imdbID = environment["UI_WIKIPEDIA_IMDB_ID"]
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "tt1254207"
+        let title = environment["UI_WIKIPEDIA_TITLE"]
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "Big Buck Bunny"
+        return MetaItem(
+            id: imdbID,
+            type: "movie",
+            name: title
+        )
+    }
+
+    private var fixtureWikipediaTrivia: WikipediaTitleTrivia {
+        let articleURL = URL(string: "https://en.wikipedia.org/wiki/Big_Buck_Bunny")!
+        var revisionComponents = URLComponents(
+            string: "https://en.wikipedia.org/w/index.php"
+        )!
+        revisionComponents.queryItems = [
+            URLQueryItem(name: "title", value: "Big Buck Bunny"),
+            URLQueryItem(name: "oldid", value: "1356014031"),
+        ]
+        return WikipediaTitleTrivia(
+            pageTitle: "Big Buck Bunny",
+            articleURL: articleURL,
+            revisionURL: revisionComponents.url!,
+            revisionID: 1_356_014_031,
+            sections: [
+                WikipediaTriviaSection(
+                    id: "wikipedia-section-production",
+                    title: "Production",
+                    excerpts: [
+                        WikipediaTriviaExcerpt(
+                            id: "wikipedia-production-0",
+                            text: "Big Buck Bunny was the Blender Institute's first open-film project after Elephants Dream."
+                        ),
+                        WikipediaTriviaExcerpt(
+                            id: "wikipedia-production-1",
+                            text: "The project led to improvements in Blender's hair, fur, particle, shading, and animation tools."
+                        ),
+                    ]
+                ),
+                WikipediaTriviaSection(
+                    id: "wikipedia-section-release",
+                    title: "Legacy",
+                    excerpts: [
+                        WikipediaTriviaExcerpt(
+                            id: "wikipedia-legacy-0",
+                            text: "The completed film and its production assets were released for public reuse under a Creative Commons license."
+                        ),
+                    ]
+                ),
+            ]
         )
     }
 
@@ -403,15 +515,15 @@ private struct UIStateScreenshotRoot: View {
         let primaryID = UUID(uuidString: "E6472B2D-9BD7-4DCE-8014-5EED0419BFE2")!
         return ViewingProfileSnapshot(
             profiles: [
-                ViewingProfile(id: primaryID, name: "Danial", avatar: .lopBunny),
+                ViewingProfile(id: primaryID, name: "River", avatar: .lopBunny),
                 ViewingProfile(
                     id: UUID(uuidString: "D1C19A55-D294-4B57-9309-B3B57F61AE46")!,
-                    name: "Avril",
+                    name: "Rowan",
                     avatar: .avril
                 ),
                 ViewingProfile(
                     id: UUID(uuidString: "52AE649F-C851-4A3F-8828-F3657D3DC178")!,
-                    name: "Sam",
+                    name: "Sky",
                     avatar: .sam
                 ),
                 ViewingProfile(
@@ -447,6 +559,10 @@ private struct UIStateScreenshotRoot: View {
             awards: "Won 2 television awards.",
             status: "Continuing",
             released: "2024-01-05T00:00:00.000Z",
+            trivia: [
+                "The provider lists the first season as a two-part opening story.",
+                "SPOILER: The missing signal introduced in the premiere returns in episode two.",
+            ],
             videos: [fixtureEpisodeOne, fixtureEpisodeTwo],
             trailerStreams: [
                 TrailerStream(title: "Official trailer", youtubeID: "yUQM7H4Swgw")

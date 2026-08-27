@@ -4,6 +4,8 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 "$ROOT_DIR/scripts/test.sh"
+"$ROOT_DIR/scripts/build-tvos.sh" --typecheck
+"$ROOT_DIR/scripts/build-watchos.sh" --typecheck
 "$ROOT_DIR/scripts/build-simulator.sh"
 "$ROOT_DIR/scripts/build-device.sh"
 
@@ -18,4 +20,4 @@ fi
 "$ROOT_DIR/scripts/e2e-simulator.sh"
 "$ROOT_DIR/scripts/ui-state-screenshots.sh"
 
-echo "Skeleton verification workflow PASS"
+echo "TemuStremio verification workflow PASS"

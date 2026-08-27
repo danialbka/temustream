@@ -22,7 +22,7 @@ final class ViewingProfileStoreTests: XCTestCase {
     func testBootstrapCreatesStableDefaultProfile() async throws {
         let directory = temporaryDirectory()
         let first = try await ViewingProfileStore(rootDirectory: directory).bootstrap(
-            defaultName: "  Danial   ",
+            defaultName: "  Primary Viewer   ",
             defaultAvatar: .bunny,
             now: date(1)
         )
@@ -31,7 +31,7 @@ final class ViewingProfileStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(first, second)
-        XCTAssertEqual(first.activeProfile?.name, "Danial")
+        XCTAssertEqual(first.activeProfile?.name, "Primary Viewer")
         XCTAssertEqual(first.activeProfile?.avatar, .bunny)
         XCTAssertEqual(first.activeProfileID, first.primaryProfileID)
         XCTAssertTrue(first.activeProfileAllowsAccountLibrarySync)

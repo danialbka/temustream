@@ -1,0 +1,22 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: swift
+    directory: /minimal-app
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /minimal-app/rust/StremioPlaybackCore
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: /minimal-app/Backend/watch-together
+    schedule:
+      interval: weekly

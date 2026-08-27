@@ -5,7 +5,7 @@ umask 077
 script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
 retention_tool="$repo_root/scripts/build-cache-retention.sh"
-snapshot_path="${SIDELOADLY_SNAPSHOT:-$repo_root/config/sideloadly-orangeapple.snapshot.json}"
+snapshot_path="${SIDELOADLY_SNAPSHOT:-$repo_root/config/sideloadly.snapshot.json}"
 support_dir="${HOME}/Library/Application Support/sideloadly"
 database_path="$support_dir/installations.db"
 cache_dir="${HOME}/Library/Caches/sideloadly"

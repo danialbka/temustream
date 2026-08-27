@@ -5,7 +5,7 @@ umask 077
 script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
 retention_tool="$repo_root/scripts/build-cache-retention.sh"
-snapshot_path="${SIDELOADLY_SNAPSHOT:-$repo_root/config/sideloadly-orangeapple.snapshot.json}"
+snapshot_path="${SIDELOADLY_SNAPSHOT:-$repo_root/config/sideloadly.snapshot.json}"
 sideloadly_support_dir="${HOME}/Library/Application Support/sideloadly"
 fast_ota_support_dir="${STREMIO_FAST_OTA_SUPPORT:-${HOME}/Library/Application Support/stremio-fast-ota}"
 profile_cache="$fast_ota_support_dir/profile.mobileprovision"
@@ -40,7 +40,7 @@ Usage:
                                [--expected-source-id SHA256]
                                [--dry-run] [--no-launch] [--no-stage]
 
-The fast updater checks OrangeApple before doing expensive work, locally signs
+The fast updater checks the configured iPhone before doing expensive work, locally signs
 the app with Sideloadly's active certificate and provisioning profile, installs
 the signed .app directly over Apple's CoreDevice Wi-Fi tunnel, verifies the
 installed build, and launches it.

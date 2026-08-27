@@ -2,9 +2,9 @@
 
 ## Physical iPhone cadence regression
 
-Measured 2026-08-22 on OrangeApple (iPhone 14 Pro Max) with the exact Debridio
-stream `Obsession (2025) WEB-DL 1080p Ukr Eng [Hurtom].mkv` (6.80 GB,
-23.98 fps). Each result below uses only uninterrupted `state=playing` samples.
+Measured 2026-08-22 on an iPhone 14 Pro Max test device with a user-authorized
+1080p MKV stream (6.80 GB, 23.98 fps). Each result below uses only
+uninterrupted `state=playing` samples.
 The VLC pause/buffer event caused by manual timeline scrubbing is deliberately
 outside its comparison window.
 

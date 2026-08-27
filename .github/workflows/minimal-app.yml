@@ -20,7 +20,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
       - name: Ensure FFmpeg is available
@@ -32,6 +32,11 @@ jobs:
       - name: Run unit tests
         timeout-minutes: 5
         run: ./minimal-app/scripts/test.sh
+      - name: Type-check Apple TV and Apple Watch targets
+        timeout-minutes: 5
+        run: |
+          ./minimal-app/scripts/build-tvos.sh --typecheck
+          ./minimal-app/scripts/build-watchos.sh --typecheck
       - name: Build simulator package
         timeout-minutes: 10
         run: ./minimal-app/scripts/build-simulator.sh
@@ -58,9 +63,9 @@ jobs:
       - name: Capture UI state screenshots
         timeout-minutes: 8
         run: ./minimal-app/scripts/ui-state-screenshots.sh
-      - name: Upload signed ad-hoc builds and E2E evidence
+      - name: Upload local handoff builds and E2E evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: skeleton-verification
           path: |

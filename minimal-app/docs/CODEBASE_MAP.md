@@ -1,4 +1,4 @@
-# TemuStream codebase map
+# TemuStremio codebase map
 
 Use this map from `minimal-app/`. The application is layered so protocol and
 persistence rules can be tested without iOS, while UIKit/SwiftUI, decoder, and
@@ -29,6 +29,18 @@ TemuStreamTVApp
   -> AVPlayerViewController
 ```
 
+The standalone Apple Watch target uses a smaller native path and includes only
+the shared protocol files it needs:
+
+```text
+TemuStremioWatchApp
+  -> WatchAppModel + WatchRootView
+  -> catalog / search / library / details / stream selection
+  -> StremioAccountClient / TorrentStreamingClient / WatchStreamCompatibility
+  -> AVPlayer + SwiftUI VideoPlayer
+  -> TemuStremioWatchContainer (nonlaunchable App Store archive wrapper)
+```
+
 `ResolvingPlayerScreen` owns source failover, resume state, and next-episode
 autoplay. `PlayerScreen` owns player selection/fallback and shared overlays. The
 individual engines own decoding and engine-specific controls.
@@ -41,6 +53,9 @@ individual engines own decoding and engine-specific controls.
 | App state | `iOS/App/AppModel.swift` | Catalog/search/details/streams, library/account state, progress, and playback-plan orchestration |
 | Main SwiftUI | `iOS/App/Views.swift` | Tabs, home grid, continue watching, details, episode streams, library, add-ons, settings, account |
 | Apple TV SwiftUI | `tvOS/App/` | Sidebar navigation, focus shelves/cards, cinematic details, episode and stream selection, profiles, settings, and native AVKit playback |
+| Apple Watch SwiftUI | `watchOS/App/` | Standalone catalogs, search, secure Stremio sign-in, account-isolated library/progress and add-on sync, configurable streaming-server conversion, Digital Crown seeking, and native AVKit playback |
+| Apple Watch compatibility | `Sources/StremioSkeletonCore/WatchStreamCompatibility.swift` | Allows native HTTPS HLS/video plus HLS from the exact configured server origin; unsupported sources receive an actionable reason instead of being forced through AVPlayer |
+| Apple Watch distribution | `project.yml`, `watchOS/Container/Info.plist` | Single executable watchOS app target plus the nonlaunchable `application.watchapp2-container` root stub Apple requires to package a watch-only App Store archive |
 | Theme | `iOS/App/AppTheme.swift`, `Sources/StremioSkeletonCore/AppearancePreferences.swift` | Light/dark and accent preferences |
 | Protocol/API | `Sources/StremioSkeletonCore/Models.swift`, `Sources/StremioSkeletonCore/AddonEndpoint.swift`, `Sources/StremioSkeletonCore/AddonClient.swift` | Stremio payloads, safe resource URLs, and HTTP decoding |
 | Catalog paging | `Sources/StremioSkeletonCore/CatalogPaging.swift` | Deduplication, skip progression, and terminal-page policy |
@@ -88,6 +103,7 @@ individual engines own decoding and engine-specific controls.
 | `scripts/build-rust-core.sh` | Rust device/simulator libraries and XCFramework packaging |
 | `scripts/build-simulator.sh` | Release Simulator app and ZIP |
 | `scripts/build-tvos.sh` | tvOS Swift SDK type-check plus Release Apple TV Simulator app and ZIP when the tvOS runtime is installed |
+| `scripts/build-watchos.sh` | watchOS Swift SDK type-check plus Release Apple Watch Simulator app and ZIP when the watchOS runtime is installed |
 | `scripts/build-device.sh` | Ad-hoc-signed device app, ZIP, sideloadable IPA, and provenance |
 | `config/WatchTogether.xcconfig` | Checked-in public build-setting indirection |
 | `scripts/configure-watch-together.sh` | Writes ignored local Convex/LiveKit endpoint config |
@@ -109,11 +125,13 @@ feature task.
 | Enforce hygiene policy | `./scripts/repo-health.sh --check` | Same scan with warning/error exit status |
 | Materialize current dirty source safely | `./scripts/dev-workflow.sh prepare` | Hash-verified local workspace outside File Provider |
 | Inspect generated cache storage | `./scripts/dev-workflow.sh cache-report` | Owned-cache keep/prune decisions plus unmarked legacy candidates; no deletion |
-| Prune owned excess caches | `./scripts/dev-workflow.sh prune-cache` | Applies bounded retention only to valid TemuStream marker-owned caches |
+| Prune owned excess caches | `./scripts/dev-workflow.sh prune-cache` | Applies bounded retention only to valid project marker-owned caches |
 | Unit tests in that workspace | `./scripts/dev-workflow.sh test` | Rust and Swift unit suites |
 | Simulator build | `./scripts/dev-workflow.sh build-simulator` | Release Simulator archive with source identity |
 | tvOS source gate | `./scripts/dev-workflow.sh typecheck-tvos` | Swift 6 type-check of the complete TV target; does not require a Simulator runtime |
+| watchOS source gate | `./scripts/dev-workflow.sh typecheck-watchos` | Swift 6 type-check of the standalone Watch target; does not require a Simulator runtime |
 | Apple TV Simulator build | `./scripts/dev-workflow.sh build-tvos` | Release tvOS Simulator archive; requires the tvOS runtime from Xcode Components |
+| Apple Watch Simulator build | `./scripts/dev-workflow.sh build-watchos` | Release watchOS Simulator archive; requires the watchOS runtime from Xcode Components |
 | One or more UI states | `./scripts/dev-workflow.sh screenshots home-series details-series-episodes` | Named Simulator UI runtime and PNG artifacts |
 | Device artifact | `./scripts/dev-workflow.sh build-device` | Device IPA and source provenance; not an install |
 | Direct unit loop | `./scripts/test.sh` | Rust and Swift unit suites in the source checkout |
@@ -146,7 +164,7 @@ rg -n 'Bunny|KSPlayer|VLC|PerformancePlayer' iOS/App/PlayerView.swift iOS/App/Bu
 rg -n 'SKELETON_[A-Z0-9_]+' iOS/App scripts
 
 # List first-party source while avoiding generated dependency trees.
-rg --files Sources Tests iOS/App tvOS/App Backend/watch-together/convex rust/StremioPlaybackCore/src scripts docs
+rg --files Sources Tests iOS/App tvOS/App watchOS/App Backend/watch-together/convex rust/StremioPlaybackCore/src scripts docs
 ```
 
 ## Handoff checklist

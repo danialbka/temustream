@@ -184,6 +184,35 @@ final class EpisodeResumeSelectionTests: XCTestCase {
         )
     }
 
+    func testPreviousEpisodeMirrorsRegularOrderingAndDoesNotEnterSpecials() {
+        let special = Video(id: "special", season: 0, episode: 1)
+        let first = Video(id: "s1e1", season: 1, episode: 1)
+        let second = Video(id: "s1e2", season: 1, episode: 2)
+        let nextSeason = Video(id: "s2e1", season: 2, episode: 1)
+        let episodes = [nextSeason, special, second, first]
+
+        XCTAssertEqual(
+            EpisodeAutoplaySelector.previousEpisode(
+                before: nextSeason,
+                episodes: episodes
+            ),
+            second
+        )
+        XCTAssertEqual(
+            EpisodeAutoplaySelector.previousEpisode(
+                before: second,
+                episodes: episodes
+            ),
+            first
+        )
+        XCTAssertNil(
+            EpisodeAutoplaySelector.previousEpisode(
+                before: first,
+                episodes: episodes
+            )
+        )
+    }
+
     func testEpisodeAutoplayPreviewStartsOneMinuteBeforeEnd() {
         XCTAssertFalse(
             EpisodeAutoplayPresentationPolicy.shouldPresent(

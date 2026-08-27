@@ -4,6 +4,7 @@ options:
   deploymentTarget:
     iOS: "16.0"
     tvOS: "18.0"
+    watchOS: "10.0"
 packages:
   KSPlayer:
     # Pinned from upstream revision 25c923b. The local package carries narrowly
@@ -29,16 +30,19 @@ targets:
       - iOS/App
       - path: iOS/Resources/Assets.xcassets
         buildPhase: resources
+      - path: iOS/Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
     info:
       path: iOS/Resources/Info.plist
       properties:
         CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "18"
+        CFBundleVersion: "21"
+        CFBundleDisplayName: TemuStremio
         StremioSourceIdentity: $(STREMIO_SOURCE_ID)
         WatchTogetherConvexURL: $(WATCH_TOGETHER_CONVEX_URL)
         WatchTogetherLiveKitURL: $(WATCH_TOGETHER_LIVEKIT_URL)
-        NSMicrophoneUsageDescription: TemuStream uses your microphone only when you enable voice chat in a Watch Together room.
-        NSLocalNetworkUsageDescription: TemuStream connects to streaming servers on your local network when you configure one for playback.
+        NSMicrophoneUsageDescription: TemuStremio uses your microphone only when you enable voice chat in a Watch Together room.
+        NSLocalNetworkUsageDescription: TemuStremio connects to streaming servers on your local network when you configure one for playback.
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio
@@ -80,7 +84,7 @@ targets:
         SWIFT_COMPILATION_MODE: wholemodule
         SWIFT_OBJC_BRIDGING_HEADER: iOS/App/StremioSkeleton-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/rust/StremioPlaybackCore/include
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_APPICON_NAME: TemuStremioAppIcon
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
         DEVELOPMENT_TEAM: ""
@@ -111,14 +115,16 @@ targets:
       - iOS/App/SessionStore.swift
       - iOS/App/TorBoxPlaybackResolver.swift
       - tvOS/App
+      - path: tvOS/Resources/Assets.xcassets
+        buildPhase: resources
     info:
       path: tvOS/Resources/Info.plist
       properties:
-        CFBundleDisplayName: TemuStream
+        CFBundleDisplayName: TemuStremio
         CFBundleShortVersionString: "1.3"
         CFBundleVersion: "18"
         StremioSourceIdentity: $(STREMIO_SOURCE_ID)
-        NSLocalNetworkUsageDescription: TemuStream connects to streaming servers on your local network when you configure one for playback.
+        NSLocalNetworkUsageDescription: TemuStremio connects to streaming servers on your local network when you configure one for playback.
         UIBackgroundModes:
           - audio
         UILaunchScreen: {}
@@ -132,6 +138,7 @@ targets:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
         STREMIO_SOURCE_ID: unverified
+        ASSETCATALOG_COMPILER_APPICON_NAME: TemuStremioTVAppIcon
         ENABLE_USER_SCRIPT_SANDBOXING: YES
   TemuStreamTVUITests:
     type: bundle.ui-testing
@@ -149,6 +156,84 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
+  TemuStremioWatch:
+    type: application
+    platform: watchOS
+    deploymentTarget: "10.0"
+    sources:
+      - Sources/StremioSkeletonCore/Models.swift
+      - Sources/StremioSkeletonCore/IntroSkipPolicy.swift
+      - Sources/StremioSkeletonCore/AddonEndpoint.swift
+      - Sources/StremioSkeletonCore/AddonClient.swift
+      - Sources/StremioSkeletonCore/TorrentStreamingClient.swift
+      - Sources/StremioSkeletonCore/StremioAccountClient.swift
+      - Sources/StremioSkeletonCore/LibraryStore.swift
+      - Sources/StremioSkeletonCore/PlaybackProgressStore.swift
+      - Sources/StremioSkeletonCore/PlaybackCompletionStore.swift
+      - Sources/StremioSkeletonCore/ViewingProfiles.swift
+      - Sources/StremioSkeletonCore/DiscoveryPresentation.swift
+      - Sources/StremioSkeletonCore/CatalogPaging.swift
+      - Sources/StremioSkeletonCore/LocalRecommendations.swift
+      - Sources/StremioSkeletonCore/EpisodeResumeSelection.swift
+      - Sources/StremioSkeletonCore/PlaybackPreferences.swift
+      - Sources/StremioSkeletonCore/LastSuccessfulPlayback.swift
+      - Sources/StremioSkeletonCore/TitleTrivia.swift
+      - Sources/StremioSkeletonCore/WikipediaTrivia.swift
+      - Sources/StremioSkeletonCore/MediaContainerSniffer.swift
+      - Sources/StremioSkeletonCore/TorBoxStreamSelection.swift
+      - Sources/StremioSkeletonCore/WatchStreamCompatibility.swift
+      - Sources/StremioSkeletonCore/WatchPlaybackFallback.swift
+      - iOS/App/TorBoxPlaybackResolver.swift
+      - watchOS/App
+      - path: iOS/Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: watchOS/Resources/Assets.xcassets
+        buildPhase: resources
+    info:
+      path: watchOS/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: TemuStremio
+        CFBundleShortVersionString: "1.3"
+        CFBundleVersion: "21"
+        WKApplication: true
+        WKWatchOnly: true
+        WKPrefersNetworkUponForeground: true
+        NSLocalNetworkUsageDescription: TemuStremio connects to a streaming server on your local network only when you configure one for playback.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.stremio.skeleton.watch.watchkitapp
+        PRODUCT_NAME: TemuStremioWatch
+        SWIFT_VERSION: 6.0
+        SWIFT_OPTIMIZATION_LEVEL: -O
+        SWIFT_COMPILATION_MODE: wholemodule
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: TemuStremioWatchAppIcon
+        SKIP_INSTALL: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+  TemuStremioWatchContainer:
+    type: application.watchapp2-container
+    platform: iOS
+    sources: []
+    info:
+      path: watchOS/Container/Info.plist
+      properties:
+        CFBundleDisplayName: TemuStremio
+        CFBundleShortVersionString: "1.3"
+        CFBundleVersion: "21"
+        LSApplicationLaunchProhibited: true
+    dependencies:
+      - target: TemuStremioWatch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.stremio.skeleton.watch
+        PRODUCT_NAME: TemuStremioWatchContainer
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        SKIP_INSTALL: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
 schemes:
   StremioSkeleton:
     build:
@@ -176,3 +261,17 @@ schemes:
       config: Release
     archive:
       config: Release
+  TemuStremioWatch:
+    build:
+      targets:
+        TemuStremioWatch: [run, test, profile, analyze]
+    run:
+      config: Debug
+      executable: TemuStremioWatch
+  TemuStremioWatchDistribution:
+    build:
+      targets:
+        TemuStremioWatchContainer: [archive]
+    archive:
+      config: Release
+      customArchiveName: TemuStremioWatch

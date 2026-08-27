@@ -2,7 +2,7 @@ import XCTest
 @testable import StremioSkeletonCore
 
 final class TitleTriviaTests: XCTestCase {
-    func testSeriesFactsUseAwardsEpisodeInventoryStatusAndPremiere() {
+    func testOrdinaryMetadataIsNotRelabelledAsTrivia() {
         let item = MetaItem(
             id: "tt-series-trivia",
             type: "series",
@@ -20,22 +20,10 @@ final class TitleTriviaTests: XCTestCase {
             ]
         )
 
-        let facts = TitleTriviaBuilder.facts(for: item)
-
-        XCTAssertEqual(facts.map(\.kind), [
-            .awards, .episodes, .status, .release, .writing, .origin,
-        ])
-        XCTAssertEqual(
-            facts.first(where: { $0.kind == .episodes })?.text,
-            "The provider lists 3 episodes across 2 seasons."
-        )
-        XCTAssertEqual(
-            facts.first(where: { $0.kind == .release })?.text,
-            "Premiered on May 4, 2020."
-        )
+        XCTAssertTrue(TitleTriviaBuilder.facts(for: item).isEmpty)
     }
 
-    func testMovieFactsPrioritizeExplicitTriviaAndStayBounded() {
+    func testProviderTriviaIsNormalizedDeduplicatedAndBounded() {
         let item = MetaItem(
             id: "tt-movie-trivia",
             type: "movie",
@@ -47,16 +35,30 @@ final class TitleTriviaTests: XCTestCase {
             awards: "2 nominations.",
             released: "2022-11-09T00:00:00.000Z",
             trivia: ["Shot on location.", " shot on location. "],
-            funFacts: ["Used practical effects."]
+            funFacts: ["Used   practical effects.", "A third fact."]
         )
 
-        let facts = TitleTriviaBuilder.facts(for: item, limit: 4)
+        let facts = TitleTriviaBuilder.facts(for: item, limit: 2)
 
-        XCTAssertEqual(facts.count, 4)
-        XCTAssertEqual(facts.map(\.kind), [.provided, .provided, .awards, .release])
+        XCTAssertEqual(facts.count, 2)
         XCTAssertEqual(facts[0].text, "Shot on location.")
         XCTAssertEqual(facts[1].text, "Used practical effects.")
-        XCTAssertEqual(facts[3].text, "Released on November 9, 2022.")
+        XCTAssertTrue(facts.allSatisfy { !$0.isSpoiler })
+    }
+
+    func testSpoilerPrefixIsRemovedAndPreservedAsPresentationMetadata() {
+        let item = MetaItem(
+            id: "tt-spoiler-trivia",
+            type: "movie",
+            name: "Spoiler Fixture",
+            trivia: ["SPOILER: The final scene mirrors the opening.", "spoiler:   "]
+        )
+
+        let facts = TitleTriviaBuilder.facts(for: item)
+
+        XCTAssertEqual(facts.count, 1)
+        XCTAssertEqual(facts[0].text, "The final scene mirrors the opening.")
+        XCTAssertTrue(facts[0].isSpoiler)
     }
 
     func testTitleWithoutSupportedFactsOmitsTriviaSection() {

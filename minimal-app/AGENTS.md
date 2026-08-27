@@ -2,7 +2,7 @@
 
 ## Scope
 
-This file applies to `minimal-app/`, the SwiftUI iOS and tvOS applications. The sibling
+This file applies to `minimal-app/`, the SwiftUI iOS, tvOS, and watchOS applications. The sibling
 `enhancer/` tree at the Git root is a separate legacy runtime-extension project;
 do not change it for app work unless the task names it.
 

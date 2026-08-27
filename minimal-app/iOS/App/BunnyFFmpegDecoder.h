@@ -9,6 +9,30 @@ typedef NS_ENUM(NSInteger, BunnyFFmpegTrackKind) {
     BunnyFFmpegTrackKindSubtitle = 1,
 };
 
+@class UIImage;
+
+/// One decoded image rectangle positioned in the subtitle codec's canvas.
+@interface BunnyFFmpegBitmapSubtitlePart : NSObject
+
+@property(nonatomic, strong, readonly) UIImage *image;
+@property(nonatomic, readonly) CGRect sourceRect;
+
+- (instancetype)init NS_UNAVAILABLE;
+
+@end
+
+/// A complete image-based subtitle presentation. PGS may contain several
+/// independently positioned rectangles, so the parts retain their source
+/// coordinates instead of being flattened into a full-frame bitmap.
+@interface BunnyFFmpegBitmapSubtitleCue : NSObject
+
+@property(nonatomic, copy, readonly) NSArray<BunnyFFmpegBitmapSubtitlePart *> *parts;
+@property(nonatomic, readonly) CGSize sourceSize;
+
+- (instancetype)init NS_UNAVAILABLE;
+
+@end
+
 /// A media track discovered by Bunny's own libavformat demuxer.
 @interface BunnyFFmpegTrack : NSObject
 
@@ -60,6 +84,11 @@ typedef NS_ENUM(NSInteger, BunnyFFmpegTrackKind) {
 @property(nonatomic, copy, nullable) void (^onSubtitle)(NSString * _Nullable text,
                                                             NSTimeInterval start,
                                                             NSTimeInterval duration);
+@property(nonatomic, copy, nullable) void (^onBitmapSubtitle)(
+    BunnyFFmpegBitmapSubtitleCue * _Nullable cue,
+    NSTimeInterval start,
+    NSTimeInterval duration
+);
 @property(nonatomic, copy, nullable) void (^onSeekCompleted)(NSTimeInterval position,
                                                                  BOOL succeeded);
 @property(nonatomic, copy, nullable) void (^onMetrics)(NSInteger decodedVideoFrames,

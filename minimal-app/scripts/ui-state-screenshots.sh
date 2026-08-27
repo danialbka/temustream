@@ -130,7 +130,7 @@ if [ ! -s "$APP_DIR/StremioSkeletonUIStates" ] \
     --minimum-deployment-target 16.0 \
     --target-device iphone \
     --target-device ipad \
-    --app-icon AppIcon \
+    --app-icon TemuStremioAppIcon \
     --output-partial-info-plist "$ASSET_INFO_PLIST" \
     >"$ROOT_DIR/build/ui-state-actool.log"
   test -s "$STAGED_APP/Assets.car"
@@ -148,7 +148,7 @@ else
 fi
 
 FIXTURE_SIGNATURE="$({
-  printf '%s\n' "ui-state-fixtures-v4"
+  printf '%s\n' "ui-state-fixtures-v5"
   find "$ROOT_DIR/Fixtures" -type f -print | LC_ALL=C sort | while IFS= read -r fixture_file; do
     test -s "$fixture_file"
     shasum -a 256 "$fixture_file"
@@ -159,6 +159,17 @@ if [ ! -f "$FIXTURE_STAMP" ] || [ "$(cat "$FIXTURE_STAMP")" != "$FIXTURE_SIGNATU
   rm -rf "$SERVER_DIR"
   mkdir -p "$SERVER_DIR"
   cp -R "$ROOT_DIR/Fixtures/." "$SERVER_DIR/"
+  mkdir -p "$SERVER_DIR/ui-states/cinemeta/stream/movie"
+  jq -n '{
+    streams: [
+      range(0; 1000) as $index
+      | {
+          name: ("Fixture 1080p " + ($index | tostring)),
+          title: ("1080p WEB-DL " + (((($index % 90) + 1) | tostring)) + " GB"),
+          url: "http://127.0.0.1:18766/sample.mp4"
+        }
+    ]
+  }' > "$SERVER_DIR/ui-states/cinemeta/stream/movie/tt-heavy-details.json"
 
 ffmpeg -hide_banner -loglevel error -y \
   -f lavfi -i "testsrc2=size=1280x720:rate=30" \
@@ -221,7 +232,7 @@ while ! curl -fsS "http://127.0.0.1:$PORT/ui-states/cinemeta/manifest.json" >/de
   sleep 0.1
 done
 
-ALL_STATES="catalog-loading home-cinemeta home-letterboxd home-series catalog-error details-streams details-resume details-cast-movie details-series-episodes details-cast-series episode-streams library-empty library-synced addons-offline account-signed-out account-signed-in torrent-starting playback-unavailable player-active settings-subtitles search-idle search-results profiles-picker"
+ALL_STATES="catalog-loading home-cinemeta home-letterboxd home-series catalog-error details-streams details-resume details-cast-movie details-trivia details-series-episodes details-cast-series episode-streams library-empty library-synced addons-offline account-signed-out account-signed-in torrent-starting playback-unavailable player-active settings-subtitles search-idle search-results profiles-picker details-trivia-expanded"
 STATES="${UI_SCREENSHOT_STATES:-$ALL_STATES}"
 
 DEVICE_ID="${SIMULATOR_ID:-$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name == "iPhone 17 Pro")][0].udid // [.devices[][] | select(.name | startswith("iPhone"))][0].udid')}"
@@ -300,6 +311,8 @@ for STATE in $STATES; do
   # shellcheck disable=SC2086
   SIMCTL_CHILD_UI_SCREENSHOT_STATE="$STATE" \
   SIMCTL_CHILD_UI_SCREENSHOT_RUN_ID="$RUN_ID" \
+  SIMCTL_CHILD_UI_WIKIPEDIA_IMDB_ID="${UI_WIKIPEDIA_IMDB_ID:-}" \
+  SIMCTL_CHILD_UI_WIKIPEDIA_TITLE="${UI_WIKIPEDIA_TITLE:-}" \
   SIMCTL_CHILD_SKELETON_ADDON_URL="$CINEMETA_URL" \
   SIMCTL_CHILD_SKELETON_LETTERBOXD_ADDON_URL="http://127.0.0.1:$PORT/ui-states/letterboxd/manifest.json" \
   SIMCTL_CHILD_SKELETON_CINEMETA_CATALOG_ID="top" \
@@ -349,7 +362,7 @@ sips -g pixelWidth -g pixelHeight "$OUTPUT_DIR"/*.png >"$OUTPUT_DIR/dimensions.t
 cp "$ROOT_DIR/UI_STATE_MATRIX.md" "$OUTPUT_DIR/README.md"
 
 if [ "$STATES" = "$ALL_STATES" ]; then
-  test "$COUNT" -eq 23
+  test "$COUNT" -eq 25
   ffmpeg -hide_banner -loglevel error -y \
   -i "$OUTPUT_DIR/catalog-loading.png" \
   -i "$OUTPUT_DIR/home-cinemeta.png" \
@@ -359,6 +372,7 @@ if [ "$STATES" = "$ALL_STATES" ]; then
   -i "$OUTPUT_DIR/details-streams.png" \
   -i "$OUTPUT_DIR/details-resume.png" \
   -i "$OUTPUT_DIR/details-cast-movie.png" \
+  -i "$OUTPUT_DIR/details-trivia.png" \
   -i "$OUTPUT_DIR/details-series-episodes.png" \
   -i "$OUTPUT_DIR/details-cast-series.png" \
   -i "$OUTPUT_DIR/episode-streams.png" \
@@ -374,7 +388,8 @@ if [ "$STATES" = "$ALL_STATES" ]; then
   -i "$OUTPUT_DIR/search-idle.png" \
   -i "$OUTPUT_DIR/search-results.png" \
   -i "$OUTPUT_DIR/profiles-picker.png" \
-  -filter_complex '[0:v]scale=201:437[s0];[1:v]scale=201:437[s1];[2:v]scale=201:437[s2];[3:v]scale=201:437[s3];[4:v]scale=201:437[s4];[5:v]scale=201:437[s5];[6:v]scale=201:437[s6];[7:v]scale=201:437[s7];[8:v]scale=201:437[s8];[9:v]scale=201:437[s9];[10:v]scale=201:437[s10];[11:v]scale=201:437[s11];[12:v]scale=201:437[s12];[13:v]scale=201:437[s13];[14:v]scale=201:437[s14];[15:v]scale=201:437[s15];[16:v]scale=201:437[s16];[17:v]scale=201:437[s17];[18:v]scale=201:437[s18];[19:v]scale=201:437[s19];[20:v]scale=201:437[s20];[21:v]scale=201:437[s21];[22:v]scale=201:437[s22];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11][s12][s13][s14][s15][s16][s17][s18][s19][s20][s21][s22]xstack=inputs=23:layout=0_0|201_0|402_0|603_0|0_437|201_437|402_437|603_437|0_874|201_874|402_874|603_874|0_1311|201_1311|402_1311|603_1311|0_1748|201_1748|402_1748|603_1748|0_2185|201_2185|402_2185:fill=black[out]' \
+  -i "$OUTPUT_DIR/details-trivia-expanded.png" \
+  -filter_complex '[0:v]scale=201:437[s0];[1:v]scale=201:437[s1];[2:v]scale=201:437[s2];[3:v]scale=201:437[s3];[4:v]scale=201:437[s4];[5:v]scale=201:437[s5];[6:v]scale=201:437[s6];[7:v]scale=201:437[s7];[8:v]scale=201:437[s8];[9:v]scale=201:437[s9];[10:v]scale=201:437[s10];[11:v]scale=201:437[s11];[12:v]scale=201:437[s12];[13:v]scale=201:437[s13];[14:v]scale=201:437[s14];[15:v]scale=201:437[s15];[16:v]scale=201:437[s16];[17:v]scale=201:437[s17];[18:v]scale=201:437[s18];[19:v]scale=201:437[s19];[20:v]scale=201:437[s20];[21:v]scale=201:437[s21];[22:v]scale=201:437[s22];[23:v]scale=201:437[s23];[24:v]scale=201:437[s24];[s0][s1][s2][s3][s4][s5][s6][s7][s8][s9][s10][s11][s12][s13][s14][s15][s16][s17][s18][s19][s20][s21][s22][s23][s24]xstack=inputs=25:layout=0_0|201_0|402_0|603_0|0_437|201_437|402_437|603_437|0_874|201_874|402_874|603_874|0_1311|201_1311|402_1311|603_1311|0_1748|201_1748|402_1748|603_1748|0_2185|201_2185|402_2185|603_2185|0_2622:fill=black[out]' \
     -map '[out]' -frames:v 1 "$OUTPUT_DIR/all-states-contact-sheet.png"
   test -s "$OUTPUT_DIR/all-states-contact-sheet.png"
   echo "UI STATE SCREENSHOTS PASS: $COUNT state PNGs + contact sheet in $OUTPUT_DIR"

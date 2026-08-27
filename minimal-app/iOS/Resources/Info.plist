@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>TemuStremio</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -17,11 +19,11 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.3</string>
 	<key>CFBundleVersion</key>
-	<string>18</string>
+	<string>21</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>TemuStream connects to streaming servers on your local network when you configure one for playback.</string>
+	<string>TemuStremio connects to streaming servers on your local network when you configure one for playback.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>TemuStream uses your microphone only when you enable voice chat in a Watch Together room.</string>
+	<string>TemuStremio uses your microphone only when you enable voice chat in a Watch Together room.</string>
 	<key>StremioSourceIdentity</key>
 	<string>$(STREMIO_SOURCE_ID)</string>
 	<key>UIBackgroundModes</key>

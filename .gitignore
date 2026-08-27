@@ -2,6 +2,11 @@
 .env
 .env.*
 !.env.example
+.envrc
+.envrc.local
+.netrc
+.npmrc
+.pypirc
 
 # Official IPA artifacts are downloaded locally and must not be committed.
 artifacts/*
@@ -12,20 +17,58 @@ artifacts/*
 *.mobileprovision
 *.provisionprofile
 *.p12
+*.p8
+*.pfx
 *.cer
+*.crt
+*.csr
 *.der
 *.key
 *.pem
+*.jks
+*.keystore
+*.kdbx
 *.log
 *.xcarchive
+*.dSYM
+*.dSYM.zip
+*.bcsymbolmap
+*.itmsp
 xcuserdata/
 DerivedData/
 target/
 
+# Generated test, coverage, profiling, and local IDE output. Test source stays tracked.
+*.xcresult
+*.resultbundle
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.trace
+.coverage
+.nyc_output/
+.pytest_cache/
+coverage/
+test-results/
+TestResults/
+UITestResults/
+.idea/
+.vscode/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+.xcode.env.local
+
 # Machine-local player deployment state and accidental Xcode duplicates.
 minimal-app/config/*.snapshot.json
-minimal-app/StremioSkeleton [3-9]*.xcodeproj/
+minimal-app/config/Signing.local.xcconfig
+minimal-app/config/ExportOptions.local.plist
+minimal-app/StremioSkeleton [0-9]*.xcodeproj/
+minimal-app/iOS/Resources/Info [0-9]*.plist
 minimal-app/iOS/Resources/StremioSkeleton [0-9]*.entitlements
+README [0-9]*.md
+SECURITY [0-9]*.md
 
 # Local enhancer build products.
 enhancer/build/

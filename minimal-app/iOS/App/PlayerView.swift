@@ -5223,7 +5223,7 @@ private struct PlayerBridgeForcedFailureView: View {
 }
 #endif
 
-struct StreamPlaybackCandidate: Identifiable {
+struct StreamPlaybackCandidate: Identifiable, Sendable {
     let id: String
     let stream: Stream
     let providerName: String?

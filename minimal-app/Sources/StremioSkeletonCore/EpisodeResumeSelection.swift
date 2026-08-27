@@ -47,6 +47,31 @@ public enum EpisodeAutoplaySelector {
         after currentEpisode: Video,
         episodes: [Video]
     ) -> Video? {
+        adjacentEpisode(
+            to: currentEpisode,
+            episodes: episodes,
+            offset: 1
+        )
+    }
+
+    /// Mirrors next-episode ordering for a watch-native Previous control.
+    /// Specials remain isolated from regular seasons in both directions.
+    public static func previousEpisode(
+        before currentEpisode: Video,
+        episodes: [Video]
+    ) -> Video? {
+        adjacentEpisode(
+            to: currentEpisode,
+            episodes: episodes,
+            offset: -1
+        )
+    }
+
+    private static func adjacentEpisode(
+        to currentEpisode: Video,
+        episodes: [Video],
+        offset: Int
+    ) -> Video? {
         var seen = Set<String>()
         let currentSeason = currentEpisode.season ?? 0
         let ordered = episodes
@@ -62,8 +87,8 @@ public enum EpisodeAutoplaySelector {
         guard let currentIndex = ordered.firstIndex(where: {
             $0.id == currentEpisode.id
         }) else { return nil }
-        let nextIndex = ordered.index(after: currentIndex)
-        return ordered.indices.contains(nextIndex) ? ordered[nextIndex] : nil
+        let adjacentIndex = currentIndex + offset
+        return ordered.indices.contains(adjacentIndex) ? ordered[adjacentIndex] : nil
     }
 
     private static func episodePlaybackOrder(_ lhs: Video, _ rhs: Video) -> Bool {

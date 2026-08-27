@@ -23,6 +23,7 @@
 #import <TargetConditionals.h>
 #import <UIKit/UIKit.h>
 #import <stdatomic.h>
+#import <stdint.h>
 #import <stdlib.h>
 #import <unistd.h>
 
@@ -44,6 +45,22 @@ static void BunnyFreeAudioPCMBlock(
     (void)sizeInBytes;
     free(memoryBlock);
 }
+
+static void BunnyFreeBitmapPixels(void *info, const void *data, size_t size) {
+    (void)info;
+    (void)size;
+    free((void *)data);
+}
+
+static BOOL BunnyIsBitmapSubtitleCodec(enum AVCodecID codecID) {
+    return codecID == AV_CODEC_ID_HDMV_PGS_SUBTITLE
+        || codecID == AV_CODEC_ID_DVD_SUBTITLE
+        || codecID == AV_CODEC_ID_DVB_SUBTITLE
+        || codecID == AV_CODEC_ID_XSUB;
+}
+
+static const size_t BunnyMaximumBitmapSubtitleBytes = 64 * 1024 * 1024;
+static const unsigned int BunnyMaximumBitmapSubtitleParts = 64;
 
 static BOOL BunnyIs4KDimensions(int width, int height) {
     // Cinema encodes are commonly 3840x1600 or 4096x1716 after removing
@@ -79,6 +96,46 @@ static BOOL BunnyIs4KDimensions(int width, int height) {
         _title = [title copy];
         _language = [language copy];
         _codecName = [codecName copy];
+    }
+    return self;
+}
+
+@end
+
+@interface BunnyFFmpegBitmapSubtitlePart ()
+@property(nonatomic, strong) UIImage *image;
+@property(nonatomic) CGRect sourceRect;
+- (instancetype)initWithImage:(UIImage *)image sourceRect:(CGRect)sourceRect;
+@end
+
+@implementation BunnyFFmpegBitmapSubtitlePart
+
+- (instancetype)initWithImage:(UIImage *)image sourceRect:(CGRect)sourceRect {
+    self = [super init];
+    if (self) {
+        _image = image;
+        _sourceRect = sourceRect;
+    }
+    return self;
+}
+
+@end
+
+@interface BunnyFFmpegBitmapSubtitleCue ()
+@property(nonatomic, copy) NSArray<BunnyFFmpegBitmapSubtitlePart *> *parts;
+@property(nonatomic) CGSize sourceSize;
+- (instancetype)initWithParts:(NSArray<BunnyFFmpegBitmapSubtitlePart *> *)parts
+                    sourceSize:(CGSize)sourceSize;
+@end
+
+@implementation BunnyFFmpegBitmapSubtitleCue
+
+- (instancetype)initWithParts:(NSArray<BunnyFFmpegBitmapSubtitlePart *> *)parts
+                    sourceSize:(CGSize)sourceSize {
+    self = [super init];
+    if (self) {
+        _parts = [parts copy];
+        _sourceSize = sourceSize;
     }
     return self;
 }
@@ -176,6 +233,7 @@ static BOOL BunnyIs4KDimensions(int width, int height) {
     NSInteger _renderedAudioFrames;
     NSInteger _rebufferCount;
     BOOL _audioFailureReported;
+    BOOL _didLogBitmapSubtitle;
     BOOL _audioRenderTimelineInitialized;
     NSUInteger _audioTimingDiscontinuityLogCount;
     NSError *_fatalDecodeError;
@@ -225,6 +283,9 @@ static BOOL BunnyIs4KDimensions(int width, int height) {
 - (void)recordFatalVideoDecodeFailure:(int)code operation:(NSString *)operation;
 - (void)recordVideoCodecFailureAtStage:(NSString *)stage code:(int)code;
 - (void)recordVideoOutputFailureAtStage:(NSString *)stage;
+- (nullable UIImage *)imageForBitmapSubtitleRect:(AVSubtitleRect *)rect;
+- (nullable BunnyFFmpegBitmapSubtitleCue *)bitmapSubtitleCueForSubtitle:(AVSubtitle *)subtitle;
+- (void)publishSubtitleClear;
 @end
 
 static enum AVPixelFormat BunnyGetHardwarePixelFormat(
@@ -837,7 +898,7 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
     av_dict_set(&options, "probesize", _isAdaptiveInput ? "1000000" : "8000000", 0);
     av_dict_set(&options, "analyzeduration", _isAdaptiveInput ? "1000000" : "8000000", 0);
     av_dict_set(&options, "scan_all_pmts", "1", 0);
-    av_dict_set(&options, "user_agent", "Bunny/1.0 TemuStream iOS", 0);
+    av_dict_set(&options, "user_agent", "Bunny/1.0 TemuStremio iOS", 0);
 
     NSString *input = _URL.isFileURL ? _URL.path : _URL.absoluteString;
     int result = avformat_open_input(
@@ -1424,6 +1485,7 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
 
     [_synchronizer setRate:0 time:CMTimeMakeWithSeconds(time, 60000)];
     [self clearAndFlushRenderersRemovingImage:YES];
+    [self publishSubtitleClear];
     int64_t timestamp = llround((time + _timelineOrigin) * AV_TIME_BASE);
     int result = avformat_seek_file(
         _formatContext,
@@ -1530,12 +1592,7 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
             _formatContext->streams[streamIndex]->discard = AVDISCARD_DEFAULT;
         }
     }
-    void (^handler)(NSString *, NSTimeInterval, NSTimeInterval) = self.onSubtitle;
-    if (handler) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            handler(nil, 0, 0);
-        });
-    }
+    [self publishSubtitleClear];
 }
 
 - (void)decodeSelectedPacket:(AVPacket *)packet {
@@ -2440,6 +2497,23 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
     if (result < 0 || !gotSubtitle) {
         return;
     }
+    AVStream *stream = _formatContext->streams[_subtitleStreamIndex];
+    double packetPTS;
+    if (packet->pts != AV_NOPTS_VALUE) {
+        packetPTS = packet->pts * av_q2d(stream->time_base) - _timelineOrigin;
+    } else if (subtitle.pts != AV_NOPTS_VALUE) {
+        packetPTS = subtitle.pts / (double)AV_TIME_BASE - _timelineOrigin;
+    } else {
+        packetPTS = self.currentTime;
+    }
+    double start = fmax(packetPTS + subtitle.start_display_time / 1000.0, 0);
+    BOOL hasFiniteEnd = subtitle.end_display_time != UINT32_MAX
+        && subtitle.end_display_time > subtitle.start_display_time;
+    BOOL bitmapCodec = BunnyIsBitmapSubtitleCodec(_subtitleCodecContext->codec_id);
+    double duration = hasFiniteEnd
+        ? (subtitle.end_display_time - subtitle.start_display_time) / 1000.0
+        : (bitmapCodec ? 3600 : 4);
+
     NSMutableArray<NSString *> *lines = [NSMutableArray array];
     for (unsigned int index = 0; index < subtitle.num_rects; index++) {
         AVSubtitleRect *rect = subtitle.rects[index];
@@ -2450,15 +2524,28 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
             [lines addObject:line];
         }
     }
-    if (lines.count > 0) {
-        AVStream *stream = _formatContext->streams[_subtitleStreamIndex];
-        double packetPTS = packet->pts != AV_NOPTS_VALUE
-            ? packet->pts * av_q2d(stream->time_base) - _timelineOrigin
-            : self.currentTime;
-        double start = fmax(packetPTS + subtitle.start_display_time / 1000.0, 0);
-        double duration = subtitle.end_display_time > subtitle.start_display_time
-            ? (subtitle.end_display_time - subtitle.start_display_time) / 1000.0
-            : 4;
+
+    BunnyFFmpegBitmapSubtitleCue *bitmapCue =
+        [self bitmapSubtitleCueForSubtitle:&subtitle];
+    if (bitmapCue != nil) {
+        if (!_didLogBitmapSubtitle) {
+            _didLogBitmapSubtitle = YES;
+            NSLog(
+                @"BUNNY_DECODER bitmap_subtitle codec=%s parts=%lu canvas=%.0fx%.0f",
+                _subtitleCodecContext->codec ? _subtitleCodecContext->codec->name : "unknown",
+                (unsigned long)bitmapCue.parts.count,
+                bitmapCue.sourceSize.width,
+                bitmapCue.sourceSize.height
+            );
+        }
+        void (^handler)(BunnyFFmpegBitmapSubtitleCue *, NSTimeInterval, NSTimeInterval) =
+            self.onBitmapSubtitle;
+        if (handler) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                handler(bitmapCue, start, duration);
+            });
+        }
+    } else if (lines.count > 0) {
         NSString *text = [lines componentsJoinedByString:@"\n"];
         void (^handler)(NSString *, NSTimeInterval, NSTimeInterval) = self.onSubtitle;
         if (handler) {
@@ -2466,8 +2553,222 @@ static NSError *BunnyVideoDecodeError(int code, NSString *operation) {
                 handler(text, start, duration);
             });
         }
+    } else if (bitmapCodec) {
+        void (^handler)(BunnyFFmpegBitmapSubtitleCue *, NSTimeInterval, NSTimeInterval) =
+            self.onBitmapSubtitle;
+        if (handler) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                handler(nil, start, 0);
+            });
+        }
+    } else {
+        void (^handler)(NSString *, NSTimeInterval, NSTimeInterval) = self.onSubtitle;
+        if (handler) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                handler(nil, start, 0);
+            });
+        }
     }
     avsubtitle_free(&subtitle);
+}
+
+- (UIImage *)imageForBitmapSubtitleRect:(AVSubtitleRect *)rect {
+    if (rect == NULL
+        || rect->type != SUBTITLE_BITMAP
+        || rect->w <= 0
+        || rect->h <= 0
+        || rect->w > 8192
+        || rect->h > 8192
+        || rect->data[0] == NULL
+        || rect->data[1] == NULL
+        || rect->linesize[0] <= 0) {
+        return nil;
+    }
+
+    size_t width = (size_t)rect->w;
+    size_t height = (size_t)rect->h;
+    if (width > SIZE_MAX / 4) {
+        return nil;
+    }
+    size_t rowBytes = width * 4;
+    if (height > SIZE_MAX / rowBytes) {
+        return nil;
+    }
+    size_t byteCount = rowBytes * height;
+    if (byteCount == 0
+        || byteCount > BunnyMaximumBitmapSubtitleBytes
+        || rowBytes > INT_MAX) {
+        return nil;
+    }
+
+    uint8_t *pixels = calloc(1, byteCount);
+    if (pixels == NULL) {
+        return nil;
+    }
+    struct SwsContext *context = sws_getContext(
+        rect->w,
+        rect->h,
+        AV_PIX_FMT_PAL8,
+        rect->w,
+        rect->h,
+        AV_PIX_FMT_BGRA,
+        SWS_POINT,
+        NULL,
+        NULL,
+        NULL
+    );
+    if (context == NULL) {
+        free(pixels);
+        return nil;
+    }
+    uint8_t *destinationData[4] = { pixels, NULL, NULL, NULL };
+    int destinationLinesize[4] = { (int)rowBytes, 0, 0, 0 };
+    int convertedRows = sws_scale(
+        context,
+        (const uint8_t * const *)rect->data,
+        rect->linesize,
+        0,
+        rect->h,
+        destinationData,
+        destinationLinesize
+    );
+    sws_freeContext(context);
+    if (convertedRows != rect->h) {
+        free(pixels);
+        return nil;
+    }
+
+    // swscale returns straight-alpha BGRA. Core Graphics' fast iOS bitmap
+    // format is premultiplied BGRA, so normalize once before handing ownership
+    // of the buffer to CGImage.
+    for (size_t offset = 0; offset < byteCount; offset += 4) {
+        uint16_t alpha = pixels[offset + 3];
+        pixels[offset] = (uint8_t)((pixels[offset] * alpha + 127) / 255);
+        pixels[offset + 1] = (uint8_t)((pixels[offset + 1] * alpha + 127) / 255);
+        pixels[offset + 2] = (uint8_t)((pixels[offset + 2] * alpha + 127) / 255);
+    }
+
+    CGDataProviderRef provider = CGDataProviderCreateWithData(
+        NULL,
+        pixels,
+        byteCount,
+        BunnyFreeBitmapPixels
+    );
+    if (provider == NULL) {
+        free(pixels);
+        return nil;
+    }
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    if (colorSpace == NULL) {
+        CGDataProviderRelease(provider);
+        return nil;
+    }
+    CGBitmapInfo bitmapInfo = (CGBitmapInfo)kCGBitmapByteOrder32Little
+        | (CGBitmapInfo)kCGImageAlphaPremultipliedFirst;
+    CGImageRef imageRef = CGImageCreate(
+        width,
+        height,
+        8,
+        32,
+        rowBytes,
+        colorSpace,
+        bitmapInfo,
+        provider,
+        NULL,
+        false,
+        kCGRenderingIntentDefault
+    );
+    CGColorSpaceRelease(colorSpace);
+    CGDataProviderRelease(provider);
+    if (imageRef == NULL) {
+        return nil;
+    }
+    UIImage *image = [UIImage imageWithCGImage:imageRef scale:1 orientation:UIImageOrientationUp];
+    CGImageRelease(imageRef);
+    return image;
+}
+
+- (BunnyFFmpegBitmapSubtitleCue *)bitmapSubtitleCueForSubtitle:(AVSubtitle *)subtitle {
+    if (subtitle == NULL
+        || subtitle->num_rects == 0
+        || subtitle->num_rects > BunnyMaximumBitmapSubtitleParts) {
+        return nil;
+    }
+
+    int canvasWidth = _subtitleCodecContext ? _subtitleCodecContext->width : 0;
+    int canvasHeight = _subtitleCodecContext ? _subtitleCodecContext->height : 0;
+    if ((canvasWidth <= 0 || canvasHeight <= 0) && _videoStreamIndex >= 0) {
+        AVCodecParameters *video = _formatContext->streams[_videoStreamIndex]->codecpar;
+        if (canvasWidth <= 0) {
+            canvasWidth = video->width;
+        }
+        if (canvasHeight <= 0) {
+            canvasHeight = video->height;
+        }
+    }
+
+    int64_t maximumX = 0;
+    int64_t maximumY = 0;
+    size_t totalBitmapBytes = 0;
+    NSMutableArray<BunnyFFmpegBitmapSubtitlePart *> *parts = [NSMutableArray array];
+    for (unsigned int index = 0; index < subtitle->num_rects; index++) {
+        AVSubtitleRect *rect = subtitle->rects[index];
+        if (rect == NULL || rect->type != SUBTITLE_BITMAP || rect->w <= 0 || rect->h <= 0) {
+            continue;
+        }
+        size_t rectWidth = (size_t)rect->w;
+        size_t rectHeight = (size_t)rect->h;
+        if (rectWidth > SIZE_MAX / 4) {
+            return nil;
+        }
+        size_t rectRowBytes = rectWidth * 4;
+        if (rectHeight > SIZE_MAX / rectRowBytes) {
+            return nil;
+        }
+        size_t rectByteCount = rectRowBytes * rectHeight;
+        if (rectByteCount > BunnyMaximumBitmapSubtitleBytes - totalBitmapBytes) {
+            return nil;
+        }
+        totalBitmapBytes += rectByteCount;
+        UIImage *image = [self imageForBitmapSubtitleRect:rect];
+        if (image == nil) {
+            continue;
+        }
+        CGRect sourceRect = CGRectMake(rect->x, rect->y, rect->w, rect->h);
+        [parts addObject:[[BunnyFFmpegBitmapSubtitlePart alloc]
+            initWithImage:image
+               sourceRect:sourceRect]];
+        maximumX = MAX(maximumX, (int64_t)rect->x + rect->w);
+        maximumY = MAX(maximumY, (int64_t)rect->y + rect->h);
+    }
+    if (parts.count == 0) {
+        return nil;
+    }
+    canvasWidth = MAX(canvasWidth, (int)MIN(maximumX, INT_MAX));
+    canvasHeight = MAX(canvasHeight, (int)MIN(maximumY, INT_MAX));
+    if (canvasWidth <= 0 || canvasHeight <= 0 || canvasWidth > 32768 || canvasHeight > 32768) {
+        return nil;
+    }
+    return [[BunnyFFmpegBitmapSubtitleCue alloc]
+        initWithParts:parts
+           sourceSize:CGSizeMake(canvasWidth, canvasHeight)];
+}
+
+- (void)publishSubtitleClear {
+    void (^textHandler)(NSString *, NSTimeInterval, NSTimeInterval) = self.onSubtitle;
+    void (^bitmapHandler)(BunnyFFmpegBitmapSubtitleCue *, NSTimeInterval, NSTimeInterval) =
+        self.onBitmapSubtitle;
+    if (textHandler == nil && bitmapHandler == nil) {
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (textHandler) {
+            textHandler(nil, 0, 0);
+        }
+        if (bitmapHandler) {
+            bitmapHandler(nil, 0, 0);
+        }
+    });
 }
 
 - (NSString *)normalizedSubtitleText:(NSString *)text stripASSPrefix:(BOOL)stripASSPrefix {

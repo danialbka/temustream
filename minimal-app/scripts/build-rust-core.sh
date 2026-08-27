@@ -94,6 +94,20 @@ if ! rustup target list --installed | grep -qx 'x86_64-apple-ios'; then
   rustup target add x86_64-apple-ios
 fi
 
+# The verified scratch workspace preserves source mtimes. When an older source
+# snapshot is restored over a newer Cargo cache, Cargo's mtime fingerprint can
+# otherwise reuse an archive built from different bytes. The content stamp
+# above already proved that the Rust inputs changed, so invalidate only this
+# crate's release products and keep downloaded dependencies intact.
+for rust_target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+  CARGO_TARGET_DIR="$TARGET_DIR" cargo clean \
+    --manifest-path "$CRATE_DIR/Cargo.toml" \
+    --package stremio-playback-core \
+    --release \
+    --target "$rust_target" \
+    --quiet
+done
+
 CARGO_TARGET_DIR="$TARGET_DIR" cargo build \
   --manifest-path "$CRATE_DIR/Cargo.toml" \
   --release \

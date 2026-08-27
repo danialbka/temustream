@@ -1,6 +1,6 @@
-# TemuStream build-cache retention
+# TemuStremio build-cache retention
 
-TemuStream uses one warm local cache root by default:
+TemuStremio uses one warm local cache root by default:
 
 ```text
 /private/tmp/stremio-build-cache/

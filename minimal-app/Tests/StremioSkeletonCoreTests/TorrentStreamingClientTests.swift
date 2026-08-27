@@ -59,6 +59,12 @@ final class TorrentStreamingClientTests: XCTestCase {
 
     func testRejectsInsecurePublicServerAndBadHash() async throws {
         XCTAssertThrowsError(try StreamingServerEndpoint("http://example.com:11470"))
+        XCTAssertThrowsError(
+            try StreamingServerEndpoint("https://user:secret@stream.example.test:11470")
+        )
+        XCTAssertThrowsError(
+            try StreamingServerEndpoint("https://stream.example.test:11470?token=secret")
+        )
         let client = TorrentStreamingClient(
             endpoint: try StreamingServerEndpoint("http://127.0.0.1:11470"),
             loader: TorrentStubLoader()

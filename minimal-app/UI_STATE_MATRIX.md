@@ -15,8 +15,10 @@
 | `details-streams.png` | Metadata, trailer action, and direct/torrent stream choices |
 | `details-resume.png` | Persisted resume with dot-matrix progress and trailer actions below Add to Library |
 | `details-series-episodes.png` | Series trailer action, full-width episode routes, season picker, dot-matrix resume and episode progress, and completed tick |
-| `details-cast-movie.png` | Movie summary metadata, credits, and horizontally scrollable provider-backed trivia cards |
-| `details-cast-series.png` | Series summary metadata, credits, episode inventory, and horizontally scrollable provider-backed trivia cards |
+| `details-cast-movie.png` | Full-width movie summary metadata and credits with Trivia & Awards collapsed by default |
+| `details-trivia-expanded.png` | User-expanded Trivia & Awards disclosure showing awards and the sourced trivia preview |
+| `details-trivia.png` | Vertical provider and Wikipedia trivia destination with spoiler controls, source revision, and CC BY-SA attribution |
+| `details-cast-series.png` | Full-width series summary metadata, credits, episode inventory, and compact Did You Know preview |
 | `episode-streams.png` | Dedicated episode route with thumbnail, summary, dot-matrix resume progress, provider filters, and streams |
 | `episode-up-next.png` | Compact next-episode thumbnail, episode number, countdown, and immediate playback action |
 | `library-empty.png` | Empty saved library |

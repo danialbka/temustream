@@ -80,6 +80,39 @@ final class LastSuccessfulPlaybackTests: XCTestCase {
         )
     }
 
+    func testRankingBuildsEachPreferenceKeyOnlyOnce() throws {
+        let identity = try XCTUnwrap(PlaybackContentIdentity.movie(catalogID: "tt123"))
+        let preferredKey = try XCTUnwrap(
+            PlaybackStreamPreferenceKey(
+                providerName: "Provider",
+                streamName: "Preferred",
+                streamTitle: "Movie"
+            )
+        )
+        let candidates = (0..<1_000).map { index in
+            Candidate(
+                label: "stream-\(index)",
+                key: PlaybackStreamPreferenceKey(
+                    providerName: "Provider",
+                    streamName: "Stream \(index)",
+                    streamTitle: "Movie"
+                )
+            )
+        }
+        var keyBuildCount = 0
+
+        _ = LastSuccessfulPlaybackRanker.rank(
+            candidates,
+            identity: identity,
+            preference: .init(identity: identity, key: preferredKey)
+        ) { candidate in
+            keyBuildCount += 1
+            return candidate.key
+        }
+
+        XCTAssertEqual(keyBuildCount, candidates.count)
+    }
+
     func testStoreIsBoundedExpiresOldEntriesAndPersistsNoRawStreamSecrets() throws {
         let suite = "LastSuccessfulPlaybackTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

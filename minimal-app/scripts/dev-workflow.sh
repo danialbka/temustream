@@ -98,8 +98,10 @@ usage() {
 Usage:
   ./scripts/dev-workflow.sh prepare
   ./scripts/dev-workflow.sh test
+  ./scripts/dev-workflow.sh typecheck-watchos
   ./scripts/dev-workflow.sh typecheck-tvos
   ./scripts/dev-workflow.sh build-simulator
+  ./scripts/dev-workflow.sh build-watchos
   ./scripts/dev-workflow.sh build-tvos
   ./scripts/dev-workflow.sh build-device
   ./scripts/dev-workflow.sh screenshots [STATE ...]
@@ -198,7 +200,7 @@ allowed_untracked_source() {
   local relative="$1"
   case "$relative" in
     'iOS/Resources/Info '[0-9]*'.plist') return 1 ;;
-    Sources/*.swift|Sources/**/*.swift|Tests/*.swift|Tests/**/*.swift|iOS/App/*|iOS/App/**/*|iOS/UITests/*|iOS/UITests/**/*|iOS/Resources/Assets.xcassets/*|iOS/Resources/Assets.xcassets/**/*|tvOS/*|tvOS/**/*|rust/*|rust/**/*|Fixtures/*|Fixtures/**/*|scripts/*.sh|Backend/watch-together/*|Backend/watch-together/**/*) return 0 ;;
+    Sources/*.swift|Sources/**/*.swift|Tests/*.swift|Tests/**/*.swift|iOS/App/*|iOS/App/**/*|iOS/UITests/*|iOS/UITests/**/*|iOS/Resources/PrivacyInfo.xcprivacy|iOS/Resources/Assets.xcassets/*|iOS/Resources/Assets.xcassets/**/*|tvOS/*|tvOS/**/*|watchOS/*|watchOS/**/*|rust/*|rust/**/*|Fixtures/*|Fixtures/**/*|scripts/*.sh|Backend/watch-together/*|Backend/watch-together/**/*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -288,7 +290,7 @@ write_manifest() {
 
   (
     cd "$root"
-    for candidate in Package.swift project.yml Sources Tests iOS tvOS Vendor/KSPlayer rust Fixtures scripts config; do
+    for candidate in Package.swift project.yml Sources Tests iOS tvOS watchOS Vendor/KSPlayer rust Fixtures scripts config; do
       if [[ -f "$candidate" ]]; then
         print -r -- "$candidate"
       elif [[ -d "$candidate" ]]; then
@@ -501,6 +503,14 @@ case "$command_name" in
     operation_seconds=$((SECONDS - operation_started))
     write_metadata typecheck-tvos
     ;;
+  typecheck-watchos)
+    (( $# == 0 )) || fail "typecheck-watchos does not accept arguments"
+    prepare_workspace
+    operation_started=$SECONDS
+    run_in_workspace "$workspace/scripts/build-watchos.sh" --typecheck
+    operation_seconds=$((SECONDS - operation_started))
+    write_metadata typecheck-watchos
+    ;;
   build-simulator)
     (( $# == 0 )) || fail "build-simulator does not accept arguments"
     prepare_workspace
@@ -516,6 +526,14 @@ case "$command_name" in
     run_in_workspace "$workspace/scripts/build-tvos.sh"
     operation_seconds=$((SECONDS - operation_started))
     write_metadata build-tvos "$workspace/build/TemuStreamTV-simulator.zip"
+    ;;
+  build-watchos)
+    (( $# == 0 )) || fail "build-watchos does not accept arguments"
+    prepare_workspace
+    operation_started=$SECONDS
+    run_in_workspace "$workspace/scripts/build-watchos.sh"
+    operation_seconds=$((SECONDS - operation_started))
+    write_metadata build-watchos "$workspace/build/TemuStremioWatch-simulator.zip"
     ;;
   build-device)
     (( $# == 0 )) || fail "build-device does not accept arguments"

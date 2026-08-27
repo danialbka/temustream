@@ -80,6 +80,14 @@ struct BunnyPlayerScreen: View {
                 .onTapGesture { toggleControls() }
                 .accessibilityIdentifier("bunny-player-video")
 
+                if let bitmapSubtitleCue = model.bitmapSubtitleCue {
+                    BunnyBitmapSubtitleOverlay(
+                        cue: bitmapSubtitleCue,
+                        presentationSize: model.bitmapSubtitlePresentationSize,
+                        viewportMode: viewportMode
+                    )
+                }
+
                 if !model.captionLines.isEmpty {
                     BunnySubtitleOverlay(lines: model.captionLines)
                 }
@@ -465,6 +473,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     @Published private(set) var wantsPlayback = true
     @Published private(set) var isMuted = false
     @Published private(set) var captionLines: [String] = []
+    @Published private(set) var bitmapSubtitleCue: BunnyFFmpegBitmapSubtitleCue?
     @Published private(set) var audioOptions: [BunnyMediaOption] = []
     @Published private(set) var subtitleOptions: [BunnyMediaOption] = []
     @Published private(set) var selectedAudioID: UUID?
@@ -510,6 +519,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private var customRecoveryAttempts = 0
     private var softwareDecodeURLs: Set<URL> = []
     private var captionRevision = 0
+    private var activeCustomSubtitleCueID: UUID?
     private var applicationIsActive = true
     private var applicationLifecycleRevision = 0
     private var pendingPlaybackNotice: String?
@@ -541,6 +551,18 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
 
     var customVideoLayer: AVSampleBufferDisplayLayer? {
         customDecoder?.videoLayer
+    }
+
+    var bitmapSubtitlePresentationSize: CGSize {
+        guard let size = customMediaInfo?.presentationSize,
+              size.width.isFinite,
+              size.height.isFinite,
+              size.width > 0,
+              size.height > 0
+        else {
+            return bitmapSubtitleCue?.sourceSize ?? .zero
+        }
+        return size
     }
 
     var progressSnapshot: (position: TimeInterval, duration: TimeInterval)? {
@@ -896,6 +918,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         decoder.onSubtitle = { [weak self, weak decoder] text, start, duration in
             guard let self, let decoder, self.customDecoder === decoder else { return }
             self.scheduleCustomSubtitle(text, start: start, duration: duration)
+        }
+        decoder.onBitmapSubtitle = { [weak self, weak decoder] cue, start, duration in
+            guard let self, let decoder, self.customDecoder === decoder else { return }
+            self.scheduleCustomBitmapSubtitle(cue, start: start, duration: duration)
         }
         decoder.onSeekCompleted = { [weak self, weak decoder] position, succeeded in
             guard let self, let decoder, self.customDecoder === decoder else { return }
@@ -1287,6 +1313,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         let target = duration > 0
             ? min(max(requestedTarget, 0), max(duration - 0.25, 0))
             : max(requestedTarget, 0)
+        invalidateCustomSubtitles()
         customDecoder.pause()
         let expectedRevision = customSeekRevision + 1
         customSeekSucceeded = false
@@ -1404,6 +1431,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     }
 
     func selectSubtitle(_ track: BunnyMediaOption?) {
+        invalidateCustomSubtitles()
         if activeEngine == .customFFmpeg {
             customDecoder?.selectSubtitleStreamIndex(track?.customStreamIndex ?? -1)
         } else if let item = player.currentItem, let subtitleGroup {
@@ -1417,8 +1445,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             )
         } else {
             PlaybackLanguagePreferences.rememberSubtitlesDisabled()
-            captionRevision += 1
-            captionLines = []
         }
     }
 
@@ -1446,6 +1472,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     }
 
     func updateCaptionLines(_ lines: [String]) {
+        bitmapSubtitleCue = nil
         captionLines = lines
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -1457,6 +1484,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     }
 
     func notePlaybackEnded() {
+        invalidateCustomSubtitles()
         wantsPlayback = false
         isPlaying = false
         isBuffering = false
@@ -1540,6 +1568,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     func presentFailure(_ error: Error) {
         player.pause()
         customDecoder?.pause()
+        invalidateCustomSubtitles()
         wantsPlayback = false
         isPlaying = false
         isBuffering = false
@@ -1555,7 +1584,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     }
 
     func stop() {
-        captionLines = []
+        invalidateCustomSubtitles()
         pictureInPictureController?.stopPictureInPicture()
         pictureInPictureController = nil
         pictureInPictureSupported = false
@@ -1582,7 +1611,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         isSeeking = false
         isScrubbing = false
         wantsPlayback = true
-        captionLines = []
+        invalidateCustomSubtitles()
         audioOptions = []
         subtitleOptions = []
         selectedAudioID = nil
@@ -1604,7 +1633,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         customRenderedAudioFrames = 0
         customDisplayFPS = nil
         customRecoveryAttempts = 0
-        captionRevision += 1
         stallCount = 0
         didRestorePosition = resumePosition <= 0
         debugSnapshot = .waiting
@@ -1635,8 +1663,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         customMediaInfo = nil
         usesCustomDecoder = false
         clearMediaOutputs()
-        captionRevision += 1
-        captionLines = []
+        invalidateCustomSubtitles()
     }
 
     private var hasActivePlayback: Bool {
@@ -1653,25 +1680,100 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         start: TimeInterval,
         duration subtitleDuration: TimeInterval
     ) {
-        captionRevision += 1
-        let revision = captionRevision
         guard let text, !text.isEmpty, selectedSubtitleID != nil else {
-            captionLines = []
+            scheduleCustomSubtitleClear(at: start)
             return
         }
-        let clock = customDecoder?.currentTime ?? currentTime
-        let delay = max(start - clock, 0)
-        let displayDuration = max(start + subtitleDuration - max(clock, start), 0.1)
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else {
+            scheduleCustomSubtitleClear(at: start)
+            return
+        }
+        let revision = captionRevision
+        let cueID = UUID()
+        let end = start + max(subtitleDuration, 0.1)
         Task { @MainActor [weak self] in
-            if delay > 0 {
-                try? await Task.sleep(for: .seconds(delay))
-            }
-            guard let self, revision == self.captionRevision else { return }
-            self.updateCaptionLines(text.components(separatedBy: .newlines))
-            try? await Task.sleep(for: .seconds(displayDuration))
-            guard revision == self.captionRevision else { return }
+            guard let self,
+                  await self.waitForCustomSubtitleTime(start, revision: revision)
+            else { return }
+            self.activeCustomSubtitleCueID = cueID
+            self.bitmapSubtitleCue = nil
+            self.captionLines = lines
+            guard await self.waitForCustomSubtitleTime(end, revision: revision),
+                  self.activeCustomSubtitleCueID == cueID
+            else { return }
+            self.activeCustomSubtitleCueID = nil
             self.captionLines = []
         }
+    }
+
+    private func scheduleCustomBitmapSubtitle(
+        _ cue: BunnyFFmpegBitmapSubtitleCue?,
+        start: TimeInterval,
+        duration subtitleDuration: TimeInterval
+    ) {
+        guard let cue, !cue.parts.isEmpty, selectedSubtitleID != nil else {
+            scheduleCustomSubtitleClear(at: start)
+            return
+        }
+        let revision = captionRevision
+        let cueID = UUID()
+        let end = start + max(subtitleDuration, 0.1)
+        Task { @MainActor [weak self] in
+            guard let self,
+                  await self.waitForCustomSubtitleTime(start, revision: revision)
+            else { return }
+            self.activeCustomSubtitleCueID = cueID
+            self.captionLines = []
+            self.bitmapSubtitleCue = cue
+            guard await self.waitForCustomSubtitleTime(end, revision: revision),
+                  self.activeCustomSubtitleCueID == cueID
+            else { return }
+            self.activeCustomSubtitleCueID = nil
+            self.bitmapSubtitleCue = nil
+        }
+    }
+
+    private func scheduleCustomSubtitleClear(at start: TimeInterval) {
+        guard start > 0, selectedSubtitleID != nil else {
+            invalidateCustomSubtitles()
+            return
+        }
+        let revision = captionRevision
+        Task { @MainActor [weak self] in
+            guard let self,
+                  await self.waitForCustomSubtitleTime(start, revision: revision)
+            else { return }
+            self.activeCustomSubtitleCueID = nil
+            self.captionLines = []
+            self.bitmapSubtitleCue = nil
+        }
+    }
+
+    private func waitForCustomSubtitleTime(
+        _ target: TimeInterval,
+        revision: Int
+    ) async -> Bool {
+        while !Task.isCancelled,
+              revision == captionRevision,
+              selectedSubtitleID != nil,
+              customDecoder != nil {
+            let clock = customDecoder?.currentTime ?? currentTime
+            if clock.isFinite, clock >= target - 0.025 {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(40))
+        }
+        return false
+    }
+
+    private func invalidateCustomSubtitles() {
+        captionRevision &+= 1
+        activeCustomSubtitleCueID = nil
+        captionLines = []
+        bitmapSubtitleCue = nil
     }
 
     private func configurePictureInPicture() {
@@ -2681,6 +2783,75 @@ private struct BunnyPlaybackRateMenu: View {
         .simultaneousGesture(TapGesture().onEnded(onInteraction))
         .accessibilityLabel("Playback speed, \(BunnyPlaybackRate.label(for: model.playbackRate))")
         .accessibilityIdentifier("player-playback-speed")
+    }
+}
+
+private struct BunnyBitmapSubtitleOverlay: View {
+    let cue: BunnyFFmpegBitmapSubtitleCue
+    let presentationSize: CGSize
+    let viewportMode: BunnyViewportMode
+
+    var body: some View {
+        GeometryReader { proxy in
+            let videoFrame = displayedVideoFrame(in: proxy.size)
+            let sourceSize = cue.sourceSize
+            let sourceWidth = max(sourceSize.width, 1)
+            let sourceHeight = max(sourceSize.height, 1)
+
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(cue.parts.enumerated()), id: \.offset) { _, part in
+                    let sourceRect = part.sourceRect
+                    let width = sourceRect.width / sourceWidth * videoFrame.width
+                    let height = sourceRect.height / sourceHeight * videoFrame.height
+                    let x = videoFrame.minX
+                        + sourceRect.midX / sourceWidth * videoFrame.width
+                    let y = videoFrame.minY
+                        + sourceRect.midY / sourceHeight * videoFrame.height
+
+                    Image(uiImage: part.image)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: max(width, 0), height: max(height, 0))
+                        .position(x: x, y: y)
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Image subtitles")
+            .accessibilityIdentifier("player-bitmap-subtitle-overlay")
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func displayedVideoFrame(in viewport: CGSize) -> CGRect {
+        let fallbackSize = cue.sourceSize
+        let contentSize = presentationSize.width > 0 && presentationSize.height > 0
+            ? presentationSize
+            : fallbackSize
+        guard viewport.width > 0,
+              viewport.height > 0,
+              contentSize.width > 0,
+              contentSize.height > 0,
+              cue.sourceSize.width > 0,
+              cue.sourceSize.height > 0
+        else { return .zero }
+
+        let widthScale = viewport.width / contentSize.width
+        let heightScale = viewport.height / contentSize.height
+        let scale = viewportMode == .fit
+            ? min(widthScale, heightScale)
+            : max(widthScale, heightScale)
+        let displayedSize = CGSize(
+            width: contentSize.width * scale,
+            height: contentSize.height * scale
+        )
+        return CGRect(
+            x: (viewport.width - displayedSize.width) / 2,
+            y: (viewport.height - displayedSize.height) / 2,
+            width: displayedSize.width,
+            height: displayedSize.height
+        )
     }
 }
 

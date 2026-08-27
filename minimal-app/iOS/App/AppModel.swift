@@ -776,6 +776,47 @@ final class AppModel: ObservableObject {
         errorMessage = nil
     }
 
+    /// Reproduces details-page pressure from a long infinite-scroll session
+    /// without depending on a live catalog or provider.
+    func prepareDetailsPerformanceFixture(candidateCount: Int = 5_000) {
+        if let identity = PlaybackContentIdentity.movie(catalogID: "tt-heavy-details"),
+           let key = PlaybackStreamPreferenceKey(
+               providerName: "Cinemeta",
+               streamName: "Fixture 1080p 999",
+               streamTitle: "1080p WEB-DL 10 GB"
+           ) {
+            // Exercise the expensive preference-ranking branch every time;
+            // this is the path that made the lag intermittent in production.
+            LastSuccessfulPlaybackPreferenceStore.shared.recordSuccess(
+                identity: identity,
+                key: key
+            )
+        }
+        let candidates = (0..<max(candidateCount, 0)).map { index in
+            MetaItem(
+                id: "details-performance-candidate-\(index)",
+                type: "movie",
+                name: "Related Performance Candidate \(index + 1)",
+                description: "Deterministic details-page performance fixture.",
+                releaseInfo: "2026",
+                genres: index.isMultiple(of: 2)
+                    ? ["Animation", "Comedy"] : ["Drama"],
+                cast: index.isMultiple(of: 5) ? ["Fixture Performer"] : nil
+            )
+        }
+        catalog = candidates
+        homeShelves = [
+            DiscoveryShelf(
+                id: "details-performance",
+                title: "Details Performance",
+                items: candidates
+            ),
+        ]
+        searchCatalogs = []
+        isLoading = false
+        errorMessage = nil
+    }
+
     /// Allows real-account provider audits without writing the supplied password or
     /// resulting session to disk. The session exists only for this simulator process.
     private func activateEphemeralSimulatorAccountIfRequested() async throws {
@@ -1177,7 +1218,7 @@ final class AppModel: ObservableObject {
         )
         let localGroup = localMatches.isEmpty ? nil : SearchCatalogGroup(
             id: "local-metadata#\(requestedType)",
-            providerName: "TemuStream",
+            providerName: "TemuStremio",
             catalogName: "Titles, People & Genres",
             manifestURL: primaryEndpoint.manifestURL,
             items: localMatches

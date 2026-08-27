@@ -1,114 +1,95 @@
-# Skeleton — minimal Stremio-compatible iOS and tvOS client
+# Building TemuStremio
 
-Skeleton is a clean-room SwiftUI client for the public Stremio add-on protocol.
-It keeps the useful product shape while removing the bundled Node runtime,
-analytics/crash SDKs and unrelated services. Torrent work stays
-outside the IPA behind a small compatible server interface. Playback offers
-Bunny, Performance, KSPlayer, and VLC in Settings, with the custom Bunny player
-as the default. AVFoundation remains an internal hardware-decoding backend for
-Bunny and Performance rather than a deprecated standalone choice.
+This directory contains the working iOS, iPadOS, tvOS, and watchOS apps. The
+clients use the public Stremio add-on protocol, but they do not ship a catalog
+of media or an embedded torrent engine.
 
-## Included
+The iPhone and iPad app has the broadest playback support. It can use the Bunny
+player, KSPlayer, MobileVLCKit, and Apple-native playback, and it can hand
+torrent or magnet sources to a streaming server you configure. The Apple TV
+interface is designed for the Siri Remote. The Apple Watch app is a separate,
+standalone app: it contacts add-ons itself, can sign in and synchronize its
+account library and installed add-ons, and plays compatible HTTPS HLS or video
+through AVPlayer. A streaming server you configure can resolve torrents or
+convert incompatible HTTP(S) video to HLS. It does not require an iPhone and
+does not include Watch Together.
 
-- add-on manifest validation and installation
-- Cinemeta / Letterboxd Recommendations source dropdown
-- catalog browsing, search, and protocol-native infinite scrolling
-- metadata/details
-- direct HTTP/HLS stream discovery
-- torrent/magnet stream resolution through a compatible localhost, LAN, or
-  HTTPS streaming server
-- selectable Bunny, Performance, KSPlayer, and VLC playback paths
-- Movies and TV Series catalog selection, season-by-season episode listings,
-  provider episode thumbnails with a missing-artwork fallback, per-episode resume
-  state, and persistent watched ticks after completion
-- a dependency-free Rust playback-policy core that routes Apple-native HLS to
-  AVFoundation, relabeled/direct transport streams to hardware-backed KSPlayer,
-  and HEVC or unusually large sources to VLC's native hardware-backed drawable
-- a payload-signature stream bridge that detects mislabeled MP4/MPEG-TS/MKV/HLS
-  responses, repairs bad TorBox file selection, waits for provider preparation,
-  and retries transient network failures before opening a decoder
-- a persistent Settings debug switch with an in-player overlay for measured
-  FPS, nominal FPS, dropped frames/packets, stalls, buffer depth, and the active
-  hardware-decoder policy
-- KSPlayer controls with Picture in Picture, AirPlay, audio/subtitle tracks,
-  aspect fit/fill, seeking, and playback speed
-- KSPlayer/FFmpeg playback for uncommon containers and codecs, with KSPlayer's
-  faster native backend used for MP4/MOV and reliable segmented HLS seeking
-- automatic server-side HLS remux/transcode before AVPlayer tries unsupported
-  MKV/AV1/FLAC media, including
-  VideoToolbox profile discovery
-- native LibVLC rendering for demanding sources, avoiding the slower custom
-  memory-copy path and its decoder-shutdown race without changing the selected player
-- one same-engine repair retry before cross-player fallback
-- observable playback startup with automatic fallback, timeout, retry, and a
-  useful failure state instead of a permanent black player
-- local library persistence
-- Stremio email/password sign-in with the session token stored in iOS Keychain
-  on signed devices and protected app storage in unsigned simulator builds
-- Stremio library/removal and installed add-on synchronization
-- friend profiles/codes, friend requests, and friends-only Watch Together rooms
-  backed by Convex, with reliable LiveKit play/pause/seek events, reconnect
-  snapshots, drift correction, room presence, and opt-in microphone voice chat
-- unit and integration tests
-- deterministic simulator E2E flow through manifest, catalog, details, stream,
-  real H.264/AAC direct and torrent-route playback startup, library persistence,
-  account login/pull/push contracts, and session save/load/delete persistence
-- a dedicated `TemuStreamTV` target with a collapsible tvOS sidebar, cinematic
-  hero and horizontal shelves, remote-focus cards, large-screen detail and
-  episode layouts, profiles, account/add-on management, ranked stream failover,
-  and the native AVKit transport UI for Siri Remote seeking, audio, and subtitles
+## First build
 
-## Deliberately omitted
-
-- an embedded torrent engine; connect a compatible service at the default
-  `http://127.0.0.1:11470` or enter a private-LAN/HTTPS server URL
-- telemetry, ads, push, Firebase, and crash reporting
-- DRM bypasses or paid-feature bypasses
-
-Torrent sources remain visible when the configured service is offline and show
-an actionable playback error. External links are handed to iOS.
-
-KSPlayer is distributed under GPL-3.0. Keep this client and any distributed
-build compliant with that license, or replace the dependency with a separately
-licensed decoder before closed-source distribution.
-
-## Workflows
+You need a Mac with Xcode, XcodeGen 2.42 or newer, Rust, and FFmpeg. Xcode must
+include the SDK for each platform you plan to build. Simulator runtimes are a
+separate download in Xcode Settings under Components.
 
 ```sh
+brew install xcodegen rust ffmpeg
 ./scripts/test.sh
+./scripts/build-tvos.sh --typecheck
+./scripts/build-watchos.sh --typecheck
 ./scripts/build-simulator.sh
-./scripts/dev-workflow.sh build-tvos
-./scripts/dev-workflow.sh typecheck-tvos
-./scripts/build-device.sh
-./scripts/fast-ota.sh doctor
-./scripts/fast-ota.sh update
-./scripts/sideloadly-cli.sh doctor
-./scripts/sideloadly-cli.sh update
-./scripts/benchmark-player-footprint.sh /path/to/reference.ipa
-./scripts/benchmark-catalog-paging.sh
-./scripts/e2e-simulator.sh
-./scripts/ui-state-screenshots.sh
-./scripts/configure-watch-together.sh
-./scripts/verify.sh
+open StremioSkeleton.xcodeproj
 ```
 
-The Apple TV app requires tvOS 18 or later. Install the tvOS Simulator runtime
-from Xcode Settings > Components, then run `./scripts/dev-workflow.sh build-tvos`
-to produce `build/TemuStreamTV-simulator.zip`. The `typecheck-tvos` command
-validates the complete target against the installed tvOS SDK without requiring
-a runtime.
+`project.yml` owns targets, build settings, package references, bundle metadata,
+and schemes. Do not edit the generated project by hand. After changing the
+spec, regenerate it with:
 
-## Watch Together development setup
+```sh
+xcodegen generate --spec project.yml
+```
 
-The iOS app uses the official Convex Swift and LiveKit Swift clients. Convex
-stores profiles, friendships, room membership, and the latest playback
-snapshot. LiveKit carries reliable low-latency playback events, presence, and
-audio. The app sends only the Stremio content identity and playback state; it
-never publishes stream URLs, provider tokens, or Stremio credentials. Each
-participant must independently have access to the same title and select a
-playable stream.
+The first app build fetches the checksum-pinned MobileVLCKit package. Swift
+packages are pinned in `Package.resolved`; the Rust policy code lives in
+`rust/StremioPlaybackCore`.
 
-Backend setup lives in `Backend/watch-together`:
+## Everyday commands
+
+```sh
+./scripts/test.sh                         # Swift and Rust unit tests
+./scripts/build-simulator.sh              # iOS Simulator app and ZIP
+./scripts/build-tvos.sh --typecheck       # tvOS SDK compile gate
+./scripts/build-watchos.sh --typecheck    # watchOS SDK compile gate
+./scripts/dev-workflow.sh build-tvos      # tvOS Simulator app, runtime required
+./scripts/dev-workflow.sh build-watchos   # watchOS Simulator app, runtime required
+./scripts/e2e-simulator.sh                # deterministic iOS fixture flow
+./scripts/ui-state-screenshots.sh         # named UI-state captures
+./scripts/verify.sh                       # complete local release gate
+```
+
+The materialized `dev-workflow.sh` path is useful when macOS File Provider has
+left cloud-backed Git or Xcode files as placeholders. It copies the current
+source into a verified temporary workspace and records which source and overlay
+files were used.
+
+## Using add-ons and streams
+
+Cinemeta supplies the default metadata catalog. Add another provider from the
+Add-ons screen by entering its full manifest URL. Remote manifests and account
+traffic must use HTTPS; plain HTTP is reserved for loopback and private-network
+streaming servers.
+
+Direct HTTPS video and HLS can play without a local service. Torrent and magnet
+results remain visible, but they need a compatible streaming server configured
+in Settings. Keep private provider URLs and temporary stream tokens out of
+source, fixtures, screenshots, and issue reports.
+
+The watch has the same basic provider flow in a smaller interface. It accepts
+AVPlayer-compatible HTTPS HLS, MP4, M4V, MOV, and compatible media responses.
+Without a configured streaming server it rejects insecure HTTP, embedded URL
+credentials, torrent-only sources, external-app links, and formats that need
+conversion. With a server you control, it can resolve torrents and request HLS
+for incompatible HTTP(S) video; VLC, FFmpeg, and the iPhone player stack remain
+outside the watch app. See [`docs/WATCHOS.md`](docs/WATCHOS.md) for its controls
+and exact limits.
+
+## Optional Watch Together backend
+
+Watch Together belongs to the iOS app only. Convex stores profiles,
+friendships, rooms, and the latest playback snapshot; LiveKit transports
+playback events, presence, and opt-in voice chat. Stream URLs and Stremio
+credentials are not published to a room. Each participant resolves a playable
+source independently.
+
+The default build leaves both service endpoints blank. For local development:
 
 ```sh
 cd Backend/watch-together
@@ -121,59 +102,65 @@ set -a; source .env.local; set +a; npm run probe
 cd ../..
 WATCH_TOGETHER_LIVEKIT_URL='wss://your-project.livekit.cloud' \
   ./scripts/configure-watch-together.sh
-xcodegen generate
+xcodegen generate --spec project.yml
 ```
 
-The LiveKit API secret exists only in Convex deployment environment variables.
-The iOS build receives public Convex/LiveKit endpoints through the ignored
-`config/WatchTogether.local.xcconfig`. Voice is off by default, microphone
-permission is requested only after the in-player mic button is tapped, and
-leaving a room unpublishes and stops the local microphone track.
+Keep the LiveKit API secret in the Convex deployment environment. The app gets
+only public endpoints from the ignored
+`config/WatchTogether.local.xcconfig`. A public deployment also needs admission
+controls, request limits, quotas, cleanup, monitoring, and an abuse policy; the
+sample backend does not provide all of those safeguards yet.
 
-`verify.sh` is the single local quality gate. Set `SKELETON_REFERENCE_IPA` to
-include the comparative player-footprint report; the comparison is skipped
-when a reference build is unavailable, such as on a clean GitHub runner. The
-matching GitHub Actions workflow runs the same unit, build, and simulator E2E
-sequence and uploads the signed ad-hoc packages plus E2E and 17-state UI
-screenshots as workflow artifacts. See `UI_STATE_MATRIX.md` for the screenshot
-inventory.
-`build-device.sh` also emits `build/StremioSkeleton-device.ipa` with the
-required `Payload/StremioSkeleton.app` archive layout for sideloading.
-See `PLAYBACK_BENCHMARKS.md` for the strict real-stream and synthetic playback
-matrix, including the proof boundary between simulator and physical-device QA.
+## Device and IPA builds
 
-`fast-ota.sh update` is the normal configured-device update path. It checks the
-CoreDevice Wi-Fi tunnel before building, signs locally with the current
-Sideloadly certificate and provisioning profile inside a disposable keychain,
-installs the `.app` directly with `devicectl`, verifies and launches the exact
-build, then stages the source IPA in Sideloadly AutoRefresh without running a
-second install. Its signing profile remains in a mode-600 application-support
-cache; credentials and private keys are never copied into the repository.
-Use `--skip-build` to reinstall an already-built IPA. Run the full
-`sideloadly-cli.sh update` only when `fast-ota.sh doctor` reports that the
-seven-day profile needs renewal.
+For a local sideloading handoff:
 
-`sideloadly-cli.sh update` is the full configured-device renewal path. It is
-the slower fallback: it builds the device IPA, validates its
-archive and signing data, reuses the
-existing credential reference and AutoRefresh record stored by Sideloadly,
-invokes Sideloadly 0.60's internal silent queue, refreshes the profile cache,
-verifies the installed version with
-`devicectl`, and launches the app. Copy
-`config/sideloadly.snapshot.example.json` to the local snapshot path expected by
-the script (or set `SIDELOADLY_SNAPSHOT`) and fill it from your own Sideloadly
-record. Machine identifiers and the real snapshot stay ignored; Apple ID
-credentials, sessions, certificates, and private keys remain solely in
-Sideloadly's private application-support directory. Because the silent queue is
-an internal interface, the script deliberately refuses to run against another
-Sideloadly version until its behavior and database schema are revalidated.
+```sh
+SKELETON_PUBLIC_RELEASE=1 ./scripts/build-device.sh
+unzip -tq build/StremioSkeleton-device.ipa
+shasum -a 256 build/StremioSkeleton-device.ipa
+```
 
-The normal app starts with Cinemeta and includes Stremboxd's public Letterboxd
-"Popular This Week" recommendations as a catalog source. The infinite grid uses
-each response's actual item count for `skip`, deduplicates repeated pages, and
-stops when an add-on returns an empty or repeated page. Posters are fit inside
-their cards without cropping. Install additional lawful
-direct-stream or torrent add-ons from the Add-ons tab. Remote manifests and
-account APIs must use HTTPS; local HTTP is limited to loopback/private-network
-streaming servers and deterministic development fixtures. Use torrents only
-for media you are legally permitted to access and distribute.
+This produces an arm64 app with an ad hoc signature and the usual `Payload/`
+layout. It is not an App Store build and is not installable until a sideloading
+tool signs it for the destination device. Certificates, private keys,
+provisioning profiles, Apple credentials, and export settings belong outside
+the repository. Public-release mode cleans the app target and forces the
+optional Watch Together endpoints to empty. Omit it only for an intentional
+internal build that should use the ignored local backend configuration.
+
+`fast-ota.sh` and `sideloadly-cli.sh` are machine-local convenience paths for
+an already configured device. Copy
+`config/sideloadly.snapshot.example.json` to the ignored local snapshot path,
+or set `SIDELOADLY_SNAPSHOT`. Never commit the real snapshot: it can contain
+device and signing metadata.
+
+App Store, TestFlight, and registered-device exports require unique bundle
+identifiers, an Apple Developer team, valid signing, and a fresh archive in
+Xcode Organizer. The root [`docs/RELEASING.md`](../docs/RELEASING.md) keeps
+those flows separate and lists the remaining legal and store-review checks.
+
+## What a passing check proves
+
+A unit test or successful compile is source evidence. A Simulator build adds
+packaging evidence. A device IPA adds an unsigned handoff artifact. None of
+those proves that a particular stream played on a physical device or that an
+upload reached TestFlight or App Review.
+
+For playback work, record direct-file, HLS, provider-stream, subtitles, audio
+tracks, seeking, pause and resume, fallback, and rotation separately. On Apple
+Watch, also verify the Digital Crown timeline, compact controls, and playback
+without the paired iPhone app running.
+
+The detailed architecture and command map is in
+[`docs/CODEBASE_MAP.md`](docs/CODEBASE_MAP.md). The expected UI-state captures
+are listed in [`UI_STATE_MATRIX.md`](UI_STATE_MATRIX.md).
+
+## Licensing
+
+Original repository code is MIT licensed. Dependencies keep their own terms.
+KSPlayer and the selected FFmpegKit package are GPL-3.0, so distributing a
+compiled IPA needs deliberate license review. MobileVLCKit and the codecs it
+ships may add more obligations. Read
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) before publishing a
+binary.

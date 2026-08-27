@@ -862,63 +862,257 @@ private struct TitleMetadataFact: Identifiable {
     let systemImage: String
 }
 
-private struct TitleTriviaStrip: View {
+private struct TitleTriviaPreview: View {
+    let item: MetaItem
     let facts: [TitleTriviaFact]
+    let wikipediaTrivia: WikipediaTitleTrivia?
+    let isLoadingWikipedia: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Trivia", systemImage: "sparkles")
-                .font(.headline)
-                .foregroundStyle(Color.appAccent)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(alignment: .top, spacing: 10) {
-                    ForEach(facts) { fact in
-                        VStack(alignment: .leading, spacing: 9) {
-                            Label(fact.kind.title, systemImage: fact.kind.systemImage)
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(Color.appAccent)
-                            Text(fact.text)
-                                .font(.subheadline)
-                                .foregroundStyle(.primary)
-                                .lineLimit(4, reservesSpace: true)
-                                .multilineTextAlignment(.leading)
-                        }
-                        .padding(12)
-                        .frame(width: 220, height: 128, alignment: .topLeading)
-                        .background(
-                            Color.appAccent.opacity(0.09),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.appAccent.opacity(0.28), lineWidth: 1)
-                        }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel("\(fact.kind.title): \(fact.text)")
-                    }
-                }
-                .padding(.vertical, 2)
+        NavigationLink {
+            TitleTriviaListView(
+                item: item,
+                facts: facts,
+                wikipediaTrivia: wikipediaTrivia
+            )
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Trivia", systemImage: "lightbulb.fill")
+                    .font(.headline)
+                    .foregroundStyle(Color.appAccent)
+                Text(previewText)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+                Text(itemCountLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("details-trivia")
+        .buttonStyle(.plain)
+        .accessibilityLabel("Trivia and production facts for \(item.name). \(itemCountLabel)")
+        .accessibilityHint("Opens sourced trivia from metadata providers and Wikipedia")
+        .accessibilityIdentifier("details-trivia-preview")
+    }
+
+    private var previewText: String {
+        facts.first(where: { !$0.isSpoiler })?.text
+            ?? wikipediaTrivia?.excerpts.first?.text
+            ?? (isLoadingWikipedia ? "Finding sourced production facts on Wikipedia…" : nil)
+            ?? "Spoiler trivia is available. Open it when you are ready."
+    }
+
+    private var itemCountLabel: String {
+        let count = facts.count + (wikipediaTrivia?.excerpts.count ?? 0)
+        if count == 0 && isLoadingWikipedia { return "Searching Wikipedia" }
+        return "\(count) sourced \(count == 1 ? "item" : "items") · See all"
     }
 }
 
-private extension TitleTriviaKind {
-    var systemImage: String {
-        switch self {
-        case .provided: "lightbulb.fill"
-        case .awards: "trophy.fill"
-        case .episodes: "rectangle.stack.fill"
-        case .status: "dot.radiowaves.left.and.right"
-        case .release: "calendar"
-        case .director: "movieclapper.fill"
-        case .writing: "pencil.line"
-        case .origin: "globe"
-        case .runtime: "clock.fill"
+struct TitleTriviaListView: View {
+    let item: MetaItem
+    let facts: [TitleTriviaFact]
+    private let initialWikipediaTrivia: WikipediaTitleTrivia?
+    @State private var revealsSpoilers = false
+    @State private var wikipediaTrivia: WikipediaTitleTrivia?
+    @State private var isLoadingWikipedia = false
+    @State private var didFinishWikipediaLookup = false
+
+    init(
+        item: MetaItem,
+        facts: [TitleTriviaFact],
+        wikipediaTrivia: WikipediaTitleTrivia? = nil
+    ) {
+        self.item = item
+        self.facts = facts
+        initialWikipediaTrivia = wikipediaTrivia
+        _wikipediaTrivia = State(initialValue: wikipediaTrivia)
+        _didFinishWikipediaLookup = State(initialValue: wikipediaTrivia != nil)
+    }
+
+    var body: some View {
+        List {
+            Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.name)
+                        .font(.title2.bold())
+                    Text(itemCountLabel)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+
+            if !standardFacts.isEmpty {
+                Section {
+                    ForEach(standardFacts) { fact in
+                        factRow(fact)
+                    }
+                } header: {
+                    Text("Trivia")
+                } footer: {
+                    Text("Source: installed metadata provider")
+                        .textCase(nil)
+                }
+            }
+
+            if !spoilerFacts.isEmpty {
+                Section {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            revealsSpoilers.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Label(spoilerButtonTitle, systemImage: "eye.slash.fill")
+                            Spacer(minLength: 0)
+                            Image(systemName: revealsSpoilers ? "chevron.up" : "chevron.down")
+                                .font(.caption.bold())
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.appAccent)
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("trivia-spoiler-toggle")
+
+                    if revealsSpoilers {
+                        ForEach(spoilerFacts) { fact in
+                            factRow(fact)
+                        }
+                    }
+                } header: {
+                    Text("Spoilers")
+                } footer: {
+                    Text("Source: installed metadata provider")
+                        .textCase(nil)
+                }
+            }
+
+            if isLoadingWikipedia {
+                Section {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                            .tint(Color.appAccent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Loading Wikipedia facts…")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Matching this exact title through Wikidata")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("wikipedia-trivia-loading")
+                }
+            }
+
+            if let wikipediaTrivia {
+                Section {
+                    Label(
+                        "Wikipedia excerpts can include story details.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                ForEach(wikipediaTrivia.sections) { section in
+                    Section {
+                        ForEach(section.excerpts) { excerpt in
+                            Text(excerpt.text)
+                                .font(.body)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.vertical, 6)
+                                .accessibilityIdentifier("wikipedia-trivia-\(excerpt.id)")
+                        }
+                    } header: {
+                        Text(section.title)
+                    } footer: {
+                        wikipediaAttribution(wikipediaTrivia)
+                    }
+                }
+            } else if didFinishWikipediaLookup,
+                      facts.isEmpty,
+                      WikipediaTitleIdentifier.imdbID(from: item.id) != nil {
+                Section {
+                    Label(
+                        "No sourced production trivia was found for this title.",
+                        systemImage: "book.closed"
+                    )
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
+                    .accessibilityIdentifier("wikipedia-trivia-empty")
+                }
+            }
         }
+        .listStyle(.plain)
+        .navigationTitle("Trivia & More")
+        .navigationBarTitleDisplayMode(.inline)
+        .accessibilityIdentifier("title-trivia-list")
+        .task(id: item.id) {
+            await loadWikipediaTriviaIfNeeded()
+        }
+    }
+
+    private var standardFacts: [TitleTriviaFact] {
+        facts.filter { !$0.isSpoiler }
+    }
+
+    private var spoilerFacts: [TitleTriviaFact] {
+        facts.filter(\.isSpoiler)
+    }
+
+    private var spoilerButtonTitle: String {
+        if revealsSpoilers { return "Hide spoiler trivia" }
+        return "Show \(spoilerFacts.count) spoiler \(spoilerFacts.count == 1 ? "item" : "items")"
+    }
+
+    private var itemCountLabel: String {
+        let count = facts.count + (wikipediaTrivia?.excerpts.count ?? 0)
+        if isLoadingWikipedia {
+            return count == 0 ? "Loading sourced trivia" : "\(count) sourced items so far"
+        }
+        return "\(count) sourced \(count == 1 ? "item" : "items")"
+    }
+
+    private func factRow(_ fact: TitleTriviaFact) -> some View {
+        Text(fact.text)
+            .font(.body)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 6)
+            .accessibilityIdentifier("trivia-fact-\(fact.id)")
+    }
+
+    private func wikipediaAttribution(_ trivia: WikipediaTitleTrivia) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Link("Source: Wikipedia revision \(trivia.revisionID)", destination: trivia.revisionURL)
+            Link("Creative Commons CC BY-SA 4.0", destination: WikipediaTitleTrivia.licenseURL)
+            Text("Markup removed and long excerpts shortened for display.")
+        }
+        .font(.caption)
+        .textCase(nil)
+        .accessibilityElement(children: .contain)
+    }
+
+    @MainActor
+    private func loadWikipediaTriviaIfNeeded() async {
+        guard initialWikipediaTrivia == nil,
+              wikipediaTrivia == nil,
+              !didFinishWikipediaLookup,
+              WikipediaTitleIdentifier.imdbID(from: item.id) != nil
+        else { return }
+        isLoadingWikipedia = true
+        defer {
+            isLoadingWikipedia = false
+            didFinishWikipediaLookup = true
+        }
+        wikipediaTrivia = try? await WikipediaTriviaClient().trivia(for: item)
     }
 }
 
@@ -933,19 +1127,33 @@ struct DetailsView: View {
     let preferredManifestURL: URL?
     @State private var item: MetaItem
     @State private var streamProviders: [StreamProviderGroup] = []
+    @State private var rankedStreams: [PresentedStream] = []
+    @State private var relatedTitles: [MetaItem] = []
     @State private var selectedProviderID = Self.allProvidersID
     @State private var selectedSeason: Int?
     @State private var visibleStreamLimit = Self.streamBatchSize
     @State private var streamLoadRevision = 0
+    @State private var hasScheduledInitialMovieCandidates = false
     @State private var isLoading = true
     @State private var isUpdatingLibrary = false
     @State private var activeTrailer: TrailerDestination?
     @State private var primaryMovieCandidates: [StreamPlaybackCandidate] = []
+    @State private var wikipediaTrivia: WikipediaTitleTrivia?
+    @State private var isLoadingWikipediaTrivia = false
+    @State private var didFinishWikipediaLookup = false
+    @State private var isTriviaAndAwardsExpanded: Bool
 
-    init(seed: MetaItem, preferredManifestURL: URL? = nil) {
+    init(
+        seed: MetaItem,
+        preferredManifestURL: URL? = nil,
+        triviaAndAwardsInitiallyExpanded: Bool = false
+    ) {
         self.seed = seed
         self.preferredManifestURL = preferredManifestURL
         _item = State(initialValue: seed)
+        _isTriviaAndAwardsExpanded = State(
+            initialValue: triviaAndAwardsInitiallyExpanded
+        )
     }
 
     var body: some View {
@@ -1170,9 +1378,6 @@ struct DetailsView: View {
                 if let description = normalizedValue(item.description) {
                     Text(description)
                 }
-                if !triviaFacts.isEmpty {
-                    TitleTriviaStrip(facts: triviaFacts)
-                }
                 if !metadataFacts.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
@@ -1223,6 +1428,65 @@ struct DetailsView: View {
                     .accessibilityLabel("Cast: \(item.actorNames.joined(separator: ", "))")
                     .accessibilityIdentifier("details-cast")
                 }
+            }
+
+            if showsTriviaAndAwardsSection {
+                Section {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isTriviaAndAwardsExpanded.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Label("Trivia & Awards", systemImage: "sparkles")
+                                    .font(.headline)
+                                Text(triviaAndAwardsSummary)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                            Image(
+                                systemName: isTriviaAndAwardsExpanded
+                                    ? "chevron.up" : "chevron.down"
+                            )
+                            .font(.caption.bold())
+                            .foregroundStyle(Color.appAccent)
+                            .accessibilityHidden(true)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Trivia and awards. \(triviaAndAwardsSummary)")
+                    .accessibilityValue(
+                        isTriviaAndAwardsExpanded ? "Expanded" : "Collapsed"
+                    )
+                    .accessibilityHint(
+                        isTriviaAndAwardsExpanded
+                            ? "Collapses trivia and awards"
+                            : "Expands trivia and awards"
+                    )
+                    .accessibilityIdentifier("details-trivia-awards-disclosure")
+
+                    if isTriviaAndAwardsExpanded, let awardsText {
+                        detailCredit(
+                            title: "Awards",
+                            values: [awardsText],
+                            identifier: "details-awards"
+                        )
+                    }
+
+                    if isTriviaAndAwardsExpanded, showsTriviaSection {
+                        TitleTriviaPreview(
+                            item: item,
+                            facts: triviaFacts,
+                            wikipediaTrivia: wikipediaTrivia,
+                            isLoadingWikipedia: isLoadingWikipediaTrivia
+                                || (canLoadWikipediaTrivia && !didFinishWikipediaLookup)
+                        )
+                    }
+                }
+                .id("details-trivia-awards-section")
             }
 
             if item.type == "series" {
@@ -1359,6 +1623,7 @@ struct DetailsView: View {
                 }
             }
             }
+            .listStyle(.plain)
             .navigationTitle(item.name)
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarHidden(false)
@@ -1369,6 +1634,7 @@ struct DetailsView: View {
                         preferredManifestURL: preferredManifestURL
                     )
                     configureInitialSeason()
+                    await refreshRelatedTitles()
                     isLoading = false
                 } else {
                     async let enrichedItem = model.details(
@@ -1377,12 +1643,14 @@ struct DetailsView: View {
                     )
                     async let streamsLoaded: Void = loadStreams()
                     item = await enrichedItem
+                    async let relatedTitlesLoaded: Void = refreshRelatedTitles()
                     await streamsLoaded
                     // Stream discovery and metadata enrichment intentionally run
                     // together. Rebuild the shortcut after both finish so a fast
                     // stream response cannot leave playback progress carrying the
                     // sparse catalog seed instead of the enriched title metadata.
-                    mergePrimaryMovieCandidates(from: streamProviders)
+                    await refreshPrimaryMovieCandidates()
+                    await relatedTitlesLoaded
                 }
                 #if SKELETON_SCREENSHOT_HARNESS
                 if ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"] == "details-streams" {
@@ -1391,8 +1659,17 @@ struct DetailsView: View {
                 } else if ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"]
                     == "details-trailer-active", let trailerURL = item.preferredTrailerURL {
                     activeTrailer = TrailerDestination(url: trailerURL)
+                } else if ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"]
+                    == "details-cast-movie"
+                    || ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"]
+                    == "details-trivia-expanded" {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    proxy.scrollTo("details-trivia-awards-section", anchor: .center)
                 }
                 #endif
+            }
+            .task(id: item.id) {
+                await loadWikipediaTrivia()
             }
         }
         .fullScreenCover(item: $activeTrailer) { destination in
@@ -1418,6 +1695,12 @@ struct DetailsView: View {
         if let language = normalizedValue(item.language) {
             facts.append(.init(id: "language", text: language, systemImage: "captions.bubble"))
         }
+        if item.type.caseInsensitiveCompare("series") == .orderedSame,
+           let status = normalizedValue(item.status) {
+            facts.append(
+                .init(id: "status", text: status, systemImage: "dot.radiowaves.left.and.right")
+            )
+        }
         return facts
     }
 
@@ -1425,12 +1708,84 @@ struct DetailsView: View {
         TitleTriviaBuilder.facts(for: item)
     }
 
-    private var relatedTitles: [MetaItem] {
-        let candidates = model.homeShelves.flatMap(\.items)
-            + model.catalog
-            + model.library
-            + model.searchCatalogs.flatMap(\.items)
-        return DiscoveryShelfBuilder.relatedItems(to: item, candidates: candidates)
+    private var awardsText: String? {
+        normalizedValue(item.awards)
+    }
+
+    private var canLoadWikipediaTrivia: Bool {
+        WikipediaTitleIdentifier.imdbID(from: item.id) != nil
+    }
+
+    private var showsTriviaSection: Bool {
+        !triviaFacts.isEmpty
+            || wikipediaTrivia != nil
+            || (canLoadWikipediaTrivia && !didFinishWikipediaLookup)
+    }
+
+    private var showsTriviaAndAwardsSection: Bool {
+        awardsText != nil || showsTriviaSection
+    }
+
+    private var triviaAndAwardsSummary: String {
+        var parts: [String] = []
+        if awardsText != nil {
+            parts.append("Awards")
+        }
+        let triviaCount = triviaFacts.count + (wikipediaTrivia?.excerpts.count ?? 0)
+        if triviaCount > 0 {
+            parts.append("\(triviaCount) trivia \(triviaCount == 1 ? "item" : "items")")
+        } else if showsTriviaSection {
+            parts.append("Trivia")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    @MainActor
+    private func loadWikipediaTrivia() async {
+        guard canLoadWikipediaTrivia, !didFinishWikipediaLookup else { return }
+        #if SKELETON_SCREENSHOT_HARNESS
+        didFinishWikipediaLookup = true
+        return
+        #else
+        isLoadingWikipediaTrivia = true
+        defer {
+            isLoadingWikipediaTrivia = false
+            didFinishWikipediaLookup = true
+        }
+        wikipediaTrivia = try? await WikipediaTriviaClient().trivia(for: item)
+        #endif
+    }
+
+    @MainActor
+    private func refreshRelatedTitles() async {
+        let target = item
+        let homeShelfItems = model.homeShelves.map(\.items)
+        let catalog = model.catalog
+        let library = model.library
+        let searchCatalogItems = model.searchCatalogs.map(\.items)
+        let related = await Task.detached(priority: .utility) {
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            let candidates = homeShelfItems.flatMap { $0 }
+                + catalog
+                + library
+                + searchCatalogItems.flatMap { $0 }
+            let result = DiscoveryShelfBuilder.relatedItems(
+                to: target,
+                candidates: candidates
+            )
+            #if SKELETON_SCREENSHOT_HARNESS
+            NSLog(
+                "DETAIL_RELATED_BENCHMARK elapsed_ms=%.1f candidates=%ld results=%ld main=%d",
+                (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
+                candidates.count,
+                result.count,
+                isMainThreadForBenchmark() ? 1 : 0
+            )
+            #endif
+            return result
+        }.value
+        guard !Task.isCancelled, item.id == target.id else { return }
+        relatedTitles = related
     }
 
     private func normalizedValue(_ value: String?) -> String? {
@@ -1863,18 +2218,40 @@ struct DetailsView: View {
         let revision = streamLoadRevision
         isLoading = true
         streamProviders = []
+        rankedStreams = []
         primaryMovieCandidates = []
+        hasScheduledInitialMovieCandidates = false
         selectedProviderID = Self.allProvidersID
         visibleStreamLimit = Self.streamBatchSize
 
         let loaded = await model.streamProviders(for: item) { partial in
             guard revision == streamLoadRevision, !Task.isCancelled else { return }
             streamProviders = partial
-            mergePrimaryMovieCandidates(from: partial)
+            if !hasScheduledInitialMovieCandidates {
+                hasScheduledInitialMovieCandidates = true
+                let target = item
+                Task { @MainActor in
+                    let proposed = await Task.detached(priority: .userInitiated) {
+                        primaryMoviePlaybackCandidates(
+                            from: rankedPresentedStreams(from: partial),
+                            item: target
+                        )
+                    }.value
+                    guard revision == streamLoadRevision,
+                          !Task.isCancelled,
+                          primaryMovieCandidates.isEmpty
+                    else { return }
+                    primaryMovieCandidates = proposed
+                }
+            }
         }
         guard revision == streamLoadRevision, !Task.isCancelled else { return }
+        let preparedStreams = await Task.detached(priority: .userInitiated) {
+            rankedPresentedStreams(from: loaded)
+        }.value
+        guard revision == streamLoadRevision, !Task.isCancelled else { return }
         streamProviders = loaded
-        mergePrimaryMovieCandidates(from: loaded)
+        rankedStreams = preparedStreams
         isLoading = false
     }
 
@@ -1905,29 +2282,32 @@ struct DetailsView: View {
     }
 
     private var visibleStreams: [PresentedStream] {
-        let providers = selectedProviderID == Self.allProvidersID
-            ? streamProviders
-            : streamProviders.filter { $0.id == selectedProviderID }
-        return rankedPresentedStreams(from: providers)
+        guard selectedProviderID != Self.allProvidersID else { return rankedStreams }
+        return rankedStreams.filter { $0.providerID == selectedProviderID }
     }
 
-    private func mergePrimaryMovieCandidates(
-        from providers: [StreamProviderGroup]
-    ) {
-        let rankedStreams = rankedPresentedStreams(from: providers)
-        guard let firstPlayable = rankedStreams.first(where: {
-            $0.stream.isDirectlyPlayable || $0.stream.isTorrent
-        }) else { return }
-        let proposed = lastSuccessfulPlaybackCandidates(
-            from: orderedPlaybackCandidates(
-                from: rankedStreams,
-                startingAt: firstPlayable.id,
-                contentIdentifier: "\(item.type):\(item.id)",
-                contentTitle: item.name,
-                initialPosition: 0,
-                mediaMetadata: .movie(item)
+    @MainActor
+    private func refreshPrimaryMovieCandidates() async {
+        let streams = rankedStreams
+        let target = item
+        let proposed = await Task.detached(priority: .userInitiated) {
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            let candidates = primaryMoviePlaybackCandidates(
+                from: streams,
+                item: target
             )
-        )
+            #if SKELETON_SCREENSHOT_HARNESS
+            NSLog(
+                "DETAIL_PRIMARY_CANDIDATE_BENCHMARK elapsed_ms=%.1f streams=%ld candidates=%ld main=%d",
+                (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
+                streams.count,
+                candidates.count,
+                isMainThreadForBenchmark() ? 1 : 0
+            )
+            #endif
+            return candidates
+        }.value
+        guard !Task.isCancelled, item.id == target.id else { return }
         guard !proposed.isEmpty else { return }
         primaryMovieCandidates = proposed
     }
@@ -2785,8 +3165,9 @@ private struct TrailerBrowser: UIViewControllerRepresentable {
     ) {}
 }
 
-struct PresentedStream: Identifiable {
+struct PresentedStream: Identifiable, Sendable {
     let id: String
+    let providerID: String
     let providerName: String
     let stream: Stream
     let playbackPriority: Int
@@ -2805,8 +3186,9 @@ struct PresentedStream: Identifiable {
     /// Put cached, phone-decodable releases ahead of extreme AI upscales and
     /// huge remuxes. Every provider result remains available; this only keeps
     /// an unsafe 8K entry from looking like the default choice on an iPhone.
-    init(id: String, providerName: String, stream: Stream) {
+    init(id: String, providerID: String, providerName: String, stream: Stream) {
         self.id = id
+        self.providerID = providerID
         self.providerName = providerName
         self.stream = stream
 
@@ -2877,10 +3259,12 @@ struct PresentedStream: Identifiable {
 func rankedPresentedStreams(
     from providers: [StreamProviderGroup]
 ) -> [PresentedStream] {
-    providers.flatMap { provider in
+    let startedAt = ProcessInfo.processInfo.systemUptime
+    let ranked = providers.flatMap { provider in
         provider.streams.enumerated().map { index, stream in
             PresentedStream(
                 id: "\(provider.id)#\(index)#\(stream.id)",
+                providerID: provider.id,
                 providerName: provider.name,
                 stream: stream
             )
@@ -2892,6 +3276,41 @@ func rankedPresentedStreams(
         }
         return $0.id < $1.id
     }
+    #if SKELETON_SCREENSHOT_HARNESS
+    NSLog(
+        "DETAIL_STREAM_RANK_BENCHMARK elapsed_ms=%.1f providers=%ld streams=%ld main=%d",
+        (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
+        providers.count,
+        ranked.count,
+        Thread.isMainThread ? 1 : 0
+    )
+    #endif
+    return ranked
+}
+
+/// Kept synchronous so diagnostic builds can sample the executor without
+/// tripping Foundation's async-context restriction on Thread.isMainThread.
+private func isMainThreadForBenchmark() -> Bool {
+    Thread.isMainThread
+}
+
+private func primaryMoviePlaybackCandidates(
+    from streams: [PresentedStream],
+    item: MetaItem
+) -> [StreamPlaybackCandidate] {
+    guard let firstPlayable = streams.first(where: {
+        $0.stream.isDirectlyPlayable || $0.stream.isTorrent
+    }) else { return [] }
+    return lastSuccessfulPlaybackCandidates(
+        from: orderedPlaybackCandidates(
+            from: streams,
+            startingAt: firstPlayable.id,
+            contentIdentifier: "\(item.type):\(item.id)",
+            contentTitle: item.name,
+            initialPosition: 0,
+            mediaMetadata: .movie(item)
+        )
+    )
 }
 
 /// Put the selected row first, then try every remaining ranked source once.
