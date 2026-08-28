@@ -20,7 +20,7 @@ struct WatchRootView: View {
                     }
                 }
             }
-            .navigationTitle("TemuStremio")
+            .navigationTitle("Bunny")
             .refreshable { await model.loadHome() }
             .overlay {
                 if model.isLoadingHome && model.catalogSections.isEmpty {

@@ -1277,7 +1277,7 @@ final class WatchAppModel: ObservableObject {
               let playbackURL = assessment.playbackURL
         else { return nil }
         let rawTitle = environment["TEMUSTREMIO_WATCH_DEMO_TITLE"]
-            ?? "TemuStremio Demo"
+            ?? "Bunny Demo"
         let title = String(
             rawTitle.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)
         )
@@ -1285,7 +1285,7 @@ final class WatchAppModel: ObservableObject {
             sourceURL: url,
             playbackURL: playbackURL,
             kind: .hls,
-            title: title.isEmpty ? "TemuStremio Demo" : title,
+            title: title.isEmpty ? "Bunny Demo" : title,
             subtitle: "Injected HLS · Debug only"
         )
     }

@@ -1,6 +1,6 @@
 # Bunny Rust media core
 
-TemuStremio's direct Matroska and WebM path is implemented in
+Bunny's direct Matroska and WebM path is implemented in
 `rust/StremioPlaybackCore/src/media/`. It has no Cargo dependencies. The Rust
 code parses container structure and returns compressed packets through a small
 C ABI. `iOS/App/BunnyNativeDecoder.swift` supplies random-access bytes and

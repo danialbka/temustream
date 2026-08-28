@@ -18,8 +18,8 @@ project is published under the MIT License, while
 GPL-2.0. Those licenses govern those projects and do not replace this
 repository's MIT License.
 
-TemuStremio and Bunny are not affiliated with or endorsed by Stremio. The
-Stremio name is used only to explain account and add-on compatibility.
+Bunny is not affiliated with or endorsed by Stremio. The Stremio name is used
+only to explain account and add-on compatibility.
 
 ## Current iOS app
 

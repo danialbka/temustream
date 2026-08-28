@@ -106,7 +106,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-stremio_acquire_lock "$BUILD_LOCK" "the TemuStremio watchOS build workspace" 900
+stremio_acquire_lock "$BUILD_LOCK" "the Bunny watchOS build workspace" 900
 stremio_register_build_cache "$RETENTION_TOOL" products "$BUILD_ROOT"
 PRODUCT_CACHE_REGISTERED=1
 stremio_register_build_cache "$RETENTION_TOOL" derived-data "$DERIVED_DATA"

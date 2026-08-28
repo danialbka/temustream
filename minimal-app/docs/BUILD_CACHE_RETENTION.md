@@ -1,6 +1,6 @@
-# TemuStremio build-cache retention
+# Bunny build-cache retention
 
-TemuStremio uses one warm local cache root by default:
+Bunny uses one warm local cache root by default:
 
 ```text
 /private/tmp/stremio-build-cache/

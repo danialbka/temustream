@@ -20,4 +20,4 @@ fi
 "$ROOT_DIR/scripts/e2e-simulator.sh"
 "$ROOT_DIR/scripts/ui-state-screenshots.sh"
 
-echo "TemuStremio verification workflow PASS"
+echo "Bunny verification workflow PASS"

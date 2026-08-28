@@ -76,7 +76,7 @@ final class WikipediaTriviaTests: XCTestCase {
         let requests = await loader.requests
         XCTAssertEqual(requests.count, 4)
         XCTAssertTrue(requests.allSatisfy {
-            $0.value(forHTTPHeaderField: "User-Agent")?.hasPrefix("TemuStremio/") == true
+            $0.value(forHTTPHeaderField: "User-Agent")?.hasPrefix("Bunny/") == true
         })
         let wikidataQuery = try XCTUnwrap(
             URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)?

@@ -1,6 +1,6 @@
 # Code of conduct
 
-TemuStremio should be a place where people can work together without being
+Bunny should be a place where people can work together without being
 harassed, belittled, or pushed out.
 
 Be respectful and specific. Critique the code or decision, not the person.

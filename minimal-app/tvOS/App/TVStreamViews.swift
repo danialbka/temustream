@@ -117,7 +117,7 @@ struct TVEpisodeStreamsView: View {
 
         TVSectionTitle(
           "Choose a Stream",
-          subtitle: "If one source fails, TemuStremio automatically tries the next ranked source"
+          subtitle: "If one source fails, Bunny automatically tries the next ranked source"
         )
 
         if isLoading {

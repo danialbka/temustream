@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>TemuStremio</string>
+	<string>Bunny</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -21,7 +21,7 @@
 	<key>CFBundleVersion</key>
 	<string>18</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>TemuStremio connects to streaming servers on your local network when you configure one for playback.</string>
+	<string>Bunny connects to streaming servers on your local network when you configure one for playback.</string>
 	<key>StremioSourceIdentity</key>
 	<string>$(STREMIO_SOURCE_ID)</string>
 	<key>UIBackgroundModes</key>

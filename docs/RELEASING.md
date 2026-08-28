@@ -14,9 +14,8 @@ in minimal-app/project.yml with an identifier owned by the release team before
 TestFlight or App Store submission. Keep developer teams, certificates,
 provisioning profiles, authentication keys, and export settings outside Git.
 
-The installed name Bunny avoids the Temu and Stremio names. It still needs a
-normal trademark clearance search. The repository name and banner continue to
-use TemuStremio, so public repository branding needs its own review.
+The app and public documentation use the name Bunny. It still needs a normal
+trademark clearance search before distribution.
 
 The app currently defaults to Stremio-operated services:
 
@@ -146,10 +145,10 @@ the team and device.
 
 ## 4. Install as a separate local app
 
-Sign Bunny with a profile for its distinct bundle identifier. Do not rewrite
-it to the existing TemuStremio bundle identifier. After installation, verify:
+Sign Bunny with a profile for its bundle identifier. After installation,
+verify:
 
-- both apps remain installed
+- Bunny is installed under the expected bundle identifier
 - the new Home Screen label is Bunny
 - Bunny's installed bundle identifier and build number match the signed result
 - Bunny launches without a trust or provisioning error

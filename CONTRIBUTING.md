@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve TemuStremio. Small, focused changes are easiest to
+Thanks for helping improve Bunny. Small, focused changes are easiest to
 review and safest to test across the three Apple platforms.
 
 ## Before you start

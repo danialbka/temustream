@@ -1,6 +1,6 @@
 # Privacy
 
-TemuStremio has no first-party analytics, advertising SDK, or tracking domain.
+Bunny has no first-party analytics, advertising SDK, or tracking domain.
 The default build does not configure the optional Watch Together backend. The
 app still makes network requests when you browse catalogs, connect services, or
 play media, so the services you choose can receive data directly from your
@@ -8,7 +8,7 @@ device.
 
 ## Data kept on the device
 
-Depending on the features you use, TemuStremio stores settings, installed
+Depending on the features you use, Bunny stores settings, installed
 add-on URLs, a streaming-server URL, local profiles, library entries, playback
 progress, and the last successful playback choice in the app container. Signed
 iOS and watchOS builds store the Stremio session token in Keychain; simulator
@@ -37,7 +37,7 @@ state, or join Watch Together rooms. Resolved media and conversion URLs stay in
 memory; watch playback history stores the title, provider, catalog origin, and
 time position instead.
 
-TemuStremio's watch code does not log the components of resolved media URLs.
+Bunny's watch code does not log the components of resolved media URLs.
 Apple's AVPlayer and CoreMedia diagnostics can still include a full asset URL in
 device or simulator system logs. Streaming services should issue short-lived
 URLs, and users should avoid sharing media playback logs.

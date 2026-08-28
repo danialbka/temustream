@@ -140,7 +140,7 @@ for required_path in \
   README.md LICENSE SECURITY.md PRIVACY.md THIRD_PARTY_NOTICES.md \
   CONTRIBUTING.md CODE_OF_CONDUCT.md SUPPORT.md \
   docs/RELEASING.md docs/ASSET_PROVENANCE.md \
-  docs/assets/temustremio-banner.png; do
+  docs/assets/bunny-banner.png; do
   if [ ! -e "$repo_root/$required_path" ]; then
     error MISSING "$required_path"
   fi

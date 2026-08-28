@@ -569,7 +569,7 @@ final class WatchTogetherModel: ObservableObject {
         voiceState = .enabling
         guard await requestMicrophonePermission() else {
             voiceState = .denied
-            errorMessage = "Microphone access is disabled. Enable it for TemuStremio in iOS Settings."
+            errorMessage = "Microphone access is disabled. Enable it for Bunny in iOS Settings."
             return
         }
         guard let room, room.connectionState == .connected else {

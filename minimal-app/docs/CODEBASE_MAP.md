@@ -1,4 +1,4 @@
-# TemuStremio codebase map
+# Bunny codebase map
 
 Use this map from `minimal-app/`. The application is layered so protocol and
 persistence rules can be tested without iOS, while UIKit/SwiftUI, decoder, and

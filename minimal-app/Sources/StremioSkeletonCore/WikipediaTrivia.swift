@@ -103,7 +103,7 @@ public enum WikipediaTitleIdentifier {
 public struct WikipediaTriviaClient: Sendable {
     private static let wikidataEndpoint = URL(string: "https://query.wikidata.org/sparql")!
     private static let wikipediaEndpoint = URL(string: "https://en.wikipedia.org/w/api.php")!
-    private static let userAgent = "TemuStremio/1.3 (https://github.com/danialbka/temustream)"
+    private static let userAgent = "Bunny/1.3 (https://github.com/danialbka/temustream)"
 
     private let loader: any HTTPRequestLoading
     private let requestTimeout: TimeInterval

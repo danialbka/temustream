@@ -27,10 +27,10 @@ targets:
       properties:
         CFBundleShortVersionString: "1.3"
         CFBundleVersion: "21"
-        CFBundleDisplayName: TemuStremio
+        CFBundleDisplayName: Bunny
         AVInitialRouteSharingPolicy: LongFormVideo
         StremioSourceIdentity: $(STREMIO_SOURCE_ID)
-        NSLocalNetworkUsageDescription: TemuStremio connects to streaming servers on your local network when you configure one for playback.
+        NSLocalNetworkUsageDescription: Bunny connects to streaming servers on your local network when you configure one for playback.
         UILaunchScreen: {}
         UIBackgroundModes:
           - audio
@@ -143,11 +143,11 @@ targets:
     info:
       path: tvOS/Resources/Info.plist
       properties:
-        CFBundleDisplayName: TemuStremio
+        CFBundleDisplayName: Bunny
         CFBundleShortVersionString: "1.3"
         CFBundleVersion: "18"
         StremioSourceIdentity: $(STREMIO_SOURCE_ID)
-        NSLocalNetworkUsageDescription: TemuStremio connects to streaming servers on your local network when you configure one for playback.
+        NSLocalNetworkUsageDescription: Bunny connects to streaming servers on your local network when you configure one for playback.
         UIBackgroundModes:
           - audio
         UILaunchScreen: {}
@@ -215,13 +215,13 @@ targets:
     info:
       path: watchOS/Resources/Info.plist
       properties:
-        CFBundleDisplayName: TemuStremio
+        CFBundleDisplayName: Bunny
         CFBundleShortVersionString: "1.3"
         CFBundleVersion: "21"
         WKApplication: true
         WKWatchOnly: true
         WKPrefersNetworkUponForeground: true
-        NSLocalNetworkUsageDescription: TemuStremio connects to a streaming server on your local network only when you configure one for playback.
+        NSLocalNetworkUsageDescription: Bunny connects to a streaming server on your local network only when you configure one for playback.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
     settings:
@@ -243,7 +243,7 @@ targets:
     info:
       path: watchOS/Container/Info.plist
       properties:
-        CFBundleDisplayName: TemuStremio
+        CFBundleDisplayName: Bunny
         CFBundleShortVersionString: "1.3"
         CFBundleVersion: "21"
         LSApplicationLaunchProhibited: true

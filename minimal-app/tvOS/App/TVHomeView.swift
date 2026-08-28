@@ -25,7 +25,7 @@ struct TVHomeView: View {
           .frame(maxWidth: .infinity, minHeight: 300)
         } else if let error = model.errorMessage, model.homeShelves.isEmpty {
           TVEmptyState(
-            title: "Couldn’t load TemuStremio",
+            title: "Couldn’t load Bunny",
             message: error,
             systemImage: "wifi.exclamationmark"
           )
@@ -62,7 +62,7 @@ struct TVHomeView: View {
   private var header: some View {
     HStack(alignment: .center, spacing: 28) {
       VStack(alignment: .leading, spacing: 4) {
-        Text("TemuStremio")
+        Text("Bunny")
           .font(.system(size: 42, weight: .black, design: .rounded))
         Text("Made for Apple TV")
           .font(.headline)

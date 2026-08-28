@@ -1,6 +1,6 @@
-# TemuStremio for Apple Watch
+# Bunny for Apple Watch
 
-The watchOS app is a standalone TemuStremio client. It does not need an iPhone
+The watchOS app is a standalone Bunny client. It does not need an iPhone
 session and does not use WatchConnectivity. Catalogs, search, Stremio account
 sign-in, library and installed add-on sync, playback progress, stream
 selection, streaming-server resolution, and playback all run on the watch.
@@ -21,7 +21,7 @@ through AVPlayer. Without a configured streaming server, torrent and magnet
 sources, external-app links, DASH manifests, MKV, WebM, AVI, FLV, WMV, and
 streams marked as needing a compatibility player remain unavailable.
 
-You can opt in to a streaming server from Settings on the watch. TemuStremio
+You can opt in to a streaming server from Settings on the watch. Bunny
 accepts an HTTPS endpoint, or HTTP only for localhost/private-network hosts. It
 rejects public HTTP, embedded credentials, query tokens, and fragments in the
 server URL. For torrent sources, the watch asks that server to resolve the
@@ -126,7 +126,7 @@ AVPlayer after conversion to HLS.
 | VLC, FFmpeg, KSPlayer, Bunny decoders | Platform/product limit | Those desktop/mobile compatibility stacks are not watchOS products. The watch uses AVPlayer or an authorized HLS server and reports unsupported codecs/containers. |
 | PGS, ASS, VobSub custom rendering | Platform/product limit | Depends on the excluded custom decoder/rendering stacks. Embedded AVPlayer captions remain available. |
 | PiP, orientation lock, pinch-to-fill, brightness gestures | Not applicable on watchOS | These phone/TV presentation controls have no useful watch analogue; the Digital Crown and large tap targets replace them. |
-| DRM bypass and external-app-only streams | Unsupported | TemuStremio does not bypass DRM or another service's access rules, and the standalone watch player cannot delegate playback to an iPhone app. |
+| DRM bypass and external-app-only streams | Unsupported | Bunny does not bypass DRM or another service's access rules, and the standalone watch player cannot delegate playback to an iPhone app. |
 
 ## Deterministic simulator playback capture
 
@@ -141,7 +141,7 @@ WATCH_DEMO_HLS_URL='https://example.test/demo/master.m3u8'
 xcrun simctl install booted /absolute/path/to/TemuStremioWatch.app
 SIMCTL_CHILD_TEMUSTREMIO_WATCH_DEMO=1 \
 SIMCTL_CHILD_TEMUSTREMIO_WATCH_DEMO_STREAM_URL="$WATCH_DEMO_HLS_URL" \
-SIMCTL_CHILD_TEMUSTREMIO_WATCH_DEMO_TITLE='TemuStremio Watch Playback' \
+SIMCTL_CHILD_TEMUSTREMIO_WATCH_DEMO_TITLE='Bunny Watch Playback' \
 xcrun simctl launch --terminate-running-process booted local.stremio.skeleton.watch.watchkitapp
 ```
 
@@ -196,8 +196,8 @@ open StremioSkeleton.xcodeproj
 
 Before a device or store archive, set a unique public bundle identifier and a
 valid development team in `project.yml`. The root identifier and nested watch
-identifier must remain related, for example `com.example.temustremio.watch`
-and `com.example.temustremio.watch.watchkitapp`. Then select the
+identifier must remain related, for example `com.example.bunny.watch`
+and `com.example.bunny.watch.watchkitapp`. Then select the
 `TemuStremioWatchDistribution` scheme, choose a generic iOS device destination,
 and use Product > Archive. Organizer can validate and export/upload the
 resulting watch-only archive; the root stub never installs an app on iPhone.

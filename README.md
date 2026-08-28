@@ -1,10 +1,10 @@
-![TemuStremio banner](docs/assets/temustremio-banner.png)
+![Bunny banner](docs/assets/bunny-banner.png)
 
-# TemuStremio
+# Bunny
 
-TemuStremio is an unofficial SwiftUI client for Stremio accounts and add-ons.
-The iPhone and iPad build is installed as **Bunny**, so it can sit beside another
-Stremio app on the same device.
+Bunny is an unofficial SwiftUI client for Stremio accounts and add-ons. It uses
+its own app identity, so it can sit beside another Stremio client on the same
+device.
 
 Bunny includes catalogs, search, library sync, profiles, stream selection, and
 its own media player. It does not provide media or paid-service access. Use only
@@ -52,7 +52,7 @@ Player details and supported containers are in
 
 ## License and credits
 
-TemuStremio and Bunny are open source under the [MIT License](LICENSE).
+Bunny is open source under the [MIT License](LICENSE).
 
 Bunny is an independent client built to work with Stremio accounts and add-ons.
 Thank you to the Stremio maintainers and contributors for the ecosystem that
@@ -60,4 +60,4 @@ made this kind of client possible. No Stremio source code is included in Bunny.
 
 See the [third-party notices](THIRD_PARTY_NOTICES.md) for Stremio project
 credits, the Rust standard library license, and the optional backend licenses.
-TemuStremio and Bunny are not affiliated with or endorsed by Stremio or Temu.
+Bunny is not affiliated with or endorsed by Stremio.

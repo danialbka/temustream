@@ -358,7 +358,7 @@ struct WatchAccountView: View {
                 }
                 Label("Installed add-ons", systemImage: "shippingbox")
                 Label(WatchSessionStore.storageDescription, systemImage: "key.fill")
-                Text("Your password is submitted for sign-in and is never saved by TemuStremio.")
+                Text("Your password is submitted for sign-in and is never saved by Bunny.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 if model.viewingProfileSnapshot?.activeProfileAllowsAccountLibrarySync == false {
@@ -462,7 +462,7 @@ struct WatchStreamingServerView: View {
             Section("What It Does") {
                 Label("Resolves torrent sources", systemImage: "link")
                 Label("Converts incompatible video to HLS", systemImage: "arrow.triangle.2.circlepath")
-                Text("The server must be one you operate or are authorized to use. TemuStremio does not include a server or bypass service access rules.")
+                Text("The server must be one you operate or are authorized to use. Bunny does not include a server or bypass service access rules.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
