@@ -13,8 +13,8 @@ mod subtitles;
 
 pub use ebml::{CallbackSource, MediaError, ReadAt, SliceSource, SourceCallbacks};
 pub use matroska::{
-    Codec, ContainerSummary, CuePoint, MatroskaSession, MediaPacket, MediaTrack, PacketFlags,
-    TrackKind,
+    BlockAddition, BlockAdditionMapping, Codec, ContainerSummary, CuePoint, MasteringMetadata,
+    MatroskaSession, MediaPacket, MediaTrack, PacketFlags, TrackKind, VideoColorInfo,
 };
 pub use pgs::{
     CompositionState, PGS_CLOCK_HZ, PGS_SEGMENT_COMPOSITION, PGS_SEGMENT_END, PGS_SEGMENT_OBJECT,

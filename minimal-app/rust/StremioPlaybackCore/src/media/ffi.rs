@@ -12,6 +12,17 @@ use super::{
 };
 
 const ABI_VERSION: u32 = 1;
+const MEDIA_PACKET_ABI_VERSION: u32 = 3;
+
+const VIDEO_COLOR_MATRIX_PRESENT: u32 = 1 << 0;
+const VIDEO_COLOR_BITS_PER_CHANNEL_PRESENT: u32 = 1 << 1;
+const VIDEO_COLOR_RANGE_PRESENT: u32 = 1 << 2;
+const VIDEO_COLOR_TRANSFER_PRESENT: u32 = 1 << 3;
+const VIDEO_COLOR_PRIMARIES_PRESENT: u32 = 1 << 4;
+const VIDEO_COLOR_MAX_CLL_PRESENT: u32 = 1 << 5;
+const VIDEO_COLOR_MAX_FALL_PRESENT: u32 = 1 << 6;
+const VIDEO_COLOR_MASTERING_PRESENT: u32 = 1 << 7;
+const BLOCK_ADD_ID_TYPE_ITU_T_T35: u64 = 4;
 
 const TRACK_FLAG_DEFAULT: u32 = 1 << 0;
 const TRACK_FLAG_FORCED: u32 = 1 << 1;
@@ -50,14 +61,52 @@ pub struct StremioMediaTrackInfo {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
+pub struct StremioMediaVideoColorInfo {
+    pub abi_version: u32,
+    pub flags: u32,
+    pub matrix_coefficients: u32,
+    pub bits_per_channel: u32,
+    pub range: u32,
+    pub transfer_characteristics: u32,
+    pub primaries: u32,
+    pub max_cll: u32,
+    pub max_fall: u32,
+    pub primary_r_x: f64,
+    pub primary_r_y: f64,
+    pub primary_g_x: f64,
+    pub primary_g_y: f64,
+    pub primary_b_x: f64,
+    pub primary_b_y: f64,
+    pub white_point_x: f64,
+    pub white_point_y: f64,
+    pub luminance_max: f64,
+    pub luminance_min: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StremioMediaBlockAdditionMappingInfo {
+    pub abi_version: u32,
+    pub reserved: u32,
+    pub id_value: u64,
+    pub id_type: u64,
+    pub extra_data: *const u8,
+    pub extra_data_size: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct StremioMediaPacket {
     pub abi_version: u32,
     pub track_index: u32,
     pub presentation_time_ns: i64,
+    pub decode_time_ns: i64,
     pub duration_ns: u64,
     pub flags: u32,
     pub data: *const u8,
     pub data_size: usize,
+    pub hdr10_plus_data: *const u8,
+    pub hdr10_plus_data_size: usize,
 }
 
 pub struct StremioMediaSession {
@@ -237,6 +286,93 @@ fn track_info(track: &MediaTrack) -> StremioMediaTrackInfo {
     }
 }
 
+fn u32_saturated(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn video_color_info(track: &MediaTrack) -> StremioMediaVideoColorInfo {
+    let color = &track.video_color;
+    let mut info = StremioMediaVideoColorInfo {
+        abi_version: ABI_VERSION,
+        ..StremioMediaVideoColorInfo::default()
+    };
+    if let Some(value) = color.matrix_coefficients {
+        info.flags |= VIDEO_COLOR_MATRIX_PRESENT;
+        info.matrix_coefficients = u32_saturated(value);
+    }
+    if let Some(value) = color.bits_per_channel {
+        info.flags |= VIDEO_COLOR_BITS_PER_CHANNEL_PRESENT;
+        info.bits_per_channel = u32_saturated(value);
+    }
+    if let Some(value) = color.range {
+        info.flags |= VIDEO_COLOR_RANGE_PRESENT;
+        info.range = u32_saturated(value);
+    }
+    if let Some(value) = color.transfer_characteristics {
+        info.flags |= VIDEO_COLOR_TRANSFER_PRESENT;
+        info.transfer_characteristics = u32_saturated(value);
+    }
+    if let Some(value) = color.primaries {
+        info.flags |= VIDEO_COLOR_PRIMARIES_PRESENT;
+        info.primaries = u32_saturated(value);
+    }
+    if let Some(value) = color.max_cll {
+        info.flags |= VIDEO_COLOR_MAX_CLL_PRESENT;
+        info.max_cll = u32_saturated(value);
+    }
+    if let Some(value) = color.max_fall {
+        info.flags |= VIDEO_COLOR_MAX_FALL_PRESENT;
+        info.max_fall = u32_saturated(value);
+    }
+    if let Some(mastering) = color.mastering_metadata.as_ref()
+        && let (
+            Some(primary_r_x),
+            Some(primary_r_y),
+            Some(primary_g_x),
+            Some(primary_g_y),
+            Some(primary_b_x),
+            Some(primary_b_y),
+            Some(white_point_x),
+            Some(white_point_y),
+            Some(luminance_max),
+            Some(luminance_min),
+        ) = (
+            mastering.primary_r_x,
+            mastering.primary_r_y,
+            mastering.primary_g_x,
+            mastering.primary_g_y,
+            mastering.primary_b_x,
+            mastering.primary_b_y,
+            mastering.white_point_x,
+            mastering.white_point_y,
+            mastering.luminance_max,
+            mastering.luminance_min,
+        )
+    {
+        info.flags |= VIDEO_COLOR_MASTERING_PRESENT;
+        info.primary_r_x = primary_r_x;
+        info.primary_r_y = primary_r_y;
+        info.primary_g_x = primary_g_x;
+        info.primary_g_y = primary_g_y;
+        info.primary_b_x = primary_b_x;
+        info.primary_b_y = primary_b_y;
+        info.white_point_x = white_point_x;
+        info.white_point_y = white_point_y;
+        info.luminance_max = luminance_max;
+        info.luminance_min = luminance_min;
+    }
+    info
+}
+
+fn hdr10_plus_data<'a>(packet: &'a MediaPacket, track: &MediaTrack) -> Option<&'a [u8]> {
+    packet.block_additions.iter().find_map(|addition| {
+        let is_hdr10_plus = track.block_addition_mappings.iter().any(|mapping| {
+            mapping.id_value == addition.id && mapping.id_type == BLOCK_ADD_ID_TYPE_ITU_T_T35
+        });
+        is_hdr10_plus.then_some(addition.data.as_slice())
+    })
+}
+
 fn requested_kind(value: u32) -> Option<TrackKind> {
     match value {
         1 => Some(TrackKind::Video),
@@ -317,6 +453,79 @@ pub unsafe extern "C" fn stremio_media_track_info(
         return 0;
     };
     unsafe { output.write(track_info(track)) };
+    1
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stremio_media_track_video_color_info(
+    session: *const StremioMediaSession,
+    track_index: u32,
+    output: *mut StremioMediaVideoColorInfo,
+) -> i32 {
+    if session.is_null() || output.is_null() {
+        return 0;
+    }
+    // SAFETY: Pointers were checked and the ABI requires live storage.
+    let session = unsafe { &*session };
+    let Some(track) = session.session.tracks().get(track_index as usize) else {
+        return 0;
+    };
+    unsafe { output.write(video_color_info(track)) };
+    1
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stremio_media_track_block_addition_mapping_count(
+    session: *const StremioMediaSession,
+    track_index: u32,
+) -> u32 {
+    if session.is_null() {
+        return 0;
+    }
+    // SAFETY: Null was checked and the ABI requires a live session pointer.
+    let session = unsafe { &*session };
+    session
+        .session
+        .tracks()
+        .get(track_index as usize)
+        .map(|track| u32::try_from(track.block_addition_mappings.len()).unwrap_or(u32::MAX))
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stremio_media_track_block_addition_mapping_info(
+    session: *const StremioMediaSession,
+    track_index: u32,
+    mapping_index: u32,
+    output: *mut StremioMediaBlockAdditionMappingInfo,
+) -> i32 {
+    if session.is_null() || output.is_null() {
+        return 0;
+    }
+    // SAFETY: Pointers were checked and the ABI requires live storage.
+    let session = unsafe { &*session };
+    let Some(mapping) = session
+        .session
+        .tracks()
+        .get(track_index as usize)
+        .and_then(|track| track.block_addition_mappings.get(mapping_index as usize))
+    else {
+        return 0;
+    };
+    unsafe {
+        output.write(StremioMediaBlockAdditionMappingInfo {
+            abi_version: ABI_VERSION,
+            reserved: 0,
+            id_value: mapping.id_value,
+            id_type: mapping.id_type,
+            extra_data: if mapping.extra_data.is_empty() {
+                ptr::null()
+            } else {
+                mapping.extra_data.as_ptr()
+            },
+            extra_data_size: mapping.extra_data.len(),
+        })
+    };
     1
 }
 
@@ -430,6 +639,29 @@ pub unsafe extern "C" fn stremio_media_seek(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn stremio_media_rewind(
+    session: *mut StremioMediaSession,
+    error_message: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    if session.is_null() {
+        write_message(error_message, error_capacity, "media session is null");
+        return 0;
+    }
+    // SAFETY: Null was checked and the ABI requires exclusive access for this
+    // mutating call.
+    let session = unsafe { &mut *session };
+    session.last_packet = None;
+    match session.session.rewind() {
+        Ok(()) => 1,
+        Err(error) => {
+            write_message(error_message, error_capacity, &error.to_string());
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn stremio_media_prepare_seek_index(
     session: *mut StremioMediaSession,
     error_message: *mut c_char,
@@ -477,15 +709,23 @@ pub unsafe extern "C" fn stremio_media_next_packet(
                 .last_packet
                 .as_ref()
                 .expect("packet was just stored");
+            let hdr10_plus = session
+                .session
+                .tracks()
+                .get(packet.track_index as usize)
+                .and_then(|track| hdr10_plus_data(packet, track));
             unsafe {
                 output.write(StremioMediaPacket {
-                    abi_version: ABI_VERSION,
+                    abi_version: MEDIA_PACKET_ABI_VERSION,
                     track_index: packet.track_index,
                     presentation_time_ns: packet.timestamp_ns,
+                    decode_time_ns: packet.decode_timestamp_ns,
                     duration_ns: packet.duration_ns,
                     flags: packet.flags.0,
                     data: packet.payload.as_ptr(),
                     data_size: packet.payload.len(),
+                    hdr10_plus_data: hdr10_plus.map_or(ptr::null(), <[u8]>::as_ptr),
+                    hdr10_plus_data_size: hdr10_plus.map_or(0, <[u8]>::len),
                 })
             };
             1

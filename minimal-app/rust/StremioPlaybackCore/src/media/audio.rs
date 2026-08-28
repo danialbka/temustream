@@ -273,12 +273,12 @@ mod tests {
 
     #[test]
     fn derives_aac_access_unit_sample_frames() {
-        assert_eq!(compressed_audio_sample_frames(Codec::Aac, &[0x12]), Some(1_024));
         assert_eq!(
-            compressed_audio_sample_frames(
-                Codec::Aac,
-                &[0xff, 0xf1, 0x50, 0x80, 0x00, 0x1f, 0x02]
-            ),
+            compressed_audio_sample_frames(Codec::Aac, &[0x12]),
+            Some(1_024)
+        );
+        assert_eq!(
+            compressed_audio_sample_frames(Codec::Aac, &[0xff, 0xf1, 0x50, 0x80, 0x00, 0x1f, 0x02]),
             Some(3_072)
         );
         assert_eq!(compressed_audio_sample_frames(Codec::Aac, &[]), None);
@@ -286,13 +286,22 @@ mod tests {
 
     #[test]
     fn derives_opus_packet_sample_frames_and_rejects_oversized_packets() {
-        assert_eq!(compressed_audio_sample_frames(Codec::Opus, &[0x80]), Some(120));
-        assert_eq!(compressed_audio_sample_frames(Codec::Opus, &[0x98]), Some(960));
+        assert_eq!(
+            compressed_audio_sample_frames(Codec::Opus, &[0x80]),
+            Some(120)
+        );
+        assert_eq!(
+            compressed_audio_sample_frames(Codec::Opus, &[0x98]),
+            Some(960)
+        );
         assert_eq!(
             compressed_audio_sample_frames(Codec::Opus, &[0x83, 0x30]),
             Some(5_760)
         );
-        assert_eq!(compressed_audio_sample_frames(Codec::Opus, &[0x83, 0x31]), None);
+        assert_eq!(
+            compressed_audio_sample_frames(Codec::Opus, &[0x83, 0x31]),
+            None
+        );
     }
 
     #[test]

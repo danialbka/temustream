@@ -781,6 +781,85 @@ final class AppModel: ObservableObject {
         errorMessage = nil
     }
 
+    /// Network-free Home fixture for distinguishing Continue Watching's tap
+    /// and long-press navigation in the UI test target.
+    func prepareContinueWatchingNavigationFixture() {
+        let episode = Video(
+            id: "tt-continue-series:1:2",
+            title: "The Return",
+            season: 1,
+            episode: 2
+        )
+        let series = MetaItem(
+            id: "tt-continue-series",
+            type: "series",
+            name: "Continue Series",
+            description: "A deterministic Continue Watching series fixture.",
+            releaseInfo: "2026–",
+            videos: [episode]
+        )
+        let movie = MetaItem(
+            id: "tt-continue-movie",
+            type: "movie",
+            name: "Continue Movie",
+            description: "A deterministic Continue Watching movie fixture.",
+            releaseInfo: "2026"
+        )
+        let stream = Stream(
+            url: URL(string: "https://example.invalid/continue-watching.mkv"),
+            externalUrl: nil,
+            name: "Continue Watching fixture",
+            title: "1080p · Fixture",
+            description: nil,
+            infoHash: nil,
+            fileIdx: nil,
+            sources: nil
+        )
+        let seriesIdentifier = EpisodePlaybackIdentity.contentIdentifier(
+            seriesID: series.id,
+            videoID: episode.id
+        )
+        let seriesProgress = PlaybackProgress(
+            contentIdentifier: seriesIdentifier,
+            contentTitle: EpisodePlaybackIdentity.contentTitle(
+                seriesTitle: series.name,
+                video: episode
+            ),
+            stream: stream,
+            providerName: "Fixture",
+            position: 1_200,
+            duration: 3_600,
+            updatedAt: Date(timeIntervalSince1970: 2),
+            mediaMetadata: .episode(series: series, episode: episode)
+        )
+        let movieProgress = PlaybackProgress(
+            contentIdentifier: "movie:\(movie.id)",
+            contentTitle: movie.name,
+            stream: stream,
+            providerName: "Fixture",
+            position: 900,
+            duration: 5_400,
+            updatedAt: Date(timeIntervalSince1970: 1),
+            mediaMetadata: .movie(movie)
+        )
+
+        catalog = [series, movie]
+        homeShelves = [
+            DiscoveryShelf(
+                id: "continue-watching-fixture",
+                title: "Fixture Titles",
+                items: [series, movie]
+            ),
+        ]
+        playbackProgress = [
+            seriesProgress.contentIdentifier: seriesProgress,
+            movieProgress.contentIdentifier: movieProgress,
+        ]
+        currentPlaybackProgress = playbackProgress
+        isLoading = false
+        errorMessage = nil
+    }
+
     /// Reproduces details-page pressure from a long infinite-scroll session
     /// without depending on a live catalog or provider.
     func prepareDetailsPerformanceFixture(candidateCount: Int = 5_000) {

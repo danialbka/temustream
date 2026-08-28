@@ -175,6 +175,8 @@ private struct ViewingProfileSheet: View {
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @State private var showsProfiles = false
+    @State private var continueWatchingResumeEntry: ContinueWatchingEntry?
+    @State private var continueWatchingDetailsItem: MetaItem?
 
     var body: some View {
         GeometryReader { viewport in
@@ -200,6 +202,16 @@ struct HomeView: View {
         }
         .navigationBarHidden(true)
         .navigationDestination(for: MetaItem.self) { DetailsView(seed: $0) }
+        .navigationDestination(isPresented: continueWatchingResumePresented) {
+            if let entry = continueWatchingResumeEntry {
+                ContinueWatchingDestination(entry: entry)
+            }
+        }
+        .navigationDestination(isPresented: continueWatchingDetailsPresented) {
+            if let item = continueWatchingDetailsItem {
+                DetailsView(seed: item)
+            }
+        }
         .sheet(isPresented: $showsProfiles) { ViewingProfileSheet() }
         .refreshable {
             try? await model.loadHome()
@@ -286,19 +298,64 @@ struct HomeView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 12) {
                     ForEach(model.continueWatching) { entry in
-                        NavigationLink {
-                            ContinueWatchingDestination(entry: entry)
-                        } label: {
-                            ContinueWatchingCard(entry: entry)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("continue-watching-\(entry.id)")
+                        ContinueWatchingCard(entry: entry)
+                            .gesture(continueWatchingGesture(for: entry))
+                            .accessibilityAction(named: Text("Resume playback")) {
+                                resumeContinueWatching(entry)
+                            }
+                            .accessibilityAction(named: Text("View details")) {
+                                showContinueWatchingDetails(entry)
+                            }
+                            .accessibilityIdentifier("continue-watching-\(entry.id)")
                     }
                 }
                 .padding(.horizontal, 16)
             }
         }
         .accessibilityIdentifier("continue-watching-row")
+    }
+
+    private var continueWatchingResumePresented: Binding<Bool> {
+        Binding(
+            get: { continueWatchingResumeEntry != nil },
+            set: { isPresented in
+                if !isPresented { continueWatchingResumeEntry = nil }
+            }
+        )
+    }
+
+    private var continueWatchingDetailsPresented: Binding<Bool> {
+        Binding(
+            get: { continueWatchingDetailsItem != nil },
+            set: { isPresented in
+                if !isPresented { continueWatchingDetailsItem = nil }
+            }
+        )
+    }
+
+    private func continueWatchingGesture(
+        for entry: ContinueWatchingEntry
+    ) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.5, maximumDistance: 18)
+            .exclusively(before: TapGesture())
+            .onEnded { result in
+                switch result {
+                case .first:
+                    showContinueWatchingDetails(entry)
+                case .second:
+                    resumeContinueWatching(entry)
+                }
+            }
+    }
+
+    private func resumeContinueWatching(_ entry: ContinueWatchingEntry) {
+        continueWatchingDetailsItem = nil
+        continueWatchingResumeEntry = entry
+    }
+
+    private func showContinueWatchingDetails(_ entry: ContinueWatchingEntry) {
+        continueWatchingResumeEntry = nil
+        continueWatchingDetailsItem = entry.item
     }
 
     private var presentedShelves: [DiscoveryShelf] {
@@ -681,7 +738,7 @@ private struct ContinueWatchingCard: View {
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
-        .accessibilityHint("Resumes playback")
+        .accessibilityHint("Tap to resume. Long press to view details.")
     }
 
     @ViewBuilder

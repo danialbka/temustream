@@ -38,6 +38,23 @@ if [ ! -f "$FIXTURES/stress-av1-flac.mkv" ]; then
     -t 45 -c:v libsvtav1 -preset 11 -crf 42 -pix_fmt yuv420p \
     -c:a flac "$FIXTURES/stress-av1-flac.mkv"
 fi
+if [ ! -f "$FIXTURES/stress-h264-aac.mkv" ]; then
+  # Exercise Bunny's production Matroska path with a film-rate cadence and
+  # reordered B-frames. MP4/HLS belong to AVPlayer and are intentionally not
+  # fed into the Rust EBML demuxer by this benchmark.
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i 'testsrc2=size=1280x720:rate=24000/1001' \
+    -f lavfi -i 'sine=frequency=520:sample_rate=48000' \
+    -t 60 -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p \
+    -g 48 -bf 3 -c:a aac -b:a 192k "$FIXTURES/stress-h264-aac.mkv"
+fi
+if [ ! -f "$FIXTURES/stress-h264-aac-no-bframes.mkv" ]; then
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i 'testsrc2=size=1280x720:rate=24000/1001' \
+    -f lavfi -i 'sine=frequency=520:sample_rate=48000' \
+    -t 60 -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p \
+    -g 48 -bf 0 -c:a aac -b:a 192k "$FIXTURES/stress-h264-aac-no-bframes.mkv"
+fi
 if [ ! -f "$FIXTURES/stress-audio.m4a" ]; then
   ffmpeg -hide_banner -loglevel error -y \
     -f lavfi -i 'sine=frequency=880:sample_rate=48000' \
@@ -47,61 +64,66 @@ fi
 python3 "$ROOT_DIR/scripts/range_server.py" "$PORT" "$FIXTURES" >/dev/null 2>&1 &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT INT TERM
+sleep 0.2
+if ! kill -0 "$SERVER_PID" 2>/dev/null \
+  || ! curl --fail --silent --show-error --max-time 3 \
+    "http://127.0.0.1:$PORT/heartbeat" >/dev/null; then
+  echo "Player stress server could not start on port $PORT" >&2
+  echo "Set SKELETON_PLAYER_STRESS_PORT to an unused local port and retry." >&2
+  exit 1
+fi
 
 "$ROOT_DIR/scripts/build-simulator.sh"
 xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
 xcrun simctl install "$DEVICE_ID" "$APP_DIR"
+DATA_DIR="$(xcrun simctl get_app_container "$DEVICE_ID" "$BUNDLE_ID" data)"
+ARTIFACT="$DATA_DIR/Documents/player-stress-result.json"
 : > "$RESULTS"
 
 for CASE in \
-  'direct-native|stress.mp4' \
-  'hls-native|stress-ts.m3u8' \
-  'mkv-av1-flac|stress-av1-flac.mkv' \
-  'audio-aac|stress-audio.m4a'
+  'mkv-h264-aac-film-cadence|stress-h264-aac.mkv' \
+  'mkv-h264-aac-no-bframes|stress-h264-aac-no-bframes.mkv'
 do
   LABEL="${CASE%%|*}"
   FILE="${CASE#*|}"
+  if [ -n "${SKELETON_PLAYER_STRESS_CASE:-}" ] \
+    && [ "$LABEL" != "$SKELETON_PLAYER_STRESS_CASE" ]; then
+    continue
+  fi
   xcrun simctl terminate "$DEVICE_ID" "$BUNDLE_ID" 2>/dev/null || true
+  rm -f "$ARTIFACT"
   LAUNCH="$(
     SIMCTL_CHILD_SKELETON_PLAYER_STRESS_URL="http://127.0.0.1:$PORT/$FILE" \
     SIMCTL_CHILD_SKELETON_PLAYER_STRESS_BENCHMARK=1 \
+    SIMCTL_CHILD_SKELETON_PLAYER_STRESS_VISIBLE=1 \
+    SIMCTL_CHILD_SKELETON_PLAYER_STRESS_CADENCE_ONLY=1 \
     xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID"
   )"
   PID="${LAUNCH##*: }"
   echo "Stress testing $LABEL (pid $PID)"
 
   ATTEMPT=0
-  RESULT=""
-  FAILED_RESULT=""
-  while [ "$ATTEMPT" -lt 100 ]; do
-    LOGS="$(xcrun simctl spawn "$DEVICE_ID" log show --last 3m --style compact \
-      --predicate "processIdentifier == $PID AND eventMessage CONTAINS \"PLAYER_STRESS\"" \
-      2>/dev/null || true)"
-    RESULT="$(printf '%s\n' "$LOGS" | sed -n 's/.*PLAYER_STRESS PASS //p' | tail -1)"
-    if [ -n "$RESULT" ]; then break; fi
-    FAILED_RESULT="$(printf '%s\n' "$LOGS" | sed -n 's/.*PLAYER_STRESS FAIL //p' | tail -1)"
-    if [ -n "$FAILED_RESULT" ]; then break; fi
+  while [ "$ATTEMPT" -lt 100 ] && [ ! -s "$ARTIFACT" ]; do
     if ! kill -0 "$PID" 2>/dev/null; then break; fi
     ATTEMPT=$((ATTEMPT + 1))
     sleep 1
   done
-  if [ -n "$RESULT" ]; then
-    printf '%s\n' "$RESULT" | jq -c --arg case "$LABEL" '. + {case: $case}' >> "$RESULTS"
-  elif [ -n "$FAILED_RESULT" ]; then
-    if printf '%s\n' "$FAILED_RESULT" | jq -e . >/dev/null 2>&1; then
-      printf '%s\n' "$FAILED_RESULT" | jq -c --arg case "$LABEL" \
-        '. + {case: $case, error: "Strict player thresholds failed"}' >> "$RESULTS"
-    else
-      jq -nc --arg case "$LABEL" --arg error "$FAILED_RESULT" \
-        '{case: $case, error: $error}' >> "$RESULTS"
-    fi
+  if [ -s "$ARTIFACT" ] && jq -e . "$ARTIFACT" >/dev/null 2>&1; then
+    jq -c --arg case "$LABEL" '
+      if .metrics then
+        .metrics + {case: $case}
+          + (if .passed then {} else {error: "Strict player thresholds failed"} end)
+      else
+        {case: $case, error: (.error // "Player stress failed")}
+      end
+    ' "$ARTIFACT" >> "$RESULTS"
   else
-    jq -nc --arg case "$LABEL" --arg error "Stress test failed or terminated" \
+    jq -nc --arg case "$LABEL" --arg error "Stress result artifact was not produced" \
       '{case: $case, error: $error}' >> "$RESULTS"
   fi
 done
 
 jq -s '{generatedAt: (now | todateiso8601), tests: ., passed: (map(has("error") | not) | all)}' \
   "$RESULTS" > "$REPORT"
-jq '{passed, tests: [.tests[] | {case,startupMilliseconds,seekMedianMilliseconds,seekP95Milliseconds,successfulSeeks,seekAttempts,successfulPauseResumes,pauseResumeAttempts,videoUnderflowIntervals,videoQueueStateTransitions,droppedVideoFrames,realTimeRatio,renderedVideoFrame,error}]}' "$REPORT"
+jq '{passed, tests: [.tests[] | {case,startupMilliseconds,seekMedianMilliseconds,seekP95Milliseconds,successfulSeeks,seekAttempts,successfulPauseResumes,pauseResumeAttempts,videoUnderflowIntervals,videoQueueStateTransitions,enqueuedVideoFPS,presentedVideoFPS,droppedVideoFrames,corruptedVideoFrames,averageFrameDelayMilliseconds,sourcePTSP95Milliseconds,sourcePTSBackwardTransitions,displayRefreshHz,displayP95IntervalMilliseconds,displayMissedRefreshes,realTimeRatio,renderedVideoFrame,error}]}' "$REPORT"
 test "$(jq -r '.passed' "$REPORT")" = true

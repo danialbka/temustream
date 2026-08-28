@@ -2,7 +2,8 @@ use std::collections::{HashSet, VecDeque};
 
 use super::ebml::{
     ElementHeader, MAX_METADATA_ELEMENT_LENGTH, MediaError, ReadAt, parse_id, parse_signed_vint,
-    parse_vint_value, read_bytes, read_float, read_header, read_string, read_uint,
+    parse_vint_value, read_bytes, read_child_header, read_float, read_header, read_string,
+    read_uint,
 };
 
 const ID_EBML: u64 = 0x1a45dfa3;
@@ -49,11 +50,35 @@ const ID_CODEC_DELAY: u64 = 0x56aa;
 const ID_SEEK_PRE_ROLL: u64 = 0x56bb;
 const ID_VIDEO: u64 = 0xe0;
 const ID_AUDIO: u64 = 0xe1;
+const ID_BLOCK_ADDITION_MAPPING: u64 = 0x41e4;
+const ID_BLOCK_ADD_ID_VALUE: u64 = 0x41f0;
+const ID_BLOCK_ADD_ID_NAME: u64 = 0x41a4;
+const ID_BLOCK_ADD_ID_TYPE: u64 = 0x41e7;
+const ID_BLOCK_ADD_ID_EXTRA_DATA: u64 = 0x41ed;
 const ID_PIXEL_WIDTH: u64 = 0xb0;
 const ID_PIXEL_HEIGHT: u64 = 0xba;
 const ID_DISPLAY_WIDTH: u64 = 0x54b0;
 const ID_DISPLAY_HEIGHT: u64 = 0x54ba;
 const ID_FRAME_RATE: u64 = 0x2383e3;
+const ID_COLOUR: u64 = 0x55b0;
+const ID_MATRIX_COEFFICIENTS: u64 = 0x55b1;
+const ID_BITS_PER_CHANNEL: u64 = 0x55b2;
+const ID_RANGE: u64 = 0x55b9;
+const ID_TRANSFER_CHARACTERISTICS: u64 = 0x55ba;
+const ID_PRIMARIES: u64 = 0x55bb;
+const ID_MAX_CLL: u64 = 0x55bc;
+const ID_MAX_FALL: u64 = 0x55bd;
+const ID_MASTERING_METADATA: u64 = 0x55d0;
+const ID_PRIMARY_R_CHROMATICITY_X: u64 = 0x55d1;
+const ID_PRIMARY_R_CHROMATICITY_Y: u64 = 0x55d2;
+const ID_PRIMARY_G_CHROMATICITY_X: u64 = 0x55d3;
+const ID_PRIMARY_G_CHROMATICITY_Y: u64 = 0x55d4;
+const ID_PRIMARY_B_CHROMATICITY_X: u64 = 0x55d5;
+const ID_PRIMARY_B_CHROMATICITY_Y: u64 = 0x55d6;
+const ID_WHITE_POINT_CHROMATICITY_X: u64 = 0x55d7;
+const ID_WHITE_POINT_CHROMATICITY_Y: u64 = 0x55d8;
+const ID_LUMINANCE_MAX: u64 = 0x55d9;
+const ID_LUMINANCE_MIN: u64 = 0x55da;
 const ID_SAMPLING_FREQUENCY: u64 = 0xb5;
 const ID_OUTPUT_SAMPLING_FREQUENCY: u64 = 0x78b5;
 const ID_CHANNELS: u64 = 0x9f;
@@ -75,6 +100,10 @@ const ID_BLOCK: u64 = 0xa1;
 const ID_BLOCK_DURATION: u64 = 0x9b;
 const ID_REFERENCE_BLOCK: u64 = 0xfb;
 const ID_DISCARD_PADDING: u64 = 0x75a2;
+const ID_BLOCK_ADDITIONS: u64 = 0x75a1;
+const ID_BLOCK_MORE: u64 = 0xa6;
+const ID_BLOCK_ADD_ID: u64 = 0xee;
+const ID_BLOCK_ADDITIONAL: u64 = 0xa5;
 
 const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 const MAX_BLOCK_ELEMENT_LENGTH: u64 = 16 * 1024 * 1024;
@@ -86,6 +115,9 @@ const MAX_CLUSTERS: usize = 250_000;
 const MAX_SEGMENT_ELEMENTS: usize = 500_000;
 const MAX_UNKNOWN_CLUSTER_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AGGREGATE_TRACK_METADATA_BYTES: usize = 32 * 1024 * 1024;
+const MAX_BLOCK_ADDITION_MAPPINGS: usize = 64;
+const MAX_BLOCK_ADDITIONS: usize = 64;
+const MAX_BLOCK_ADDITIONAL_METADATA_LENGTH: u64 = 64 * 1024;
 const MAX_VIDEO_DIMENSION: u64 = 16_384;
 const MAX_VIDEO_FRAME_RATE: f64 = 1_000.0;
 const MAX_AUDIO_CHANNELS: u64 = 32;
@@ -204,6 +236,46 @@ pub struct ContainerSummary {
     pub cluster_count: u32,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MasteringMetadata {
+    pub primary_r_x: Option<f64>,
+    pub primary_r_y: Option<f64>,
+    pub primary_g_x: Option<f64>,
+    pub primary_g_y: Option<f64>,
+    pub primary_b_x: Option<f64>,
+    pub primary_b_y: Option<f64>,
+    pub white_point_x: Option<f64>,
+    pub white_point_y: Option<f64>,
+    pub luminance_max: Option<f64>,
+    pub luminance_min: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VideoColorInfo {
+    pub matrix_coefficients: Option<u64>,
+    pub bits_per_channel: Option<u64>,
+    pub range: Option<u64>,
+    pub transfer_characteristics: Option<u64>,
+    pub primaries: Option<u64>,
+    pub max_cll: Option<u64>,
+    pub max_fall: Option<u64>,
+    pub mastering_metadata: Option<MasteringMetadata>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockAdditionMapping {
+    pub id_value: u64,
+    pub id_name: String,
+    pub id_type: u64,
+    pub extra_data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockAddition {
+    pub id: u64,
+    pub data: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MediaTrack {
     pub index: u32,
@@ -229,6 +301,8 @@ pub struct MediaTrack {
     pub display_width: u64,
     pub display_height: u64,
     pub frame_rate: f64,
+    pub video_color: VideoColorInfo,
+    pub block_addition_mappings: Vec<BlockAdditionMapping>,
     pub sampling_frequency: f64,
     pub output_sampling_frequency: f64,
     pub channels: u64,
@@ -250,10 +324,12 @@ pub struct MediaPacket {
     pub track_index: u32,
     pub track_number: u64,
     pub timestamp_ns: i64,
+    pub decode_timestamp_ns: i64,
     pub duration_ns: u64,
     pub discard_padding_ns: i64,
     pub flags: PacketFlags,
     pub payload: Vec<u8>,
+    pub block_additions: Vec<BlockAddition>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -297,6 +373,8 @@ struct TrackBuilder {
     display_width: u64,
     display_height: u64,
     frame_rate: f64,
+    video_color: VideoColorInfo,
+    block_addition_mappings: Vec<BlockAdditionMapping>,
     sampling_frequency: f64,
     output_sampling_frequency: f64,
     channels: u64,
@@ -327,6 +405,8 @@ impl Default for TrackBuilder {
             display_width: 0,
             display_height: 0,
             frame_rate: 0.0,
+            video_color: VideoColorInfo::default(),
+            block_addition_mappings: Vec::new(),
             sampling_frequency: 8_000.0,
             output_sampling_frequency: 0.0,
             channels: 1,
@@ -419,6 +499,8 @@ impl TrackBuilder {
             display_width: self.display_width,
             display_height: self.display_height,
             frame_rate: self.frame_rate,
+            video_color: self.video_color,
+            block_addition_mappings: self.block_addition_mappings,
             sampling_frequency: self.sampling_frequency,
             output_sampling_frequency: self.output_sampling_frequency,
             channels: self.channels,
@@ -449,6 +531,7 @@ pub struct MatroskaSession {
     cluster_index: usize,
     cluster_cursor: u64,
     pending_packets: VecDeque<MediaPacket>,
+    next_decode_timestamps_ns: Vec<Option<i64>>,
 }
 
 impl MatroskaSession {
@@ -478,7 +561,9 @@ impl MatroskaSession {
             if cursor >= source_length {
                 return Err(MediaError::InvalidData("segment element is missing"));
             }
-            let header = read_header(source.as_mut(), cursor)?;
+            let Some(header) = read_child_header(source.as_mut(), cursor, source_length)? else {
+                return Err(MediaError::InvalidData("segment element is missing"));
+            };
             if header.id == ID_SEGMENT {
                 break header;
             }
@@ -511,7 +596,9 @@ impl MatroskaSession {
             if segment_element_count > MAX_SEGMENT_ELEMENTS {
                 return Err(MediaError::ElementTooLarge);
             }
-            let header = read_header(source.as_mut(), cursor)?;
+            let Some(header) = read_child_header(source.as_mut(), cursor, segment_end)? else {
+                break;
+            };
             match header.id {
                 ID_SEEK_HEAD => {
                     let end = element_end(header, segment_end)?;
@@ -595,6 +682,12 @@ impl MatroskaSession {
                 .and_then(|value| value.checked_add(track.language.len()))
                 .and_then(|value| value.checked_add(track.codec_private.len()))
                 .ok_or(MediaError::ArithmeticOverflow)?;
+            for mapping in &track.block_addition_mappings {
+                aggregate_track_metadata_bytes = aggregate_track_metadata_bytes
+                    .checked_add(mapping.id_name.len())
+                    .and_then(|value| value.checked_add(mapping.extra_data.len()))
+                    .ok_or(MediaError::ArithmeticOverflow)?;
+            }
             if aggregate_track_metadata_bytes > MAX_AGGREGATE_TRACK_METADATA_BYTES {
                 return Err(MediaError::ElementTooLarge);
             }
@@ -616,6 +709,7 @@ impl MatroskaSession {
         summary.cue_count = saturating_u32(cues.len());
         summary.cluster_count = saturating_u32(clusters.len());
         let selected_tracks = tracks.iter().map(|track| track.enabled).collect();
+        let next_decode_timestamps_ns = vec![None; tracks.len()];
         let cluster_cursor = clusters
             .first()
             .map_or(segment_end, |cluster| cluster.data_offset);
@@ -634,6 +728,7 @@ impl MatroskaSession {
             cluster_index: 0,
             cluster_cursor,
             pending_packets: VecDeque::new(),
+            next_decode_timestamps_ns,
         })
     }
 
@@ -659,6 +754,9 @@ impl MatroskaSession {
             .get_mut(index)
             .ok_or(MediaError::InvalidData("track index is out of range"))?;
         *value = selected;
+        if let Some(decode_timestamp) = self.next_decode_timestamps_ns.get_mut(index) {
+            *decode_timestamp = None;
+        }
         self.pending_packets.clear();
         Ok(())
     }
@@ -673,6 +771,7 @@ impl MatroskaSession {
         for (track_index, track) in self.tracks.iter().enumerate() {
             if track.kind == kind {
                 self.selected_tracks[track_index] = track_index == index;
+                self.next_decode_timestamps_ns[track_index] = None;
             }
         }
         self.pending_packets.clear();
@@ -683,6 +782,7 @@ impl MatroskaSession {
         for (index, track) in self.tracks.iter().enumerate() {
             if track.kind == kind {
                 self.selected_tracks[index] = selected;
+                self.next_decode_timestamps_ns[index] = None;
             }
         }
         self.pending_packets.clear();
@@ -690,7 +790,8 @@ impl MatroskaSession {
 
     pub fn next_packet(&mut self) -> Result<Option<MediaPacket>, MediaError> {
         loop {
-            if let Some(packet) = self.pending_packets.pop_front() {
+            if let Some(mut packet) = self.pending_packets.pop_front() {
+                self.assign_decode_timestamp(&mut packet)?;
                 return Ok(Some(packet));
             }
             let Some(cluster) = self.clusters.get(self.cluster_index).copied() else {
@@ -706,7 +807,12 @@ impl MatroskaSession {
                 continue;
             }
 
-            let header = read_header(self.source.as_mut(), self.cluster_cursor)?;
+            let Some(header) =
+                read_child_header(self.source.as_mut(), self.cluster_cursor, cluster.end)?
+            else {
+                self.cluster_cursor = cluster.end;
+                continue;
+            };
             let end = element_end(header, cluster.end)?;
             self.cluster_cursor = end;
             match header.id {
@@ -722,6 +828,7 @@ impl MatroskaSession {
                         None,
                         0,
                         true,
+                        &[],
                     )?;
                     self.pending_packets.extend(packets);
                 }
@@ -818,6 +925,22 @@ impl MatroskaSession {
         self.cluster_index = selected_index;
         self.cluster_cursor = self.clusters[selected_index].data_offset;
         self.pending_packets.clear();
+        self.reset_decode_timestamps();
+        Ok(())
+    }
+
+    /// Returns packet iteration to the first indexed cluster without loading
+    /// deferred Cues. Startup format recovery uses this after inspecting the
+    /// first random-access packet on very large remote files.
+    pub fn rewind(&mut self) -> Result<(), MediaError> {
+        let first = self
+            .clusters
+            .first()
+            .ok_or(MediaError::InvalidData("media has no clusters"))?;
+        self.cluster_index = 0;
+        self.cluster_cursor = first.data_offset;
+        self.pending_packets.clear();
+        self.reset_decode_timestamps();
         Ok(())
     }
 
@@ -844,7 +967,44 @@ impl MatroskaSession {
             cluster.data_offset
         };
         self.pending_packets.clear();
+        self.reset_decode_timestamps();
         Ok(())
+    }
+
+    /// Matroska stores block timestamps as presentation timestamps while
+    /// blocks themselves are ordered for decoding. AVFoundation needs both
+    /// values for compressed video with B-frame reordering; treating PTS as
+    /// DTS makes the renderer drop every frame whose presentation time moves
+    /// backwards in decode order.
+    fn assign_decode_timestamp(&mut self, packet: &mut MediaPacket) -> Result<(), MediaError> {
+        let track_index =
+            usize::try_from(packet.track_index).map_err(|_| MediaError::ArithmeticOverflow)?;
+        let track = self.tracks.get(track_index).ok_or(MediaError::InvalidData(
+            "packet track index is out of range",
+        ))?;
+        if track.kind != TrackKind::Video {
+            packet.decode_timestamp_ns = packet.timestamp_ns;
+            return Ok(());
+        }
+        let duration_ns = if packet.duration_ns > 0 {
+            packet.duration_ns
+        } else {
+            track.default_duration_ns.max(1)
+        };
+        let duration_ns = i64::try_from(duration_ns).map_err(|_| MediaError::ArithmeticOverflow)?;
+        let decode_timestamp =
+            self.next_decode_timestamps_ns[track_index].unwrap_or(packet.timestamp_ns);
+        packet.decode_timestamp_ns = decode_timestamp;
+        self.next_decode_timestamps_ns[track_index] = Some(
+            decode_timestamp
+                .checked_add(duration_ns)
+                .ok_or(MediaError::ArithmeticOverflow)?,
+        );
+        Ok(())
+    }
+
+    fn reset_decode_timestamps(&mut self) {
+        self.next_decode_timestamps_ns.fill(None);
     }
 
     fn load_deferred_cues(&mut self) -> Result<(), MediaError> {
@@ -919,7 +1079,15 @@ impl MatroskaSession {
 
     fn discover_next_cluster(&mut self) -> Result<bool, MediaError> {
         while self.next_segment_offset < self.segment_end {
-            let header = read_header(self.source.as_mut(), self.next_segment_offset)?;
+            let Some(header) = read_child_header(
+                self.source.as_mut(),
+                self.next_segment_offset,
+                self.segment_end,
+            )?
+            else {
+                self.next_segment_offset = self.segment_end;
+                break;
+            };
             match header.id {
                 ID_CLUSTER => {
                     if self.clusters.len() >= MAX_CLUSTERS {
@@ -983,7 +1151,9 @@ fn parse_ebml_header(source: &mut dyn ReadAt) -> Result<(ContainerSummary, u64),
     };
     let mut cursor = header.data_offset;
     while cursor < end {
-        let child = read_header(source, cursor)?;
+        let Some(child) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(child, end)?;
         match child.id {
             ID_DOC_TYPE => summary.document_type = read_string(source, child)?.to_ascii_lowercase(),
@@ -1010,7 +1180,9 @@ fn parse_info(
 ) -> Result<(), MediaError> {
     let mut cursor = start;
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         match header.id {
             ID_TIMESTAMP_SCALE => summary.timestamp_scale_ns = read_uint(source, header)?,
@@ -1033,7 +1205,9 @@ fn parse_seek_head(
 ) -> Result<(), MediaError> {
     let mut cursor = start;
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         if header.id == ID_SEEK {
             if let Some((target_id, position)) =
@@ -1061,7 +1235,9 @@ fn parse_seek_entry(
     let mut target_id = None;
     let mut position = None;
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         match header.id {
             ID_SEEK_ID => {
@@ -1094,7 +1270,9 @@ fn parse_tracks(
 ) -> Result<(), MediaError> {
     let mut cursor = start;
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         if header.id == ID_TRACK_ENTRY {
             if tracks.len() >= MAX_TRACKS {
@@ -1117,7 +1295,9 @@ fn parse_track_entry(
     let mut language_ietf = None;
     let mut cursor = start;
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         match header.id {
             ID_TRACK_NUMBER => track.number = read_uint(source, header)?,
@@ -1156,6 +1336,18 @@ fn parse_track_entry(
             ID_SEEK_PRE_ROLL => track.seek_pre_roll_ns = read_uint(source, header)?,
             ID_VIDEO => parse_video(source, header.data_offset, child_end, &mut track)?,
             ID_AUDIO => parse_audio(source, header.data_offset, child_end, &mut track)?,
+            ID_BLOCK_ADDITION_MAPPING => {
+                if track.block_addition_mappings.len() >= MAX_BLOCK_ADDITION_MAPPINGS {
+                    return Err(MediaError::ElementTooLarge);
+                }
+                track
+                    .block_addition_mappings
+                    .push(parse_block_addition_mapping(
+                        source,
+                        header.data_offset,
+                        child_end,
+                    )?);
+            }
             _ => {}
         }
         cursor = child_end;
@@ -1174,7 +1366,9 @@ fn parse_video(
 ) -> Result<(), MediaError> {
     let mut cursor = start;
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         match header.id {
             ID_PIXEL_WIDTH => track.pixel_width = read_uint(source, header)?,
@@ -1182,11 +1376,129 @@ fn parse_video(
             ID_DISPLAY_WIDTH => track.display_width = read_uint(source, header)?,
             ID_DISPLAY_HEIGHT => track.display_height = read_uint(source, header)?,
             ID_FRAME_RATE => track.frame_rate = read_float(source, header)?,
+            ID_COLOUR => {
+                track.video_color = parse_video_colour(source, header.data_offset, child_end)?;
+            }
             _ => {}
         }
         cursor = child_end;
     }
     Ok(())
+}
+
+fn parse_video_colour(
+    source: &mut dyn ReadAt,
+    start: u64,
+    end: u64,
+) -> Result<VideoColorInfo, MediaError> {
+    let mut colour = VideoColorInfo::default();
+    let mut cursor = start;
+    while cursor < end {
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
+        let child_end = element_end(header, end)?;
+        match header.id {
+            ID_MATRIX_COEFFICIENTS => {
+                colour.matrix_coefficients = Some(read_uint(source, header)?);
+            }
+            ID_BITS_PER_CHANNEL => colour.bits_per_channel = Some(read_uint(source, header)?),
+            ID_RANGE => colour.range = Some(read_uint(source, header)?),
+            ID_TRANSFER_CHARACTERISTICS => {
+                colour.transfer_characteristics = Some(read_uint(source, header)?);
+            }
+            ID_PRIMARIES => colour.primaries = Some(read_uint(source, header)?),
+            ID_MAX_CLL => colour.max_cll = Some(read_uint(source, header)?),
+            ID_MAX_FALL => colour.max_fall = Some(read_uint(source, header)?),
+            ID_MASTERING_METADATA => {
+                colour.mastering_metadata = Some(parse_mastering_metadata(
+                    source,
+                    header.data_offset,
+                    child_end,
+                )?);
+            }
+            _ => {}
+        }
+        cursor = child_end;
+    }
+    Ok(colour)
+}
+
+fn parse_mastering_metadata(
+    source: &mut dyn ReadAt,
+    start: u64,
+    end: u64,
+) -> Result<MasteringMetadata, MediaError> {
+    let mut mastering = MasteringMetadata::default();
+    let mut cursor = start;
+    while cursor < end {
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
+        let child_end = element_end(header, end)?;
+        let destination = match header.id {
+            ID_PRIMARY_R_CHROMATICITY_X => &mut mastering.primary_r_x,
+            ID_PRIMARY_R_CHROMATICITY_Y => &mut mastering.primary_r_y,
+            ID_PRIMARY_G_CHROMATICITY_X => &mut mastering.primary_g_x,
+            ID_PRIMARY_G_CHROMATICITY_Y => &mut mastering.primary_g_y,
+            ID_PRIMARY_B_CHROMATICITY_X => &mut mastering.primary_b_x,
+            ID_PRIMARY_B_CHROMATICITY_Y => &mut mastering.primary_b_y,
+            ID_WHITE_POINT_CHROMATICITY_X => &mut mastering.white_point_x,
+            ID_WHITE_POINT_CHROMATICITY_Y => &mut mastering.white_point_y,
+            ID_LUMINANCE_MAX => &mut mastering.luminance_max,
+            ID_LUMINANCE_MIN => &mut mastering.luminance_min,
+            _ => {
+                cursor = child_end;
+                continue;
+            }
+        };
+        let value = read_float(source, header)?;
+        if !value.is_finite() || value < 0.0 {
+            return Err(MediaError::InvalidData(
+                "invalid mastering display metadata",
+            ));
+        }
+        *destination = Some(value);
+        cursor = child_end;
+    }
+    Ok(mastering)
+}
+
+fn parse_block_addition_mapping(
+    source: &mut dyn ReadAt,
+    start: u64,
+    end: u64,
+) -> Result<BlockAdditionMapping, MediaError> {
+    let mut mapping = BlockAdditionMapping {
+        id_value: 1,
+        ..BlockAdditionMapping::default()
+    };
+    let mut cursor = start;
+    while cursor < end {
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
+        let child_end = element_end(header, end)?;
+        match header.id {
+            ID_BLOCK_ADD_ID_VALUE => mapping.id_value = read_uint(source, header)?,
+            ID_BLOCK_ADD_ID_NAME => mapping.id_name = read_string(source, header)?,
+            ID_BLOCK_ADD_ID_TYPE => mapping.id_type = read_uint(source, header)?,
+            ID_BLOCK_ADD_ID_EXTRA_DATA => {
+                let size = header.size.ok_or(MediaError::InvalidData(
+                    "unknown block addition mapping extra data size",
+                ))?;
+                mapping.extra_data = read_bytes(
+                    source,
+                    header.data_offset,
+                    size,
+                    MAX_METADATA_ELEMENT_LENGTH,
+                )?;
+            }
+            _ => {}
+        }
+        cursor = child_end;
+    }
+    Ok(mapping)
 }
 
 fn parse_audio(
@@ -1197,7 +1509,9 @@ fn parse_audio(
 ) -> Result<(), MediaError> {
     let mut cursor = start;
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         match header.id {
             ID_SAMPLING_FREQUENCY => track.sampling_frequency = read_float(source, header)?,
@@ -1221,7 +1535,9 @@ fn parse_cues(
 ) -> Result<(), MediaError> {
     let mut cursor = start;
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         if header.id == ID_CUE_POINT {
             parse_cue_point(source, header.data_offset, child_end, cues)?;
@@ -1241,7 +1557,9 @@ fn parse_cue_point(
     let mut time_units = None;
     let mut positions = Vec::new();
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         match header.id {
             ID_CUE_TIME => time_units = Some(read_uint(source, header)?),
@@ -1285,7 +1603,9 @@ fn parse_cue_track_position(
     };
     let mut cursor = start;
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         match header.id {
             ID_CUE_TRACK => cue.track_number = read_uint(source, header)?,
@@ -1322,9 +1642,12 @@ fn index_cluster(
         {
             return Err(MediaError::ElementTooLarge);
         }
-        let child = read_header(source, cursor)?;
-        if declared_end.is_none() && cursor > header.data_offset && is_segment_level(child.id) {
-            resolved_end = cursor;
+        let Some(child) = read_child_header(source, cursor, scan_end)? else {
+            break;
+        };
+        if declared_end.is_none() && child.offset > header.data_offset && is_segment_level(child.id)
+        {
+            resolved_end = child.offset;
             break;
         }
         let child_end = match child.size {
@@ -1383,8 +1706,11 @@ fn parse_block_group(
     let mut duration_units = None;
     let mut discard_padding_ns = 0;
     let mut has_reference = false;
+    let mut block_additions = Vec::new();
     while cursor < end {
-        let header = read_header(source, cursor)?;
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
         let child_end = element_end(header, end)?;
         match header.id {
             ID_BLOCK => match block_header {
@@ -1401,6 +1727,9 @@ fn parse_block_group(
                 has_reference = true;
             }
             ID_DISCARD_PADDING => discard_padding_ns = read_signed_integer(source, header)?,
+            ID_BLOCK_ADDITIONS => {
+                block_additions = parse_block_additions(source, header.data_offset, child_end)?;
+            }
             _ => {}
         }
         cursor = child_end;
@@ -1417,7 +1746,70 @@ fn parse_block_group(
         duration_units,
         discard_padding_ns,
         !has_reference,
+        &block_additions,
     )
+}
+
+fn parse_block_additions(
+    source: &mut dyn ReadAt,
+    start: u64,
+    end: u64,
+) -> Result<Vec<BlockAddition>, MediaError> {
+    let mut additions = Vec::new();
+    let mut cursor = start;
+    while cursor < end {
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
+        let child_end = element_end(header, end)?;
+        if header.id == ID_BLOCK_MORE {
+            if additions.len() >= MAX_BLOCK_ADDITIONS {
+                return Err(MediaError::ElementTooLarge);
+            }
+            if let Some(addition) = parse_block_more(source, header.data_offset, child_end)? {
+                additions.push(addition);
+            }
+        }
+        cursor = child_end;
+    }
+    Ok(additions)
+}
+
+fn parse_block_more(
+    source: &mut dyn ReadAt,
+    start: u64,
+    end: u64,
+) -> Result<Option<BlockAddition>, MediaError> {
+    let mut id = 1;
+    let mut data = None;
+    let mut cursor = start;
+    while cursor < end {
+        let Some(header) = read_child_header(source, cursor, end)? else {
+            break;
+        };
+        let child_end = element_end(header, end)?;
+        match header.id {
+            ID_BLOCK_ADD_ID => id = read_uint(source, header)?,
+            ID_BLOCK_ADDITIONAL => {
+                let size = header
+                    .size
+                    .ok_or(MediaError::InvalidData("unknown block additional size"))?;
+                // HDR dynamic metadata is tiny. Ignore large codec-specific
+                // additions instead of copying them into every laced packet.
+                if size <= MAX_BLOCK_ADDITIONAL_METADATA_LENGTH {
+                    data = Some(read_bytes(
+                        source,
+                        header.data_offset,
+                        size,
+                        MAX_BLOCK_ADDITIONAL_METADATA_LENGTH,
+                    )?);
+                }
+            }
+            _ => {}
+        }
+        cursor = child_end;
+    }
+    Ok(data.map(|data| BlockAddition { id, data }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1431,6 +1823,7 @@ fn packets_from_block(
     block_duration_units: Option<u64>,
     discard_padding_ns: i64,
     group_keyframe: bool,
+    block_additions: &[BlockAddition],
 ) -> Result<Vec<MediaPacket>, MediaError> {
     let parsed = parse_block_layout(&bytes)?;
     let track_index = tracks
@@ -1511,10 +1904,14 @@ fn packets_from_block(
             track_index: u32::try_from(track_index).map_err(|_| MediaError::ArithmeticOverflow)?,
             track_number: parsed.track_number,
             timestamp_ns,
+            // The session assigns decode order when this packet leaves its
+            // interleaved queue. Until then PTS is the safest placeholder.
+            decode_timestamp_ns: timestamp_ns,
             duration_ns,
             discard_padding_ns: if is_last { discard_padding_ns } else { 0 },
             flags,
             payload,
+            block_additions: block_additions.to_vec(),
         });
         elapsed_ns = elapsed_ns
             .checked_add(duration_ns)
@@ -1531,8 +1928,7 @@ fn inferred_audio_packet_duration_ns(track: &MediaTrack, payload: &[u8]) -> Opti
         return None;
     }
     let sample_frames = super::audio::compressed_audio_sample_frames(track.codec, payload)?;
-    let duration = f64::from(sample_frames) * 1_000_000_000.0
-        / track.output_sampling_frequency;
+    let duration = f64::from(sample_frames) * 1_000_000_000.0 / track.output_sampling_frequency;
     if !duration.is_finite() || duration <= 0.0 || duration > u64::MAX as f64 {
         return None;
     }
@@ -1954,6 +2350,61 @@ mod tests {
         element(&[0xae], entry)
     }
 
+    fn hdr_video_track(number: u64) -> Vec<u8> {
+        let mut mastering = Vec::new();
+        append(&mut mastering, float_element(&[0x55, 0xd1], 0.68));
+        append(&mut mastering, float_element(&[0x55, 0xd2], 0.32));
+        append(&mut mastering, float_element(&[0x55, 0xd3], 0.265));
+        append(&mut mastering, float_element(&[0x55, 0xd4], 0.69));
+        append(&mut mastering, float_element(&[0x55, 0xd5], 0.15));
+        append(&mut mastering, float_element(&[0x55, 0xd6], 0.06));
+        append(&mut mastering, float_element(&[0x55, 0xd7], 0.3127));
+        append(&mut mastering, float_element(&[0x55, 0xd8], 0.329));
+        append(&mut mastering, float_element(&[0x55, 0xd9], 1_000.0));
+        append(&mut mastering, float_element(&[0x55, 0xda], 0.005));
+
+        let mut colour = Vec::new();
+        append(&mut colour, uint_element(&[0x55, 0xb1], 9));
+        append(&mut colour, uint_element(&[0x55, 0xb2], 10));
+        append(&mut colour, uint_element(&[0x55, 0xb9], 1));
+        append(&mut colour, uint_element(&[0x55, 0xba], 16));
+        append(&mut colour, uint_element(&[0x55, 0xbb], 9));
+        append(&mut colour, uint_element(&[0x55, 0xbc], 1_000));
+        append(&mut colour, uint_element(&[0x55, 0xbd], 400));
+        append(&mut colour, element(&[0x55, 0xd0], mastering));
+
+        let mut video = Vec::new();
+        append(&mut video, uint_element(&[0xb0], 3840));
+        append(&mut video, uint_element(&[0xba], 2160));
+        append(&mut video, element(&[0x55, 0xb0], colour));
+
+        let mut dolby_mapping = Vec::new();
+        append(&mut dolby_mapping, uint_element(&[0x41, 0xf0], 2));
+        append(
+            &mut dolby_mapping,
+            string_element(&[0x41, 0xa4], "Dolby Vision configuration"),
+        );
+        append(&mut dolby_mapping, uint_element(&[0x41, 0xe7], 0x6476_7643));
+        append(
+            &mut dolby_mapping,
+            element(&[0x41, 0xed], vec![1, 0, 8 << 1, 0]),
+        );
+
+        let mut hdr10_plus_mapping = Vec::new();
+        append(&mut hdr10_plus_mapping, uint_element(&[0x41, 0xf0], 5));
+        append(&mut hdr10_plus_mapping, uint_element(&[0x41, 0xe7], 4));
+
+        let mut entry = Vec::new();
+        append(&mut entry, uint_element(&[0xd7], number));
+        append(&mut entry, uint_element(&[0x73, 0xc5], number + 100));
+        append(&mut entry, uint_element(&[0x83], 1));
+        append(&mut entry, string_element(&[0x86], "V_MPEGH/ISO/HEVC"));
+        append(&mut entry, element(&[0xe0], video));
+        append(&mut entry, element(&[0x41, 0xe4], dolby_mapping));
+        append(&mut entry, element(&[0x41, 0xe4], hdr10_plus_mapping));
+        element(&[0xae], entry)
+    }
+
     fn audio_track(number: u64, name: &str) -> Vec<u8> {
         let mut audio = Vec::new();
         append(&mut audio, float_element(&[0xb5], 48_000.0));
@@ -2011,6 +2462,26 @@ mod tests {
 
     fn simple_block(track: u64, relative_time: i16, flags: u8, payload: &[u8]) -> Vec<u8> {
         element(&[0xa3], raw_block(track, relative_time, flags, payload))
+    }
+
+    fn block_group_with_addition(
+        track: u64,
+        relative_time: i16,
+        addition_id: u64,
+        addition: &[u8],
+    ) -> Vec<u8> {
+        let mut block_more = Vec::new();
+        append(&mut block_more, uint_element(&[0xee], addition_id));
+        append(&mut block_more, element(&[0xa5], addition.to_vec()));
+        let additions = element(&[0x75, 0xa1], element(&[0xa6], block_more));
+
+        let mut group = Vec::new();
+        append(
+            &mut group,
+            element(&[0xa1], raw_block(track, relative_time, 0, b"hdr-frame")),
+        );
+        append(&mut group, additions);
+        element(&[0xa0], group)
     }
 
     fn cluster(timestamp: u64, children: Vec<Vec<u8>>) -> Vec<u8> {
@@ -2207,6 +2678,8 @@ mod tests {
             display_width: 0,
             display_height: 0,
             frame_rate: 0.0,
+            video_color: VideoColorInfo::default(),
+            block_addition_mappings: Vec::new(),
             sampling_frequency: 48_000.0,
             output_sampling_frequency: 48_000.0,
             channels: 2,
@@ -2253,6 +2726,137 @@ mod tests {
         assert_eq!(audio.track_number, 2);
         assert_eq!(audio.payload, b"audio-zero");
         assert_eq!(audio.duration_ns, 20_000_000);
+
+        session.rewind().unwrap();
+        let replayed_video = session.next_packet().unwrap().unwrap();
+        assert_eq!(replayed_video.payload, b"video-zero");
+        assert_eq!(replayed_video.decode_timestamp_ns, 0);
+    }
+
+    #[test]
+    fn preserves_hdr_colour_dolby_vision_and_hdr10_plus_metadata() {
+        let mut segment = Vec::new();
+        append(&mut segment, info());
+        append(&mut segment, tracks(vec![hdr_video_track(1)]));
+        append(
+            &mut segment,
+            cluster(
+                0,
+                vec![block_group_with_addition(
+                    1,
+                    0,
+                    5,
+                    &[0xb5, 0x00, 0x3c, 0x00, 0x01],
+                )],
+            ),
+        );
+        let mut file = ebml_header();
+        append(&mut file, element(&[0x18, 0x53, 0x80, 0x67], segment));
+
+        let mut session = open_file(file);
+        let track = &session.tracks()[0];
+        assert_eq!(track.codec, Codec::Hevc);
+        assert_eq!(track.video_color.matrix_coefficients, Some(9));
+        assert_eq!(track.video_color.bits_per_channel, Some(10));
+        assert_eq!(track.video_color.range, Some(1));
+        assert_eq!(track.video_color.transfer_characteristics, Some(16));
+        assert_eq!(track.video_color.primaries, Some(9));
+        assert_eq!(track.video_color.max_cll, Some(1_000));
+        assert_eq!(track.video_color.max_fall, Some(400));
+        let mastering = track
+            .video_color
+            .mastering_metadata
+            .as_ref()
+            .expect("mastering metadata");
+        assert_eq!(mastering.primary_r_x, Some(0.68));
+        assert_eq!(mastering.luminance_max, Some(1_000.0));
+        assert_eq!(track.block_addition_mappings.len(), 2);
+        assert_eq!(track.block_addition_mappings[0].id_value, 2);
+        assert_eq!(track.block_addition_mappings[0].id_type, 0x6476_7643);
+        assert_eq!(track.block_addition_mappings[0].extra_data, [1, 0, 16, 0]);
+        assert_eq!(track.block_addition_mappings[1].id_type, 4);
+
+        let packet = session.next_packet().unwrap().expect("HDR packet");
+        assert_eq!(packet.payload, b"hdr-frame");
+        assert_eq!(packet.block_additions.len(), 1);
+        assert_eq!(packet.block_additions[0].id, 5);
+        assert_eq!(
+            packet.block_additions[0].data,
+            [0xb5, 0x00, 0x3c, 0x00, 0x01]
+        );
+    }
+
+    #[test]
+    fn ignores_null_padding_between_master_element_children() {
+        let mut cluster_payload = uint_element(&[0xe7], 0);
+        cluster_payload.extend_from_slice(&[0, 0, 0]);
+        append(
+            &mut cluster_payload,
+            simple_block(1, 0, 0x80, b"padded-video"),
+        );
+
+        let mut segment_payload = info();
+        segment_payload.extend_from_slice(&[0, 0, 0, 0]);
+        append(&mut segment_payload, tracks(vec![video_track(1)]));
+        segment_payload.extend_from_slice(&[0, 0]);
+        append(
+            &mut segment_payload,
+            element(&[0x1f, 0x43, 0xb6, 0x75], cluster_payload),
+        );
+
+        let mut file = ebml_header();
+        append(
+            &mut file,
+            element(&[0x18, 0x53, 0x80, 0x67], segment_payload),
+        );
+        let mut session = open_file(file);
+
+        assert_eq!(session.summary().track_count, 1);
+        assert_eq!(session.summary().cluster_count, 1);
+        assert_eq!(
+            session.next_packet().unwrap().unwrap().payload,
+            b"padded-video"
+        );
+    }
+
+    #[test]
+    fn assigns_monotonic_decode_timestamps_to_reordered_video_blocks() {
+        let mut segment = Vec::new();
+        append(&mut segment, info());
+        append(&mut segment, tracks(vec![video_track(1)]));
+        append(
+            &mut segment,
+            cluster(
+                0,
+                vec![
+                    simple_block(1, 0, 0x80, b"i"),
+                    simple_block(1, 80, 0, b"p"),
+                    simple_block(1, 40, 0, b"b"),
+                    simple_block(1, 120, 0, b"p2"),
+                ],
+            ),
+        );
+        let mut file = ebml_header();
+        append(&mut file, element(&[0x18, 0x53, 0x80, 0x67], segment));
+
+        let mut session = open_file(file);
+        let packets = (0..4)
+            .map(|_| session.next_packet().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            packets
+                .iter()
+                .map(|packet| packet.timestamp_ns)
+                .collect::<Vec<_>>(),
+            [0, 80_000_000, 40_000_000, 120_000_000]
+        );
+        assert_eq!(
+            packets
+                .iter()
+                .map(|packet| packet.decode_timestamp_ns)
+                .collect::<Vec<_>>(),
+            [0, 40_000_000, 80_000_000, 120_000_000]
+        );
     }
 
     #[test]
@@ -2283,11 +2887,9 @@ mod tests {
     fn opens_finite_matroska_segment_from_sparse_eighty_gibibyte_source() {
         let bytes = make_file(true, false);
         let logical_len = 80_u64 * 1_024 * 1_024 * 1_024;
-        let mut session = MatroskaSession::open_streaming(Box::new(SparseTailSource {
-            bytes,
-            logical_len,
-        }))
-        .unwrap();
+        let mut session =
+            MatroskaSession::open_streaming(Box::new(SparseTailSource { bytes, logical_len }))
+                .unwrap();
 
         assert_eq!(session.summary().track_count, 2);
         let first = session.next_packet().unwrap().unwrap();
@@ -2328,6 +2930,7 @@ mod tests {
                 None,
                 0,
                 true,
+                &[],
             )
             .unwrap();
 
@@ -2336,7 +2939,11 @@ mod tests {
             assert_eq!(packets[1].duration_ns, expected_durations[1]);
             assert_eq!(packets[0].timestamp_ns, 0);
             assert_eq!(packets[1].timestamp_ns, expected_durations[0] as i64);
-            assert!(packets.iter().all(|packet| packet.flags.contains(PacketFlags::LACED)));
+            assert!(
+                packets
+                    .iter()
+                    .all(|packet| packet.flags.contains(PacketFlags::LACED))
+            );
         }
     }
 

@@ -185,6 +185,30 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
         attachScreenshot(named: "mobile-interrupted-range-seek-recovered")
     }
 
+    func testDebugOverlayReportsDecodedDynamicRange() throws {
+        let app = launchApp(
+            environment: [
+                "SKELETON_PLAYER_FIXTURE_URL":
+                    "\(fixtureBaseURL)/sample-autoplay.mkv",
+                "SKELETON_PLAYER_FIXTURE_MANUAL_START": "1",
+                "SKELETON_PLAYER_CONTROLS_LOCKED": "1",
+                "SKELETON_PLAYER_DEBUG_OVERLAY": "1",
+            ]
+        )
+        startFixturePlayback(in: app)
+
+        XCTAssertTrue(waitForDebugState("Playing", in: app, timeout: 20))
+        let dynamicRange = app.descendants(matching: .any)[
+            "player-debug-dynamic-range"
+        ]
+        XCTAssertTrue(dynamicRange.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.staticTexts["SDR"].waitForExistence(timeout: 5),
+            "The debug overlay should classify the decoded SDR fixture"
+        )
+        attachScreenshot(named: "mobile-debug-dynamic-range-sdr")
+    }
+
     func testUserStylePlayerInteractionStressRemainsResponsive() throws {
         let app = launchApp(
             environment: [

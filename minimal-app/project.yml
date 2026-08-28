@@ -29,6 +29,7 @@ targets:
         CFBundleVersion: "21"
         CFBundleDisplayName: Bunny
         AVInitialRouteSharingPolicy: LongFormVideo
+        CADisableMinimumFrameDurationOnPhone: true
         StremioSourceIdentity: $(STREMIO_SOURCE_ID)
         NSLocalNetworkUsageDescription: Bunny connects to streaming servers on your local network when you configure one for playback.
         UILaunchScreen: {}
@@ -79,9 +80,10 @@ targets:
       path: iOS/Resources/BunnyInfo.plist
       properties:
         CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "27"
+        CFBundleVersion: "32"
         CFBundleDisplayName: Bunny
         AVInitialRouteSharingPolicy: LongFormVideo
+        CADisableMinimumFrameDurationOnPhone: true
         StremioSourceIdentity: $(STREMIO_SOURCE_ID)
         NSLocalNetworkUsageDescription: Bunny connects to streaming servers on your local network when you configure one for playback.
         UILaunchScreen: {}

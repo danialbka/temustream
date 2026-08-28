@@ -817,7 +817,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private func prepareCustomDecoder(_ url: URL) async throws {
         let startedAt = ProcessInfo.processInfo.systemUptime
         activeEngine = .customRust
-        usesCustomDecoder = true
         tearDownPictureInPicture()
         player.pause()
         player.replaceCurrentItem(with: nil)
@@ -825,9 +824,13 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
 
         let decoder = BunnyNativeDecoder(
             url: url,
-            trustedPrivateNetworkOrigin: plan.trustedPrivateNetworkOrigin
+            trustedPrivateNetworkOrigin: plan.trustedPrivateNetworkOrigin,
+            diagnosticsEnabled: debugOverlayEnabled
         )
         customDecoder = decoder
+        // Publish the mode only after the decoder exists so SwiftUI receives
+        // the actual sample-buffer layer in the same update.
+        usesCustomDecoder = true
         customOpenComplete = false
         customFirstFrame = false
         customEnded = false
@@ -929,7 +932,8 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             // Sample-buffer renderers accept short bursts into their bounded
             // queue. A four-second cadence window reports scheduled display
             // rate without turning those healthy bursts into misleading FPS.
-            if elapsed >= 4 {
+            if elapsed >= 4,
+               (self.customMediaInfo?.nominalFrameRate ?? 0) <= 0 {
                 self.customDisplayFPS = Double(max(decoded - self.customMetricsSampleFrames, 0)) / elapsed
                 self.customMetricsSampleFrames = decoded
                 self.customMetricsSampleTime = now
@@ -948,6 +952,14 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             guard let self, let decoder, self.customDecoder === decoder else { return }
             self.customFailure = error
         }
+        try await waitForCustomVideoSurface(decoder)
+        // Record autoplay intent before opening the source. The decoder's
+        // buffering policy still holds the shared A/V clock at zero until both
+        // queues have a safe reserve, but an explicitly decoded first frame
+        // may itself require that clock to advance before the display layer
+        // reports readiness. Waiting to request play until after that callback
+        // creates a circular startup dependency for otherwise valid MKVs.
+        decoder.play(atRate: playbackRate)
         decoder.start()
 
         while !Task.isCancelled {
@@ -1013,11 +1025,41 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         throw CancellationError()
     }
 
+    private func waitForCustomVideoSurface(
+        _ decoder: BunnyNativeDecoder,
+        timeout: TimeInterval = 2
+    ) async throws {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        while ProcessInfo.processInfo.systemUptime - startedAt < timeout {
+            try Task.checkCancellation()
+            guard customDecoder === decoder, usesCustomDecoder else {
+                throw CancellationError()
+            }
+            let bounds = decoder.videoLayer.bounds
+            if decoder.videoLayer.superlayer != nil,
+               !decoder.videoLayer.isHidden,
+               bounds.width > 0,
+               bounds.height > 0 {
+                NSLog(
+                    "BUNNY_PLAYER surface_ready_ms=%.1f width=%.0f height=%.0f",
+                    (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000,
+                    bounds.width,
+                    bounds.height
+                )
+                return
+            }
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw BunnyPlaybackError.noVisibleFrame
+    }
+
     func monitor(onProgress: PlaybackProgressHandler?) async throws {
         var lastPosition = currentTime
         var lastAdvanceAt = ProcessInfo.processInfo.systemUptime
         var lastProgressReportAt = lastAdvanceAt
         var lastDebugSampleAt = 0.0
+        var lastHDRLogDescription: String?
         var lastDecodedFrames = customDecodedFrames
         var lastDecodeAt = lastAdvanceAt
         var nativeRecoveryAttempts = 0
@@ -1133,6 +1175,15 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                         progressSnapshot.duration,
                         .checkpoint
                     )
+                }
+            }
+
+            if activeEngine == .customRust {
+                let hdrStatus = customDynamicRangeStatus()
+                if hdrStatus.dynamicRange != .detecting,
+                   hdrStatus.logDescription != lastHDRLogDescription {
+                    lastHDRLogDescription = hdrStatus.logDescription
+                    NSLog("BUNNY_HDR_STATUS %@", hdrStatus.logDescription)
                 }
             }
 
@@ -2126,12 +2177,29 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
 
     private func makeDebugSnapshot() -> BunnyDebugSnapshot {
         if activeEngine == .customRust {
+            let presentation = customDecoder?.presentationDiagnosticsSnapshot
+            let hdrStatus = customDynamicRangeStatus()
             return BunnyDebugSnapshot(
                 state: isSeeking ? "Seeking" : isBuffering ? "Buffering" : isPlaying ? "Playing" : "Paused",
+                // AVVideoPerformanceMetrics publishes decoded/presented work
+                // in batches, so a short wall-clock delta can alternate
+                // between half and double the true cadence. Show the source
+                // cadence here and report actual drops, corruption, delay,
+                // clock drift, and display misses on their dedicated rows.
                 displayFPS: customDisplayFPS,
-                droppedFrames: customDroppedFrames,
+                droppedFrames: presentation?.rendererDroppedFrames ?? customDroppedFrames,
+                corruptedFrames: presentation?.rendererCorruptedFrames,
                 stalls: stallCount,
                 bufferSeconds: customBufferedSeconds,
+                rendererDelayMilliseconds: presentation?.rendererAverageDelayMilliseconds,
+                sourcePTSP95Milliseconds: presentation?.sourcePTSP95Milliseconds,
+                sourcePTSBackwards: presentation?.sourcePTSBackwardTransitions,
+                playbackClockRatio: presentation?.playbackClockRatio,
+                displayRefreshHz: presentation?.displayRefreshHz,
+                displayP95IntervalMilliseconds:
+                    presentation?.displayP95IntervalMilliseconds,
+                displayMissedRefreshes: presentation?.displayMissedRefreshes,
+                dynamicRange: hdrStatus.dynamicRange,
                 decoder: customDecoder?.hardwareVideoDecode == true
                     ? "Rust · VideoToolbox"
                     : "Rust · Apple"
@@ -2152,10 +2220,73 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             state: isSeeking ? "Seeking" : isBuffering ? "Buffering" : isPlaying ? "Playing" : "Paused",
             displayFPS: frameRate,
             droppedFrames: event.map { max($0.numberOfDroppedVideoFrames, 0) },
+            corruptedFrames: nil,
             stalls: max(stallCount, event.map { max($0.numberOfStalls, 0) } ?? 0),
             bufferSeconds: bufferedSeconds,
+            rendererDelayMilliseconds: nil,
+            sourcePTSP95Milliseconds: nil,
+            sourcePTSBackwards: nil,
+            playbackClockRatio: nil,
+            displayRefreshHz: nil,
+            displayP95IntervalMilliseconds: nil,
+            displayMissedRefreshes: nil,
+            dynamicRange: .systemManaged,
             decoder: nativeDecoderLabel
         )
+    }
+
+    private func customDynamicRangeStatus() -> (
+        dynamicRange: PlaybackDynamicRange,
+        logDescription: String
+    ) {
+        let hdr = customDecoder?.hdrDiagnosticsSnapshot ?? .empty
+        let dynamicRange = PlaybackDynamicRangeDiagnostics.classify(
+            inputBitsPerChannel: hdr.inputBitsPerChannel,
+            inputTransferCharacteristics: hdr.inputTransferCharacteristics,
+            inputHasMasteringMetadata: hdr.inputHasMasteringMetadata,
+            inputHasContentLightLevel: hdr.inputHasContentLightLevel,
+            inputDolbyVisionConfiguration: hdr.inputDolbyVisionConfiguration,
+            outputPixelFormat: hdr.outputPixelFormat,
+            outputColorPrimaries: hdr.outputColorPrimaries,
+            outputTransferFunction: hdr.outputTransferFunction
+        )
+        let logDescription = [
+            "range=\(dynamicRange.logValue)",
+            "path=rust_videotoolbox",
+            "input_bits=\(hdrLogValue(hdr.inputBitsPerChannel))",
+            "input_primaries=\(hdrLogValue(hdr.inputPrimaries))",
+            "input_transfer=\(hdrLogValue(hdr.inputTransferCharacteristics))",
+            "input_matrix=\(hdrLogValue(hdr.inputMatrixCoefficients))",
+            "input_range=\(hdrLogValue(hdr.inputRange))",
+            "input_mdcv=\(hdrLogFlag(hdr.inputHasMasteringMetadata))",
+            "input_clli=\(hdrLogFlag(hdr.inputHasContentLightLevel))",
+            "input_dv=\(hdrLogToken(hdr.inputDolbyVisionConfiguration))",
+            "output_pixel=\(hdrLogToken(hdr.outputPixelFormat))",
+            "output_primaries=\(hdrLogToken(hdr.outputColorPrimaries))",
+            "output_transfer=\(hdrLogToken(hdr.outputTransferFunction))",
+            "output_matrix=\(hdrLogToken(hdr.outputYCbCrMatrix))",
+            "output_mdcv=\(hdrLogFlag(hdr.outputHasMasteringMetadata))",
+            "output_clli=\(hdrLogFlag(hdr.outputHasContentLightLevel))",
+        ].joined(separator: " ")
+        return (dynamicRange, logDescription)
+    }
+
+    private func hdrLogValue<T>(_ value: T?) -> String {
+        value.map { String(describing: $0) } ?? "unknown"
+    }
+
+    private func hdrLogFlag(_ value: Bool?) -> String {
+        value.map { $0 ? "yes" : "no" } ?? "unknown"
+    }
+
+    private func hdrLogToken(_ value: String?) -> String {
+        guard let value, !value.isEmpty else { return "unknown" }
+        return value.map { character in
+            character.isLetter || character.isNumber || character == "_" || character == "-"
+                ? character
+                : "_"
+        }
+        .reduce(into: "") { $0.append($1) }
     }
 
     private var debugOverlayEnabled: Bool {
@@ -2375,13 +2506,31 @@ private final class BunnyPlayerLayerView: UIView {
             }
         }
         CATransaction.begin()
-        CATransaction.setAnimationDuration(0.2)
-        playerLayer.videoGravity = videoGravity
-        customLayer?.videoGravity = videoGravity
-        playerLayer.isHidden = usesCustomDecoder
-        customLayer?.isHidden = !usesCustomDecoder
-        playerLayer.frame = bounds
-        customLayer?.frame = bounds
+        // SwiftUI updates this representable for controls, progress, captions,
+        // and other state that does not change the video geometry. Implicitly
+        // animating the render-layer properties on every update makes an
+        // otherwise healthy decoder look uneven, especially while controls
+        // appear or disappear. Geometry changes should land atomically; the
+        // surrounding SwiftUI controls retain their own animations.
+        CATransaction.setDisableActions(true)
+        if playerLayer.videoGravity != videoGravity {
+            playerLayer.videoGravity = videoGravity
+        }
+        if customLayer?.videoGravity != videoGravity {
+            customLayer?.videoGravity = videoGravity
+        }
+        if playerLayer.isHidden != usesCustomDecoder {
+            playerLayer.isHidden = usesCustomDecoder
+        }
+        if customLayer?.isHidden == usesCustomDecoder {
+            customLayer?.isHidden = !usesCustomDecoder
+        }
+        if playerLayer.frame != bounds {
+            playerLayer.frame = bounds
+        }
+        if customLayer?.frame != bounds {
+            customLayer?.frame = bounds
+        }
         CATransaction.commit()
     }
 }
@@ -3166,23 +3315,51 @@ private struct BunnyDebugSnapshot: Equatable {
     var state: String
     var displayFPS: Double?
     var droppedFrames: Int?
+    var corruptedFrames: Int?
     var stalls: Int?
     var bufferSeconds: Double?
+    var rendererDelayMilliseconds: Double?
+    var sourcePTSP95Milliseconds: Double?
+    var sourcePTSBackwards: Int?
+    var playbackClockRatio: Double?
+    var displayRefreshHz: Double?
+    var displayP95IntervalMilliseconds: Double?
+    var displayMissedRefreshes: Int?
+    var dynamicRange: PlaybackDynamicRange
     var decoder: String
 
     static let waiting = Self(
         state: "Starting",
         displayFPS: nil,
         droppedFrames: nil,
+        corruptedFrames: nil,
         stalls: nil,
         bufferSeconds: nil,
+        rendererDelayMilliseconds: nil,
+        sourcePTSP95Milliseconds: nil,
+        sourcePTSBackwards: nil,
+        playbackClockRatio: nil,
+        displayRefreshHz: nil,
+        displayP95IntervalMilliseconds: nil,
+        displayMissedRefreshes: nil,
+        dynamicRange: .detecting,
         decoder: "Starting"
     )
 
     var logDescription: String {
         "engine=Bunny state=\(state.lowercased()) fps=\(number(displayFPS)) "
             + "dropped_frames=\(integer(droppedFrames)) stalls=\(integer(stalls)) "
-            + "buffer_seconds=\(number(bufferSeconds)) decoder=\(decoder.replacingOccurrences(of: " ", with: "_"))"
+            + "corrupt_frames=\(integer(corruptedFrames)) "
+            + "frame_delay_ms=\(number(rendererDelayMilliseconds)) "
+            + "source_pts_p95_ms=\(number(sourcePTSP95Milliseconds)) "
+            + "source_pts_back=\(integer(sourcePTSBackwards)) "
+            + "clock_ratio=\(number(playbackClockRatio)) "
+            + "display_hz=\(number(displayRefreshHz)) "
+            + "display_p95_ms=\(number(displayP95IntervalMilliseconds)) "
+            + "display_missed=\(integer(displayMissedRefreshes)) "
+            + "dynamic_range=\(dynamicRange.logValue) "
+            + "buffer_seconds=\(number(bufferSeconds)) "
+            + "decoder=\(decoder.replacingOccurrences(of: " ", with: "_"))"
     }
 
     private func number(_ value: Double?) -> String {
@@ -3209,24 +3386,46 @@ private struct BunnyDebugOverlay: View {
                     Text(snapshot.state.uppercased())
                         .foregroundStyle(.secondary)
                 }
-                metric("FPS", value: number(snapshot.displayFPS))
+                metric("Source FPS", value: number(snapshot.displayFPS))
                 metric(
                     "Dropped",
                     value: integer(snapshot.droppedFrames),
                     warning: (snapshot.droppedFrames ?? 0) > 0
+                )
+                metric(
+                    "Corrupt",
+                    value: integer(snapshot.corruptedFrames),
+                    warning: (snapshot.corruptedFrames ?? 0) > 0
+                )
+                metric(
+                    "Frame delay",
+                    value: milliseconds(snapshot.rendererDelayMilliseconds),
+                    warning: (snapshot.rendererDelayMilliseconds ?? 0) > 8
+                )
+                metric(
+                    "Source PTS",
+                    value: ptsDescription
+                )
+                metric("Clock", value: ratio(snapshot.playbackClockRatio))
+                metric(
+                    "Display",
+                    value: displayDescription,
+                    warning: (snapshot.displayMissedRefreshes ?? 0) > 0
                 )
                 metric("Stalls", value: integer(snapshot.stalls))
                 metric(
                     "Buffer",
                     value: snapshot.bufferSeconds.map { String(format: "%.1f s", $0) } ?? "--"
                 )
+                metric("Dynamic range", value: snapshot.dynamicRange.displayName)
+                    .accessibilityIdentifier("player-debug-dynamic-range")
                 metric("Decode", value: snapshot.decoder)
             }
             .font(.caption2.monospacedDigit())
             .foregroundStyle(.white)
             .padding(.horizontal, 11)
             .padding(.vertical, 9)
-            .frame(width: min(max(proxy.size.width * 0.46, 178), 250), alignment: .leading)
+            .frame(width: min(max(proxy.size.width * 0.62, 230), 330), alignment: .leading)
             .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 10))
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
@@ -3244,6 +3443,7 @@ private struct BunnyDebugOverlay: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             "Player debug, Bunny, \(snapshot.state), "
+                + "dynamic range \(snapshot.dynamicRange.displayName), "
                 + "\(integer(snapshot.droppedFrames)) dropped frames"
         )
         .accessibilityIdentifier("player-debug-overlay")
@@ -3265,6 +3465,27 @@ private struct BunnyDebugOverlay: View {
                 .fontWeight(.semibold)
                 .foregroundStyle(warning ? Color.orange : Color.white)
         }
+    }
+
+    private var ptsDescription: String {
+        guard let p95 = snapshot.sourcePTSP95Milliseconds else { return "--" }
+        let backwards = snapshot.sourcePTSBackwards ?? 0
+        return String(format: "p95 %.1f ms · back %d", p95, backwards)
+    }
+
+    private var displayDescription: String {
+        guard let refresh = snapshot.displayRefreshHz else { return "--" }
+        let p95 = snapshot.displayP95IntervalMilliseconds ?? 0
+        let missed = snapshot.displayMissedRefreshes ?? 0
+        return String(format: "%.0f Hz · p95 %.1f ms · miss %d", refresh, p95, missed)
+    }
+
+    private func milliseconds(_ value: Double?) -> String {
+        value.map { String(format: "%.2f ms", $0) } ?? "--"
+    }
+
+    private func ratio(_ value: Double?) -> String {
+        value.map { String(format: "%.4f×", $0) } ?? "--"
     }
 
     private func number(_ value: Double?) -> String {

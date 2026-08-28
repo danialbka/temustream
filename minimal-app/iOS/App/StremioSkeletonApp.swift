@@ -28,6 +28,10 @@ struct StremioSkeletonApp: App {
             NavigationStack { HomeView() }
                 .environmentObject(model)
                 .task { model.prepareRecommendationPaginationFixture() }
+        } else if continueWatchingNavigationFixtureRequested {
+            NavigationStack { HomeView() }
+                .environmentObject(model)
+                .task { model.prepareContinueWatchingNavigationFixture() }
         } else if let fixture = episodeAutoplayFixture {
             if episodeAutoplayFixtureManualStart {
                 SimulatorEpisodeAutoplayFixtureScreen(fixture: fixture)
@@ -112,6 +116,12 @@ struct StremioSkeletonApp: App {
     private var recommendationPaginationFixtureRequested: Bool {
         ProcessInfo.processInfo.environment[
             "SKELETON_RECOMMENDATION_PAGING_FIXTURE"
+        ] == "1"
+    }
+
+    private var continueWatchingNavigationFixtureRequested: Bool {
+        ProcessInfo.processInfo.environment[
+            "SKELETON_CONTINUE_WATCHING_NAVIGATION_FIXTURE"
         ] == "1"
     }
 

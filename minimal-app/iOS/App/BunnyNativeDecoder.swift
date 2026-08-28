@@ -1,9 +1,11 @@
 import AVFoundation
 import CoreAudioTypes
 import CoreMedia
+import CoreVideo
 import Darwin
 import Foundation
 import UIKit
+import VideoToolbox
 
 let BunnyNativeDecoderErrorDomain = "BunnyNativeDecoderErrorDomain"
 
@@ -120,6 +122,150 @@ struct BunnyNativeMetricsSnapshot: Sendable {
         videoQueueEnd: .nan,
         audioQueueEnd: .nan
     )
+}
+
+/// Actual presentation diagnostics. Unlike `decodedVideoFrames`, these values
+/// describe Apple's renderer, the source timestamp sequence, and the display
+/// refresh loop rather than how quickly Bunny filled the input queue.
+struct BunnyPresentationDiagnosticsSnapshot: Sendable {
+    var rendererTotalFrames: Int?
+    var rendererDroppedFrames: Int?
+    var rendererCorruptedFrames: Int?
+    var rendererFramesPerSecond: Double?
+    var rendererAverageDelayMilliseconds: Double?
+    var sourcePTSP95Milliseconds: Double?
+    var sourcePTSMaximumMilliseconds: Double?
+    var sourcePTSBackwardTransitions = 0
+    var sourcePTSDuplicateTransitions = 0
+    var sourcePTSOutlierTransitions = 0
+    var sourceDTSP95Milliseconds: Double?
+    var sourceDTSBackwardTransitions = 0
+    var playbackClockRatio: Double?
+    var appliedRate: Float = 0
+    var displayRefreshHz: Double?
+    var displayP95IntervalMilliseconds: Double?
+    var displayMissedRefreshes = 0
+
+    static let empty = BunnyPresentationDiagnosticsSnapshot()
+}
+
+struct BunnyHDRDiagnosticsSnapshot: Sendable {
+    var inputBitsPerChannel: UInt32? = nil
+    var inputPrimaries: UInt32? = nil
+    var inputTransferCharacteristics: UInt32? = nil
+    var inputMatrixCoefficients: UInt32? = nil
+    var inputRange: UInt32? = nil
+    var inputHasMasteringMetadata = false
+    var inputHasContentLightLevel = false
+    var inputDolbyVisionConfiguration: String? = nil
+    var outputPixelFormat: String? = nil
+    var outputColorPrimaries: String? = nil
+    var outputTransferFunction: String? = nil
+    var outputYCbCrMatrix: String? = nil
+    var outputHasMasteringMetadata: Bool? = nil
+    var outputHasContentLightLevel: Bool? = nil
+
+    static let empty = BunnyHDRDiagnosticsSnapshot()
+}
+
+private struct BunnyDisplayCadenceSnapshot: Sendable {
+    let refreshHz: Double?
+    let p95IntervalMilliseconds: Double?
+    let missedRefreshes: Int
+}
+
+/// A debug-only display-link observer. It never requests a refresh rate, so it
+/// measures the system's current ProMotion/60 Hz cadence without influencing
+/// playback. The sample-buffer renderer remains responsible for presentation.
+private final class BunnyDisplayCadenceProbe: NSObject, @unchecked Sendable {
+    private final class Target: NSObject {
+        weak var owner: BunnyDisplayCadenceProbe?
+
+        init(owner: BunnyDisplayCadenceProbe) {
+            self.owner = owner
+        }
+
+        @objc func tick(_ displayLink: CADisplayLink) {
+            owner?.record(displayLink)
+        }
+    }
+
+    private let lock = NSLock()
+    private let capacity = 360
+    private var intervals: [TimeInterval] = []
+    private var expectedIntervals: [TimeInterval] = []
+    private var replacementIndex = 0
+    private var previousTimestamp: TimeInterval?
+    private var displayLink: CADisplayLink?
+    private var target: Target?
+
+    func start() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.displayLink == nil else { return }
+            let target = Target(owner: self)
+            let displayLink = CADisplayLink(
+                target: target,
+                selector: #selector(Target.tick(_:))
+            )
+            displayLink.add(to: .main, forMode: .common)
+            self.target = target
+            self.displayLink = displayLink
+        }
+    }
+
+    func stop() {
+        DispatchQueue.main.async { [weak self] in
+            self?.displayLink?.invalidate()
+            self?.displayLink = nil
+            self?.target = nil
+        }
+    }
+
+    var snapshot: BunnyDisplayCadenceSnapshot {
+        let samples = lock.withLock { (intervals, expectedIntervals) }
+        let sorted = samples.0.filter { $0 > 0 }.sorted()
+        let expected = samples.1.filter { $0 > 0 }.sorted()
+        let median = percentile(sorted, fraction: 0.50)
+        let p95 = percentile(sorted, fraction: 0.95)
+        let expectedMedian = percentile(expected, fraction: 0.50)
+        let missed = zip(samples.0, samples.1).reduce(into: 0) { result, pair in
+            guard pair.1 > 0, pair.0 > pair.1 * 1.5 else { return }
+            result += max(Int((pair.0 / pair.1).rounded()) - 1, 1)
+        }
+        return BunnyDisplayCadenceSnapshot(
+            refreshHz: median.map { 1 / $0 },
+            p95IntervalMilliseconds: p95.map { $0 * 1_000 },
+            missedRefreshes: missed
+        )
+    }
+
+    private func record(_ displayLink: CADisplayLink) {
+        let timestamp = displayLink.timestamp
+        let expected = displayLink.targetTimestamp - displayLink.timestamp
+        lock.withLock {
+            defer { previousTimestamp = timestamp }
+            guard let previousTimestamp else { return }
+            let actual = timestamp - previousTimestamp
+            guard actual > 0, actual < 1 else { return }
+            if intervals.count < capacity {
+                intervals.append(actual)
+                expectedIntervals.append(expected)
+            } else {
+                intervals[replacementIndex] = actual
+                expectedIntervals[replacementIndex] = expected
+                replacementIndex = (replacementIndex + 1) % capacity
+            }
+        }
+    }
+
+    private func percentile(
+        _ sorted: [TimeInterval],
+        fraction: Double
+    ) -> TimeInterval? {
+        guard !sorted.isEmpty else { return nil }
+        let index = Int((Double(sorted.count - 1) * fraction).rounded(.up))
+        return sorted[min(max(index, 0), sorted.count - 1)]
+    }
 }
 
 private enum BunnyNativeDecoderError: LocalizedError {
@@ -314,52 +460,49 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
 
     private let policy: BunnyRemoteSourcePolicy
     private let lock = NSLock()
+    private let sessionLock = NSLock()
     private var maximumBytes = 1
     private var semaphore = DispatchSemaphore(value: 0)
+    private var progressSemaphore = DispatchSemaphore(value: 0)
     private var received = Data()
     private var response: HTTPURLResponse?
     private var failure: Error?
     private var finished = false
     private var activeTask: URLSessionDataTask?
     private var activeTaskIdentifier: Int?
-    private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 30
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.httpMaximumConnectionsPerHost = 2
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+    private var activeOperationID: Int?
+    private var sessionStorage: URLSession?
+    private var sessionInvalidated = false
 
     init(policy: BunnyRemoteSourcePolicy) {
         self.policy = policy
-    }
-
-    deinit {
-        session.invalidateAndCancel()
     }
 
     func run(
         _ request: URLRequest,
         maximumBytes: Int,
         timeout: TimeInterval = 30,
-        startGuard: (() -> Bool)? = nil
+        startGuard: (() -> Bool)? = nil,
+        operationID: Int? = nil
     ) throws -> Result {
         guard let url = request.url else {
             throw BunnyNativeDecoderError.invalidSource("the media request has no URL")
         }
         try policy.validateRequestURL(url)
         let requestSemaphore = DispatchSemaphore(value: 0)
-        let task = session.dataTask(with: request)
+        let requestProgressSemaphore = DispatchSemaphore(value: 0)
+        let task = try makeTask(with: request)
         let shouldStart = lock.withLock { () -> Bool in
             self.maximumBytes = max(maximumBytes, 1)
             semaphore = requestSemaphore
+            progressSemaphore = requestProgressSemaphore
             received = Data()
             response = nil
             failure = nil
             finished = false
             activeTask = task
             activeTaskIdentifier = task.taskIdentifier
+            activeOperationID = operationID
             return startGuard?() ?? true
         }
         guard shouldStart else {
@@ -388,11 +531,86 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
         return Result(data: received, response: response)
     }
 
+    /// Copies the prefix of an in-flight range as URLSession delivers it.
+    /// Ordered demux reads usually need only a few bytes at a time; making
+    /// those bytes wait for an entire 8 MiB response creates artificial
+    /// multi-second stalls on high-bitrate sources.
+    func copyReceived(
+        operationID: Int,
+        relativeOffset: Int,
+        to output: UnsafeMutablePointer<UInt8>,
+        maximumLength: Int
+    ) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard activeOperationID == operationID,
+              relativeOffset >= 0,
+              relativeOffset < received.count,
+              maximumLength > 0
+        else { return nil }
+        let count = min(maximumLength, received.count - relativeOffset)
+        received.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return }
+            output.update(
+                from: base.advanced(by: relativeOffset).assumingMemoryBound(to: UInt8.self),
+                count: count
+            )
+        }
+        return count
+    }
+
+    func waitForProgress(operationID: Int, timeout: TimeInterval) -> Bool {
+        let progress = lock.withLock { () -> DispatchSemaphore? in
+            guard activeOperationID == operationID, !finished else { return nil }
+            return progressSemaphore
+        }
+        guard let progress else { return false }
+        return progress.wait(timeout: .now() + max(timeout, 0)) == .success
+    }
+
     func cancel() {
         let task = lock.withLock { activeTask }
         task?.cancel()
         if let task {
             finish(BunnyNativeDecoderError.stopped, taskIdentifier: task.taskIdentifier)
+        }
+    }
+
+    /// Ends this fetcher's reusable URLSession while the owner still retains
+    /// the delegate. Constructing or invalidating a lazy session from
+    /// `deinit` races URLSession's asynchronous delegate-finalization callback
+    /// and can dereference an object that is already being destroyed.
+    func invalidate() {
+        cancel()
+        let session = sessionLock.withLock { () -> URLSession? in
+            guard !sessionInvalidated else { return nil }
+            sessionInvalidated = true
+            defer { sessionStorage = nil }
+            return sessionStorage
+        }
+        session?.invalidateAndCancel()
+    }
+
+    private func makeTask(with request: URLRequest) throws -> URLSessionDataTask {
+        try sessionLock.withLock {
+            guard !sessionInvalidated else { throw BunnyNativeDecoderError.stopped }
+            let session: URLSession
+            if let existing = sessionStorage {
+                session = existing
+            } else {
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.timeoutIntervalForRequest = 30
+                configuration.timeoutIntervalForResource = 30
+                configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+                configuration.httpMaximumConnectionsPerHost = 2
+                session = URLSession(
+                    configuration: configuration,
+                    delegate: self,
+                    delegateQueue: nil
+                )
+                sessionStorage = session
+            }
+            return session.dataTask(with: request)
         }
     }
 
@@ -417,7 +635,12 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
         }
         do {
             try policy.validateRequestURL(url)
-            completionHandler(request)
+            completionHandler(
+                PlaybackRangeRedirectPolicy.request(
+                    preservingHeadersFrom: task.currentRequest ?? task.originalRequest,
+                    for: request
+                )
+            )
         } catch {
             finish(error, taskIdentifier: task.taskIdentifier)
             completionHandler(nil)
@@ -448,7 +671,9 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
             received.append(data.prefix(remaining))
         }
         let complete = received.count >= maximumBytes
+        let progress = progressSemaphore
         lock.unlock()
+        progress.signal()
         if complete {
             dataTask.cancel()
             finish(
@@ -486,7 +711,9 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
         if let error {
             failure = error
         }
+        let progress = progressSemaphore
         lock.unlock()
+        progress.signal()
         semaphore.signal()
     }
 }
@@ -508,6 +735,13 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
         var waiter: DispatchSemaphore?
     }
 
+    private enum PrefetchLookup {
+        case copied(Int)
+        case ready(Chunk)
+        case pending(Range<UInt64>)
+        case unavailable
+    }
+
     let sourceLength: UInt64
 
     private var requestURL: URL
@@ -517,15 +751,23 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
     private let cancellationLock = NSLock()
     private var cancelled = false
     private var readsSuspendedForSeek = false
+    private var prioritizedSeekPrefetchWindows = 0
     private let remotePolicy: BunnyRemoteSourcePolicy?
     private let remoteFetch: BunnyRangeFetch?
     private let prefetchFetches: [BunnyRangeFetch]
     private let prefetchQueues: [DispatchQueue]
     private let prefetchLock = NSLock()
     private var prefetchStates: [PrefetchState]
+    private let maximumRetainedCacheBytes: Int
+    private let onBlockingRead: @Sendable (_ force: Bool) -> Bool
 
-    init(url: URL, trustedPrivateNetworkOrigin: URL?) throws {
+    init(
+        url: URL,
+        trustedPrivateNetworkOrigin: URL?,
+        onBlockingRead: @escaping @Sendable (_ force: Bool) -> Bool
+    ) throws {
         requestURL = url
+        self.onBlockingRead = onBlockingRead
         if url.isFileURL {
             remotePolicy = nil
             remoteFetch = nil
@@ -537,6 +779,8 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
                 throw BunnyNativeDecoderError.invalidSource("empty local file")
             }
             sourceLength = UInt64(fileSize)
+            maximumRetainedCacheBytes = PlaybackRangeChunkPolicy
+                .maximumRetainedCacheBytes(sourceLength: sourceLength)
             fileHandle = try FileHandle(forReadingFrom: url)
         } else {
             let policy = try BunnyRemoteSourcePolicy(
@@ -546,10 +790,41 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
             remotePolicy = policy
             let fetch = BunnyRangeFetch(policy: policy)
             remoteFetch = fetch
-            prefetchFetches = (0..<PlaybackRangeChunkPolicy.prefetchDepth).map { _ in
+            do {
+                var request = URLRequest(url: url)
+                request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+                request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+                let result = try fetch.run(request, maximumBytes: 2)
+                guard result.response.statusCode == 206 else {
+                    throw BunnyNativeDecoderError.network("HTTP \(result.response.statusCode)")
+                }
+                guard result.data.count == 1,
+                      let contentRange = BunnyContentRange(
+                        result.response.value(forHTTPHeaderField: "Content-Range")
+                      ),
+                      contentRange.lowerBound == 0,
+                      contentRange.upperBound == 0
+                else {
+                    throw BunnyNativeDecoderError.network("invalid byte-range response")
+                }
+                sourceLength = contentRange.totalLength
+                if let resolvedURL = result.response.url {
+                    try policy.validateRequestURL(resolvedURL)
+                    requestURL = resolvedURL
+                }
+            } catch {
+                fetch.invalidate()
+                throw error
+            }
+            let prefetchDepth = PlaybackRangeChunkPolicy.prefetchDepth(
+                sourceLength: sourceLength
+            )
+            maximumRetainedCacheBytes = PlaybackRangeChunkPolicy
+                .maximumRetainedCacheBytes(sourceLength: sourceLength)
+            prefetchFetches = (0..<prefetchDepth).map { _ in
                 BunnyRangeFetch(policy: policy)
             }
-            prefetchQueues = (0..<PlaybackRangeChunkPolicy.prefetchDepth).map { index in
+            prefetchQueues = (0..<prefetchDepth).map { index in
                 DispatchQueue(
                     label: "app.temustremio.bunny-native.prefetch.\(index)",
                     qos: .userInitiated
@@ -557,29 +832,15 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
             }
             prefetchStates = Array(
                 repeating: PrefetchState(),
-                count: PlaybackRangeChunkPolicy.prefetchDepth
+                count: prefetchDepth
             )
-            var request = URLRequest(url: url)
-            request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-            let result = try fetch.run(request, maximumBytes: 2)
-            guard result.response.statusCode == 206 else {
-                throw BunnyNativeDecoderError.network("HTTP \(result.response.statusCode)")
-            }
-            guard result.data.count == 1,
-                  let contentRange = BunnyContentRange(
-                    result.response.value(forHTTPHeaderField: "Content-Range")
-                  ),
-                  contentRange.lowerBound == 0,
-                  contentRange.upperBound == 0
-            else {
-                throw BunnyNativeDecoderError.network("invalid byte-range response")
-            }
-            sourceLength = contentRange.totalLength
-            if let resolvedURL = result.response.url {
-                try policy.validateRequestURL(resolvedURL)
-                requestURL = resolvedURL
-            }
+            NSLog(
+                "BUNNY_RANGE_POLICY source_bytes=%llu prefetch_depth=%d cache_bytes=%d maximum_bytes=%d",
+                sourceLength,
+                prefetchDepth,
+                maximumRetainedCacheBytes,
+                PlaybackRangeChunkPolicy.maximumBufferedBytes(sourceLength: sourceLength)
+            )
         }
     }
 
@@ -593,8 +854,9 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
             cancelled = true
             readsSuspendedForSeek = true
         }
-        remoteFetch?.cancel()
         cancelPrefetch()
+        remoteFetch?.invalidate()
+        prefetchFetches.forEach { $0.invalidate() }
     }
 
     /// Breaks a blocking range request without permanently closing the media
@@ -608,10 +870,11 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
         cancelPrefetch()
     }
 
-    func resumeAfterSeekInterrupt() {
+    func resumeAfterSeekInterrupt(prioritizeRandomAccess: Bool = false) {
         cancellationLock.withLock {
             guard !cancelled else { return }
             readsSuspendedForSeek = false
+            prioritizedSeekPrefetchWindows = prioritizeRandomAccess ? 1 : 0
         }
     }
 
@@ -661,27 +924,70 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
                 // Eight retained 2MiB chunks were too request-bound for a
                 // ~68Mbps remux. Two speculative 8MiB ranges hide request
                 // jitter while the aggregate reader remains bounded to 64MiB.
-                if let prefetched = takePrefetchedChunk(containing: absolute) {
+                switch takePrefetchedChunk(
+                    containing: absolute,
+                    output: output.advanced(by: copied),
+                    maximumLength: length - copied
+                ) {
+                case let .copied(count):
+                    copied += count
+                    if let consumedRange = PlaybackRangeChunkPolicy.byteRange(
+                        containing: absolute,
+                        sourceLength: sourceLength
+                    ), absolute + UInt64(count) >= consumedRange.upperBound {
+                        schedulePrefetchWindow(afterConsumedRange: consumedRange)
+                    }
+                    continue
+                case let .ready(prefetched):
                     retainChunk(prefetched)
                     schedulePrefetchWindow(after: prefetched)
                     continue
+                case let .pending(pendingRange):
+                    // Do not let one slow speculative response block ordered
+                    // demuxing while later ranges are already complete. A
+                    // small foreground bridge keeps roughly the same request
+                    // geometry as metadata reads and leaves the full prefetch
+                    // in flight for the remainder of its range.
+                    if let bridgeRange = PlaybackRangeChunkPolicy.foregroundBridgeRange(
+                        startingAt: absolute,
+                        within: pendingRange,
+                        sourceLength: sourceLength
+                    ) {
+                        let bridge = try fetchChunk(
+                            offset: bridgeRange.lowerBound,
+                            length: bridgeRange.count,
+                            purpose: "bridge"
+                        )
+                        guard !bridge.data.isEmpty else { break }
+                        retainChunk(bridge)
+                        continue
+                    }
+                case .unavailable:
+                    break
                 }
 
                 guard let range = PlaybackRangeChunkPolicy.byteRange(
                     containing: absolute,
                     sourceLength: sourceLength
                 ) else { break }
-                // Begin the following ranges while the foreground request for
-                // this range is still in flight. Starting only after the
-                // current response completed was too late for immediate
-                // post-seek demuxing.
-                schedulePrefetchWindow(afterConsumedRange: range)
+                let isMetadataPrefix = range.lowerBound == 0
+                // Begin following streaming ranges while an ordinary body
+                // request is still in flight. The metadata prefix is the one
+                // exception: fetch it first, then immediately seed the first
+                // body window so parallel reads do not delay container setup.
+                if !isMetadataPrefix {
+                    schedulePrefetchWindow(afterConsumedRange: range)
+                }
+                _ = onBlockingRead(true)
                 let chunk = try fetchChunk(
                     offset: range.lowerBound,
                     length: range.count
                 )
                 guard !chunk.data.isEmpty else { break }
                 retainChunk(chunk)
+                if isMetadataPrefix {
+                    schedulePrefetchWindow(afterConsumedRange: range)
+                }
                 guard copied > copiedBeforeIteration || chunk.contains(absolute) else {
                     throw BunnyNativeDecoderError.network("byte-range reader made no progress")
                 }
@@ -698,7 +1004,7 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
         }
         chunks.insert(chunk, at: 0)
         var retainedBytes = chunks.reduce(0) { $0 + $1.data.count }
-        while retainedBytes > PlaybackRangeChunkPolicy.maximumRetainedCacheBytes,
+        while retainedBytes > maximumRetainedCacheBytes,
               chunks.count > 1 {
             retainedBytes -= chunks.removeLast().data.count
         }
@@ -708,7 +1014,8 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
         offset: UInt64,
         length: Int,
         using fetchOverride: BunnyRangeFetch? = nil,
-        purpose: String = "read"
+        purpose: String = "read",
+        operationID: Int? = nil
     ) throws -> Chunk {
         guard remotePolicy != nil,
               let fetch = fetchOverride ?? remoteFetch
@@ -734,7 +1041,8 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
                         return self.cancellationLock.withLock {
                             !self.cancelled && !self.readsSuspendedForSeek
                         }
-                    }
+                    },
+                    operationID: operationID
                 )
                 guard result.response.statusCode == 206 else {
                     throw BunnyNativeDecoderError.network("server ignored byte-range request")
@@ -795,21 +1103,22 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
     }
 
     private func schedulePrefetchWindow(afterConsumedRange consumedRange: Range<UInt64>) {
-        guard consumedRange.count == Int(PlaybackRangeChunkPolicy.streamingChunkBytes),
-              !prefetchFetches.isEmpty
-        else { return }
-
-        var desiredRanges: [Range<UInt64>] = []
-        var nextOffset = consumedRange.upperBound
-        for _ in 0..<PlaybackRangeChunkPolicy.prefetchDepth {
-            guard let range = PlaybackRangeChunkPolicy.byteRange(
-                containing: nextOffset,
+        guard !prefetchFetches.isEmpty else { return }
+        let requestedDepth = cancellationLock.withLock { () -> Int in
+            guard prioritizedSeekPrefetchWindows > 0 else {
+                return prefetchFetches.count
+            }
+            prioritizedSeekPrefetchWindows -= 1
+            return PlaybackRangeChunkPolicy.initialSeekPrefetchDepth(
                 sourceLength: sourceLength
-            ), range.count == Int(PlaybackRangeChunkPolicy.streamingChunkBytes)
-            else { break }
-            desiredRanges.append(range)
-            nextOffset = range.upperBound
+            )
         }
+        let desiredRanges = PlaybackRangeChunkPolicy.prefetchRanges(
+            after: consumedRange,
+            sourceLength: sourceLength,
+            depth: requestedDepth
+        )
+        guard !desiredRanges.isEmpty else { return }
 
         struct Work {
             let slot: Int
@@ -870,7 +1179,8 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
                             offset: item.range.lowerBound,
                             length: item.range.count,
                             using: fetch,
-                            purpose: "prefetch"
+                            purpose: "prefetch",
+                            operationID: item.generation
                         )
                     )
                 } catch {
@@ -890,7 +1200,13 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
         }
     }
 
-    private func takePrefetchedChunk(containing offset: UInt64) -> Chunk? {
+    private func takePrefetchedChunk(
+        containing offset: UInt64,
+        output: UnsafeMutablePointer<UInt8>,
+        maximumLength: Int
+    ) -> PrefetchLookup {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        var reportedBlockingRead = false
         while true {
             var expectedSlot: Int?
             var expectedGeneration = 0
@@ -901,33 +1217,78 @@ private final class BunnyMediaRangeReader: @unchecked Sendable {
                 state.range?.contains(offset) == true
             }), let range = prefetchStates[slot].range else {
                 prefetchLock.unlock()
-                return nil
+                return .unavailable
             }
             if let result = prefetchStates[slot].result {
                 prefetchStates[slot].range = nil
                 prefetchStates[slot].result = nil
                 prefetchStates[slot].waiter = nil
                 prefetchLock.unlock()
-                guard case let .success(chunk) = result else { return nil }
-                return chunk
+                guard case let .success(chunk) = result else { return .unavailable }
+                return .ready(chunk)
             }
-
-            let semaphore = DispatchSemaphore(value: 0)
-            prefetchStates[slot].waiter = semaphore
             expectedSlot = slot
             expectedGeneration = prefetchStates[slot].generation
             expectedRange = range
             prefetchLock.unlock()
 
-            guard semaphore.wait(timeout: .now() + 31) == .success else {
-                prefetchLock.withLock {
-                    guard let expectedSlot,
-                          prefetchStates[expectedSlot].generation == expectedGeneration,
-                          prefetchStates[expectedSlot].range == expectedRange
-                    else { return }
-                    prefetchStates[expectedSlot].waiter = nil
+            let relativeOffset = Int(offset - range.lowerBound)
+            if let copied = prefetchFetches[slot].copyReceived(
+                operationID: expectedGeneration,
+                relativeOffset: relativeOffset,
+                to: output,
+                maximumLength: maximumLength
+            ), copied > 0 {
+                return .copied(copied)
+            }
+
+            let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+            let grace = TimeInterval(
+                PlaybackRangeChunkPolicy.prefetchCompletionGraceMilliseconds(
+                    sourceLength: sourceLength
+                )
+            ) / 1_000
+            if elapsed < grace {
+                if elapsed >= 0.10, !reportedBlockingRead {
+                    reportedBlockingRead = onBlockingRead(false)
                 }
-                return nil
+                _ = prefetchFetches[slot].waitForProgress(
+                    operationID: expectedGeneration,
+                    timeout: min(0.10, max(grace - elapsed, 0))
+                )
+                continue
+            }
+
+            prefetchLock.lock()
+            guard let expectedSlot,
+                  prefetchStates[expectedSlot].generation == expectedGeneration,
+                  prefetchStates[expectedSlot].range == expectedRange
+            else {
+                prefetchLock.unlock()
+                return .unavailable
+            }
+            prefetchStates[expectedSlot].waiter = nil
+            if let result = prefetchStates[expectedSlot].result {
+                prefetchStates[expectedSlot].range = nil
+                prefetchStates[expectedSlot].result = nil
+                prefetchLock.unlock()
+                guard case let .success(chunk) = result else { return .unavailable }
+                return .ready(chunk)
+            }
+            prefetchLock.unlock()
+            if let expectedRange {
+                if !reportedBlockingRead {
+                    _ = onBlockingRead(true)
+                }
+                NSLog(
+                    "BUNNY_RANGE bridge_required offset=%llu pending_lower=%llu pending_upper=%llu",
+                    offset,
+                    expectedRange.lowerBound,
+                    expectedRange.upperBound
+                )
+                return .pending(expectedRange)
+            } else {
+                return .unavailable
             }
         }
     }
@@ -964,6 +1325,8 @@ private let bunnyNativeReadAt: @convention(c) (
 private struct BunnyNativeTrackDescriptor: @unchecked Sendable {
     let raw: StremioMediaTrackInfo
     let codecPrivate: Data
+    let videoColor: StremioMediaVideoColorInfo
+    let additionalCodecAtoms: [String: Data]
     let codecID: String
     let name: String
     let language: String
@@ -973,9 +1336,994 @@ private struct BunnyNativeTrackDescriptor: @unchecked Sendable {
 private struct BunnyNativePacket: @unchecked Sendable {
     let trackIndex: Int
     let presentationTime: CMTime
+    let decodeTime: CMTime
     let duration: CMTime
     let flags: UInt32
     let data: Data
+    let hdr10PlusData: Data?
+}
+
+private struct BunnyRawMediaPacket: @unchecked Sendable {
+    let trackIndex: Int
+    let presentationTimeNanoseconds: Int64
+    let decodeTimeNanoseconds: Int64
+    let durationNanoseconds: UInt64
+    let flags: UInt32
+    let data: Data
+    let hdr10PlusData: Data?
+}
+
+private enum BunnyPacketReadResult: @unchecked Sendable {
+    case packet(BunnyRawMediaPacket)
+    case endOfStream
+    case failure(String)
+}
+
+/// Owns the one mutating Rust `next_packet` call independently from Bunny's
+/// decode/presentation worker. The result inbox is single-slot and the caller
+/// requests no more work while its compressed reservoir is full, so read-ahead
+/// remains bounded without letting a progressive range read stall A/V pacing.
+private final class BunnyPacketReadPump: @unchecked Sendable {
+    private let queue = DispatchQueue(
+        label: "app.temustremio.bunny-packet-read",
+        qos: .userInitiated
+    )
+    private let lock = NSLock()
+    private let session: OpaquePointer
+    private var generation = 0
+    private var active = true
+    private var inFlight = false
+    private var pendingResult: BunnyPacketReadResult?
+
+    init(session: OpaquePointer) {
+        self.session = session
+    }
+
+    func requestRead() {
+        let requestGeneration = lock.withLock { () -> Int? in
+            guard active, !inFlight, pendingResult == nil else { return nil }
+            inFlight = true
+            return generation
+        }
+        guard let requestGeneration else { return }
+        queue.async { [weak self] in
+            self?.performRead(generation: requestGeneration)
+        }
+    }
+
+    func takeResult() -> BunnyPacketReadResult? {
+        lock.withLock {
+            defer { pendingResult = nil }
+            return pendingResult
+        }
+    }
+
+    /// The reader must be interrupted before this call when a seek or track
+    /// selection needs exclusive access to the Rust session. A completed
+    /// result is returned so a track-only change can retain packets belonging
+    /// to unaffected tracks. Seeks and shutdown deliberately discard it via
+    /// `pauseAndWait()`.
+    func pauseAndTakeResult() -> BunnyPacketReadResult? {
+        lock.withLock {
+            active = false
+        }
+        queue.sync {}
+        return lock.withLock {
+            generation &+= 1
+            inFlight = false
+            defer { pendingResult = nil }
+            return pendingResult
+        }
+    }
+
+    func pauseAndWait() {
+        _ = pauseAndTakeResult()
+    }
+
+    func resume() {
+        lock.withLock { active = true }
+    }
+
+    func stop() {
+        pauseAndWait()
+    }
+
+    private func performRead(generation requestGeneration: Int) {
+        var raw = StremioMediaPacket()
+        var error = [CChar](repeating: 0, count: 512)
+        let resultCode = error.withUnsafeMutableBufferPointer { errorBuffer in
+            stremio_media_next_packet(
+                session,
+                &raw,
+                errorBuffer.baseAddress,
+                errorBuffer.count
+            )
+        }
+        let result: BunnyPacketReadResult
+        if resultCode == 0 {
+            result = .endOfStream
+        } else if resultCode == 1,
+                  raw.abi_version == 3,
+                  raw.data_size <= 16 * 1_024 * 1_024,
+                  let bytes = raw.data {
+            let hdr10PlusData: Data?
+            if raw.hdr10_plus_data_size == 0 {
+                hdr10PlusData = nil
+            } else if raw.hdr10_plus_data_size <= 64 * 1_024,
+                      let hdr10PlusBytes = raw.hdr10_plus_data {
+                hdr10PlusData = Data(
+                    bytes: hdr10PlusBytes,
+                    count: raw.hdr10_plus_data_size
+                )
+            } else {
+                hdr10PlusData = nil
+            }
+            result = .packet(BunnyRawMediaPacket(
+                trackIndex: Int(raw.track_index),
+                presentationTimeNanoseconds: raw.presentation_time_ns,
+                decodeTimeNanoseconds: raw.decode_time_ns,
+                durationNanoseconds: raw.duration_ns,
+                flags: raw.flags,
+                data: Data(bytes: bytes, count: raw.data_size),
+                hdr10PlusData: hdr10PlusData
+            ))
+        } else {
+            let message = error.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress, base.pointee != 0 else {
+                    return "media packet read failed"
+                }
+                return String(cString: base)
+            }
+            result = .failure(message)
+        }
+        lock.withLock {
+            // `pauseAndTakeResult()` first prevents new work, then waits for
+            // this queue. Keep a read that completed during that wait so an
+            // unrelated audio/subtitle selection cannot consume and lose the
+            // next video keyframe.
+            guard requestGeneration == generation else { return }
+            inFlight = false
+            pendingResult = result
+        }
+    }
+}
+
+private final class BunnyVideoDecodeFrameContext: @unchecked Sendable {
+    let generation: Int
+    let submissionID: Int
+    let shouldDisplay: Bool
+    let decodeTime: TimeInterval
+
+    init(
+        generation: Int,
+        submissionID: Int,
+        shouldDisplay: Bool,
+        decodeTime: TimeInterval
+    ) {
+        self.generation = generation
+        self.submissionID = submissionID
+        self.shouldDisplay = shouldDisplay
+        self.decodeTime = decodeTime
+    }
+}
+
+private struct BunnyDecodedVideoFrame: @unchecked Sendable {
+    let sampleBuffer: CMSampleBuffer
+    let presentationTime: CMTime
+    let duration: CMTime
+}
+
+private struct BunnyVideoDecompressionDiagnostics: Sendable {
+    let inFlightFrames: Int
+    let readyFrames: Int
+    let latestSubmittedDecodeTime: TimeInterval
+    let earliestInFlightDecodeTime: TimeInterval?
+    let maximumReorderLag: TimeInterval
+    let firstReadyPresentationTime: TimeInterval?
+    let lastDeliveredPresentationTime: TimeInterval
+}
+
+private struct BunnyVideoPresentationSnapshot: Sendable {
+    let totalFrames: Int
+    let framesSinceReset: Int
+    let queueEnd: TimeInterval
+}
+
+private struct BunnyDecodedHDRSnapshot: Sendable {
+    let pixelFormat: String
+    let colorPrimaries: String?
+    let transferFunction: String?
+    let yCbCrMatrix: String?
+    let hasMasteringMetadata: Bool
+    let hasContentLightLevel: Bool
+}
+
+/// VideoToolbox owns compressed-frame scheduling while Bunny owns the media
+/// clock. Decoding before enqueueing avoids coupling a 4K decoder burst to the
+/// display renderer's presentation deadline; the renderer only receives
+/// uncompressed frames that are ready to present.
+private final class BunnyVideoDecompressionPipeline: @unchecked Sendable {
+    private static let maximumBufferedFrames = 24
+    private static let minimumReorderSafetyDuration: TimeInterval = 0
+    private static let outputCallback: VTDecompressionOutputCallback = {
+        outputRefCon,
+        sourceFrameRefCon,
+        status,
+        infoFlags,
+        imageBuffer,
+        presentationTime,
+        presentationDuration in
+        guard let outputRefCon, let sourceFrameRefCon else { return }
+        let pipeline = Unmanaged<BunnyVideoDecompressionPipeline>
+            .fromOpaque(outputRefCon)
+            .takeUnretainedValue()
+        let context = Unmanaged<BunnyVideoDecodeFrameContext>
+            .fromOpaque(sourceFrameRefCon)
+            .takeRetainedValue()
+        pipeline.consume(
+            context: context,
+            status: status,
+            infoFlags: infoFlags,
+            imageBuffer: imageBuffer,
+            presentationTime: presentationTime,
+            presentationDuration: presentationDuration
+        )
+    }
+
+    private let formatDescription: CMVideoFormatDescription
+    private let lock = NSLock()
+    private var session: VTDecompressionSession?
+    private var generation = 0
+    private var nextSubmissionID = 0
+    private var inFlightFrames = 0
+    private var inFlightDecodeTimes = [Int: TimeInterval]()
+    private var readyFrames = [BunnyDecodedVideoFrame]()
+    private var failureStatus: OSStatus?
+    private var decoderDroppedFrames = 0
+    private var lastDeliveredPresentationTime = -Double.infinity
+    private var latestSubmittedDecodeTime = -Double.infinity
+    private var maximumReorderLag = minimumReorderSafetyDuration
+    private var acceptsAllReadyFrames = false
+    private var reportedHDRDiagnostics = false
+    private var decodedHDRSnapshot: BunnyDecodedHDRSnapshot?
+
+    init(formatDescription: CMVideoFormatDescription) {
+        self.formatDescription = formatDescription
+    }
+
+    deinit {
+        invalidate()
+    }
+
+    var canAcceptMore: Bool {
+        lock.withLock {
+            failureStatus == nil
+                && inFlightFrames + readyFrames.count < Self.maximumBufferedFrames
+        }
+    }
+
+    var isDrained: Bool {
+        lock.withLock { inFlightFrames == 0 && readyFrames.isEmpty }
+    }
+
+    var hasReadyFrames: Bool {
+        lock.withLock { !readyFrames.isEmpty }
+    }
+
+    /// End of the contiguous decoded output that can be presented without
+    /// overtaking either an unfinished callback or a future reordered packet.
+    var deliverablePresentationEnd: TimeInterval? {
+        lock.withLock {
+            var end: TimeInterval?
+            for frame in readyFrames {
+                guard isDeliverableLocked(frame) else { break }
+                let presentationTime = frame.presentationTime.seconds
+                let duration = max(frame.duration.seconds, 0)
+                guard presentationTime.isFinite else { continue }
+                end = max(end ?? presentationTime, presentationTime + duration)
+            }
+            return end
+        }
+    }
+
+    var droppedFrameCount: Int {
+        lock.withLock { decoderDroppedFrames }
+    }
+
+    var failure: OSStatus? {
+        lock.withLock { failureStatus }
+    }
+
+    var diagnosticsSnapshot: BunnyVideoDecompressionDiagnostics {
+        lock.withLock {
+            BunnyVideoDecompressionDiagnostics(
+                inFlightFrames: inFlightFrames,
+                readyFrames: readyFrames.count,
+                latestSubmittedDecodeTime: latestSubmittedDecodeTime,
+                earliestInFlightDecodeTime: earliestInFlightDecodeTimeLocked,
+                maximumReorderLag: maximumReorderLag,
+                firstReadyPresentationTime: readyFrames.first?.presentationTime.seconds,
+                lastDeliveredPresentationTime: lastDeliveredPresentationTime
+            )
+        }
+    }
+
+    var hdrDiagnosticsSnapshot: BunnyDecodedHDRSnapshot? {
+        lock.withLock { decodedHDRSnapshot }
+    }
+
+    func submit(
+        _ sampleBuffer: CMSampleBuffer,
+        shouldDisplay: Bool,
+        decodeTime: TimeInterval,
+        observedReorderLag: TimeInterval
+    ) throws {
+        let session = try decompressionSession()
+        let contextValues = lock.withLock { () -> (generation: Int, submissionID: Int) in
+            let submissionID = nextSubmissionID
+            nextSubmissionID &+= 1
+            inFlightFrames += 1
+            inFlightDecodeTimes[submissionID] = decodeTime
+            if decodeTime.isFinite {
+                latestSubmittedDecodeTime = max(latestSubmittedDecodeTime, decodeTime)
+            }
+            if observedReorderLag.isFinite {
+                maximumReorderLag = max(
+                    maximumReorderLag,
+                    max(observedReorderLag, 0)
+                )
+            }
+            return (generation, submissionID)
+        }
+        let context = BunnyVideoDecodeFrameContext(
+            generation: contextValues.generation,
+            submissionID: contextValues.submissionID,
+            shouldDisplay: shouldDisplay,
+            decodeTime: decodeTime
+        )
+        let contextPointer = Unmanaged.passRetained(context).toOpaque()
+        // Bunny reorders decoded output using the measured Matroska DTS/PTS
+        // lag. Temporal processing would duplicate that work and permits
+        // VideoToolbox to retain an entire GOP indefinitely.
+        let decodeFlags: VTDecodeFrameFlags = [
+            ._EnableAsynchronousDecompression,
+        ]
+        var infoFlags = VTDecodeInfoFlags()
+        let status = VTDecompressionSessionDecodeFrame(
+            session,
+            sampleBuffer: sampleBuffer,
+            flags: decodeFlags,
+            frameRefcon: contextPointer,
+            infoFlagsOut: &infoFlags
+        )
+        guard status == noErr else {
+            Unmanaged<BunnyVideoDecodeFrameContext>
+                .fromOpaque(contextPointer)
+                .release()
+            lock.withLock {
+                inFlightFrames = max(inFlightFrames - 1, 0)
+                inFlightDecodeTimes.removeValue(forKey: contextValues.submissionID)
+                failureStatus = status
+            }
+            NSLog("BUNNY_VT_SUBMIT_FAIL status=%d", status)
+            throw BunnyNativeDecoderError.sampleBuffer(status)
+        }
+        if infoFlags.contains(.frameDropped) {
+            lock.withLock { decoderDroppedFrames += 1 }
+        }
+    }
+
+    func takeReadyFrame() -> BunnyDecodedVideoFrame? {
+        lock.withLock {
+            guard let first = readyFrames.first else { return nil }
+            guard isDeliverableLocked(first) else { return nil }
+            let presentationTime = first.presentationTime.seconds
+            let frame = readyFrames.removeFirst()
+            if presentationTime.isFinite {
+                lastDeliveredPresentationTime = max(
+                    lastDeliveredPresentationTime,
+                    presentationTime
+                )
+            }
+            return frame
+        }
+    }
+
+    func finishDelayedFrames() {
+        guard let session = lock.withLock({ self.session }) else { return }
+        VTDecompressionSessionFinishDelayedFrames(session)
+        lock.withLock { acceptsAllReadyFrames = true }
+    }
+
+    func reset() {
+        let oldSession = lock.withLock { () -> VTDecompressionSession? in
+            generation &+= 1
+            readyFrames.removeAll(keepingCapacity: true)
+            failureStatus = nil
+            lastDeliveredPresentationTime = -Double.infinity
+            latestSubmittedDecodeTime = -Double.infinity
+            maximumReorderLag = Self.minimumReorderSafetyDuration
+            acceptsAllReadyFrames = false
+            inFlightDecodeTimes.removeAll(keepingCapacity: true)
+            let oldSession = session
+            session = nil
+            return oldSession
+        }
+        guard let oldSession else { return }
+        VTDecompressionSessionFinishDelayedFrames(oldSession)
+        VTDecompressionSessionWaitForAsynchronousFrames(oldSession)
+        VTDecompressionSessionInvalidate(oldSession)
+        lock.withLock {
+            inFlightFrames = 0
+            inFlightDecodeTimes.removeAll(keepingCapacity: true)
+        }
+    }
+
+    func invalidate() {
+        reset()
+    }
+
+    private func decompressionSession() throws -> VTDecompressionSession {
+        if let existing = lock.withLock({ session }) { return existing }
+        var callback = VTDecompressionOutputCallbackRecord(
+            decompressionOutputCallback: Self.outputCallback,
+            decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
+        )
+        var created: VTDecompressionSession?
+        let decoderSpecification: CFDictionary?
+        if #available(iOS 17.0, *) {
+            decoderSpecification = [
+                kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true,
+            ] as CFDictionary
+        } else {
+            decoderSpecification = nil
+        }
+        let status = VTDecompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            formatDescription: formatDescription,
+            decoderSpecification: decoderSpecification,
+            imageBufferAttributes: nil,
+            outputCallback: &callback,
+            decompressionSessionOut: &created
+        )
+        guard status == noErr, let created else {
+            let subtype = bunnyFourCC(
+                CMFormatDescriptionGetMediaSubType(formatDescription)
+            )
+            let extensions = CMFormatDescriptionGetExtensions(formatDescription)
+                .map { $0 as NSDictionary } ?? NSDictionary()
+            let atoms = extensions[
+                kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String
+            ] as? [String: Any]
+            let atomSummary = atoms?.map { name, value in
+                let size = (value as? Data)?.count ?? -1
+                return "\(name):\(size)"
+            }.sorted().joined(separator: ",") ?? "none"
+            NSLog(
+                "BUNNY_VT_CREATE_FAIL status=%d format=%@ atoms=%@",
+                status,
+                subtype,
+                atomSummary
+            )
+            throw BunnyNativeDecoderError.sampleBuffer(status)
+        }
+        if #available(iOS 14.0, *) {
+            let propagationStatus = VTSessionSetProperty(
+                created,
+                key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata,
+                value: kCFBooleanTrue
+            )
+            // Some Simulator decoders report the property as unsupported;
+            // Apple's documented default is already true in that case.
+            if propagationStatus != noErr,
+               propagationStatus != kVTPropertyNotSupportedErr {
+                NSLog("BUNNY_HDR_PROPAGATION_FAIL status=%d", propagationStatus)
+            }
+        }
+        lock.withLock { session = created }
+        return created
+    }
+
+    private func consume(
+        context: BunnyVideoDecodeFrameContext,
+        status: OSStatus,
+        infoFlags: VTDecodeInfoFlags,
+        imageBuffer: CVImageBuffer?,
+        presentationTime: CMTime,
+        presentationDuration: CMTime
+    ) {
+        // Keep this context in the in-flight watermark until its decoded frame
+        // has actually been inserted. Removing it before sample construction
+        // creates a race where the presentation pump can deliver a later PTS.
+        let currentGeneration = lock.withLock { generation }
+        guard context.generation == currentGeneration else { return }
+        guard status == noErr else {
+            complete(context) { failureStatus = status }
+            NSLog(
+                "BUNNY_VT_CALLBACK_FAIL status=%d dts=%.3f pts=%.3f",
+                status,
+                context.decodeTime,
+                presentationTime.seconds
+            )
+            return
+        }
+        if infoFlags.contains(.frameDropped) {
+            complete(context) { decoderDroppedFrames += 1 }
+            return
+        }
+        guard context.shouldDisplay, let imageBuffer else {
+            complete(context)
+            return
+        }
+
+        var decodedFormat: CMVideoFormatDescription?
+        var sampleBuffer: CMSampleBuffer?
+        var timing = CMSampleTimingInfo(
+            duration: presentationDuration,
+            presentationTimeStamp: presentationTime,
+            decodeTimeStamp: .invalid
+        )
+        let formatStatus = CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: imageBuffer,
+            formatDescriptionOut: &decodedFormat
+        )
+        let sampleStatus: OSStatus
+        if formatStatus == noErr, let decodedFormat {
+            sampleStatus = CMSampleBufferCreateReadyWithImageBuffer(
+                allocator: kCFAllocatorDefault,
+                imageBuffer: imageBuffer,
+                formatDescription: decodedFormat,
+                sampleTiming: &timing,
+                sampleBufferOut: &sampleBuffer
+            )
+        } else {
+            sampleStatus = formatStatus
+        }
+        guard sampleStatus == noErr, let sampleBuffer else {
+            complete(context) { failureStatus = sampleStatus }
+            NSLog(
+                "BUNNY_VT_SAMPLE_FAIL status=%d dts=%.3f pts=%.3f",
+                sampleStatus,
+                context.decodeTime,
+                presentationTime.seconds
+            )
+            return
+        }
+        let shouldReportHDR = lock.withLock { () -> Bool in
+            guard !reportedHDRDiagnostics else { return false }
+            reportedHDRDiagnostics = true
+            return true
+        }
+        if shouldReportHDR,
+           let outputFormat = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            let extensions = CMFormatDescriptionGetExtensions(outputFormat)
+                .map { $0 as NSDictionary } ?? NSDictionary()
+            let pixelFormat = CVPixelBufferGetPixelFormatType(imageBuffer)
+            let primaries = extensions[
+                kCMFormatDescriptionExtension_ColorPrimaries as String
+            ].map { String(describing: $0) } ?? "none"
+            let transfer = extensions[
+                kCMFormatDescriptionExtension_TransferFunction as String
+            ].map { String(describing: $0) } ?? "none"
+            let matrix = extensions[
+                kCMFormatDescriptionExtension_YCbCrMatrix as String
+            ].map { String(describing: $0) } ?? "none"
+            let hasMastering = extensions[
+                kCMFormatDescriptionExtension_MasteringDisplayColorVolume as String
+            ] != nil
+            let hasContentLight = extensions[
+                kCMFormatDescriptionExtension_ContentLightLevelInfo as String
+            ] != nil
+            let snapshot = BunnyDecodedHDRSnapshot(
+                pixelFormat: bunnyFourCC(pixelFormat),
+                colorPrimaries: primaries == "none" ? nil : primaries,
+                transferFunction: transfer == "none" ? nil : transfer,
+                yCbCrMatrix: matrix == "none" ? nil : matrix,
+                hasMasteringMetadata: hasMastering,
+                hasContentLightLevel: hasContentLight
+            )
+            lock.withLock { decodedHDRSnapshot = snapshot }
+            NSLog(
+                "BUNNY_HDR_OUTPUT pixel_format=%@ primaries=%@ transfer=%@ matrix=%@ mdcv=%@ clli=%@",
+                snapshot.pixelFormat,
+                primaries,
+                transfer,
+                matrix,
+                hasMastering ? "yes" : "no",
+                hasContentLight ? "yes" : "no"
+            )
+        }
+        let frame = BunnyDecodedVideoFrame(
+            sampleBuffer: sampleBuffer,
+            presentationTime: presentationTime,
+            duration: presentationDuration
+        )
+        complete(context) {
+            let presentationSeconds = presentationTime.seconds
+            if presentationSeconds.isFinite,
+               presentationSeconds + 0.000_5 < lastDeliveredPresentationTime {
+                // A malformed or unexpectedly late output frame is unusable by
+                // AVSampleBufferVideoRenderer, but it must not end playback.
+                decoderDroppedFrames += 1
+                NSLog(
+                    "BUNNY_VT_REORDER_DROP dts=%.3f pts=%.3f last=%.3f lag=%.3f",
+                    context.decodeTime,
+                    presentationSeconds,
+                    lastDeliveredPresentationTime,
+                    maximumReorderLag
+                )
+                return
+            }
+            let insertionIndex = readyFrames.firstIndex {
+                $0.presentationTime > presentationTime
+            } ?? readyFrames.endIndex
+            readyFrames.insert(frame, at: insertionIndex)
+        }
+    }
+
+    private var earliestInFlightDecodeTimeLocked: TimeInterval? {
+        guard !inFlightDecodeTimes.isEmpty else { return nil }
+        // An invalid DTS cannot establish a safe presentation frontier. Hold
+        // ready output until that callback completes rather than guessing.
+        guard inFlightDecodeTimes.values.allSatisfy(\.isFinite) else {
+            return -.infinity
+        }
+        return inFlightDecodeTimes.values.min()
+    }
+
+    private var safePresentationFrontierLocked: TimeInterval {
+        // A newer asynchronous callback can complete before an older one.
+        // Base the reorder watermark on the earliest decode that has not
+        // completed yet so the presentation pump cannot overtake it.
+        let decodeFrontier = earliestInFlightDecodeTimeLocked
+            ?? latestSubmittedDecodeTime
+        return decodeFrontier - maximumReorderLag
+    }
+
+    private func isDeliverableLocked(_ frame: BunnyDecodedVideoFrame) -> Bool {
+        if acceptsAllReadyFrames, inFlightFrames == 0 { return true }
+        let presentationTime = frame.presentationTime.seconds
+        return !presentationTime.isFinite
+            || presentationTime <= safePresentationFrontierLocked + 0.000_5
+    }
+
+    private func complete(
+        _ context: BunnyVideoDecodeFrameContext,
+        update: () -> Void = {}
+    ) {
+        lock.withLock {
+            inFlightFrames = max(inFlightFrames - 1, 0)
+            inFlightDecodeTimes.removeValue(forKey: context.submissionID)
+            guard context.generation == generation else { return }
+            update()
+        }
+    }
+}
+
+/// Drains decoded frames independently from the synchronous Rust range-read
+/// callback. A slow HTTP read must not prevent already-decoded frames from
+/// reaching Apple's small uncompressed renderer queue before their PTS.
+private final class BunnyVideoPresentationPump: @unchecked Sendable {
+    private let queue = DispatchQueue(
+        label: "app.temustremio.bunny-video-presentation",
+        qos: .userInteractive
+    )
+    private let stateLock = NSLock()
+    private let pipeline: BunnyVideoDecompressionPipeline
+    private let rendererIsReady: () -> Bool
+    private let enqueue: (CMSampleBuffer) -> Void
+    private let onStateChanged: (BunnyVideoPresentationSnapshot, TimeInterval?) -> Void
+    private var active = false
+    private var suspended = false
+    private var totalFrames = 0
+    private var framesSinceReset = 0
+    private var queueEnd: TimeInterval
+
+    init(
+        pipeline: BunnyVideoDecompressionPipeline,
+        initialQueueEnd: TimeInterval,
+        rendererIsReady: @escaping () -> Bool,
+        enqueue: @escaping (CMSampleBuffer) -> Void,
+        onStateChanged: @escaping (BunnyVideoPresentationSnapshot, TimeInterval?) -> Void
+    ) {
+        self.pipeline = pipeline
+        queueEnd = initialQueueEnd
+        self.rendererIsReady = rendererIsReady
+        self.enqueue = enqueue
+        self.onStateChanged = onStateChanged
+    }
+
+    var snapshot: BunnyVideoPresentationSnapshot {
+        stateLock.withLock {
+            BunnyVideoPresentationSnapshot(
+                totalFrames: totalFrames,
+                framesSinceReset: framesSinceReset,
+                queueEnd: queueEnd
+            )
+        }
+    }
+
+    func start() {
+        queue.async { [weak self] in
+            guard let self, !active else { return }
+            active = true
+            drainOnce()
+        }
+    }
+
+    func suspend() {
+        queue.sync { suspended = true }
+    }
+
+    func reset(queueEnd: TimeInterval) {
+        queue.sync {
+            stateLock.withLock {
+                framesSinceReset = 0
+                self.queueEnd = queueEnd
+            }
+        }
+    }
+
+    func resume() {
+        queue.sync { suspended = false }
+    }
+
+    func stop() {
+        queue.sync { active = false }
+    }
+
+    private func drainOnce() {
+        guard active else { return }
+        if !suspended,
+           rendererIsReady(),
+           let frame = pipeline.takeReadyFrame() {
+            enqueue(frame.sampleBuffer)
+            let snapshot = stateLock.withLock { () -> BunnyVideoPresentationSnapshot in
+                totalFrames += 1
+                framesSinceReset += 1
+                let frameEnd = frame.presentationTime.seconds
+                    + max(frame.duration.seconds, 0)
+                if frameEnd.isFinite {
+                    queueEnd = max(queueEnd, frameEnd)
+                }
+                return BunnyVideoPresentationSnapshot(
+                    totalFrames: totalFrames,
+                    framesSinceReset: framesSinceReset,
+                    queueEnd: queueEnd
+                )
+            }
+            onStateChanged(snapshot, pipeline.deliverablePresentationEnd)
+            queue.async { [weak self] in self?.drainOnce() }
+        } else {
+            onStateChanged(snapshot, pipeline.deliverablePresentationEnd)
+            queue.asyncAfter(deadline: .now() + 0.002) { [weak self] in
+                self?.drainOnce()
+            }
+        }
+    }
+
+}
+
+private struct BunnyNativePacketReservoir {
+    private struct Entry {
+        let packet: BunnyNativePacket
+        let kind: UInt32
+        let timelineStart: TimeInterval
+        let timelineEnd: TimeInterval
+    }
+
+    private var entries: [Entry?] = []
+    private var firstLiveIndex = 0
+    private(set) var byteCount = 0
+    private(set) var packetCount = 0
+    private var videoPacketCount = 0
+    private var audioPacketCount = 0
+    private var subtitlePacketCount = 0
+    private var firstTimelineStart: TimeInterval?
+    private var latestTimelineEnd: TimeInterval?
+    private(set) var observedVideoPacketCount = 0
+    private(set) var observedVideoKeyframeCount = 0
+    private(set) var maximumObservedVideoDecodeLag: TimeInterval = 0
+    private var firstObservedVideoDecodeTime: TimeInterval?
+    private var latestObservedVideoDecodeTime: TimeInterval?
+    let limits: PlaybackCompressedPacketBufferLimits
+
+    init(width: Int, height: Int) {
+        limits = PlaybackCompressedPacketBufferPolicy.limits(width: width, height: height)
+    }
+
+    var isEmpty: Bool { packetCount == 0 }
+
+    var bufferedDuration: TimeInterval {
+        guard let firstTimelineStart, let latestTimelineEnd else { return 0 }
+        return max(latestTimelineEnd - firstTimelineStart, 0)
+    }
+
+    var isFull: Bool {
+        PlaybackCompressedPacketBufferPolicy.isFull(
+            byteCount: byteCount,
+            packetCount: packetCount,
+            bufferedDuration: bufferedDuration,
+            limits: limits
+        )
+    }
+
+    var observedVideoDecodeSpan: TimeInterval {
+        guard let firstObservedVideoDecodeTime,
+              let latestObservedVideoDecodeTime
+        else { return 0 }
+        return max(latestObservedVideoDecodeTime - firstObservedVideoDecodeTime, 0)
+    }
+
+    var videoTimingCalibrationReady: Bool {
+        PlaybackBufferingPolicy.videoTimingCalibrationReady(
+            keyframeCount: observedVideoKeyframeCount,
+            packetCount: observedVideoPacketCount,
+            decodeSpan: observedVideoDecodeSpan,
+            reservoirIsFull: isFull
+        )
+    }
+
+    mutating func append(_ packet: BunnyNativePacket, kind: UInt32) {
+        let presentationTime = packet.presentationTime.seconds
+        let decodeTime = packet.decodeTime.seconds
+        let duration = packet.duration.seconds
+        let timelineStart = decodeTime.isFinite
+            ? decodeTime
+            : (presentationTime.isFinite ? presentationTime : latestTimelineEnd ?? 0)
+        let timelineEnd = presentationTime.isFinite
+            ? presentationTime + max(duration.isFinite ? duration : 0, 0)
+            : timelineStart
+        entries.append(Entry(
+            packet: packet,
+            kind: kind,
+            timelineStart: timelineStart,
+            timelineEnd: timelineEnd
+        ))
+        byteCount += packet.data.count
+        packetCount += 1
+        switch kind {
+        case UInt32(STREMIO_MEDIA_TRACK_VIDEO):
+            videoPacketCount += 1
+            observedVideoPacketCount += 1
+            if packet.flags & UInt32(STREMIO_MEDIA_PACKET_KEYFRAME) != 0 {
+                observedVideoKeyframeCount += 1
+            }
+            if decodeTime.isFinite, presentationTime.isFinite {
+                maximumObservedVideoDecodeLag = max(
+                    maximumObservedVideoDecodeLag,
+                    max(decodeTime - presentationTime, 0)
+                )
+                firstObservedVideoDecodeTime = firstObservedVideoDecodeTime ?? decodeTime
+                latestObservedVideoDecodeTime = max(
+                    latestObservedVideoDecodeTime ?? decodeTime,
+                    decodeTime
+                )
+            }
+        case UInt32(STREMIO_MEDIA_TRACK_AUDIO): audioPacketCount += 1
+        case UInt32(STREMIO_MEDIA_TRACK_SUBTITLE): subtitlePacketCount += 1
+        default: break
+        }
+        if firstTimelineStart == nil {
+            firstTimelineStart = timelineStart
+        }
+        latestTimelineEnd = max(latestTimelineEnd ?? timelineEnd, timelineEnd)
+    }
+
+    /// Preserves packet order within each renderer while allowing audio or
+    /// subtitles to pass a temporarily backpressured video renderer.
+    mutating func takeReady(videoReady: Bool, audioReady: Bool) -> BunnyNativePacket? {
+        guard (videoReady && videoPacketCount > 0)
+                || (audioReady && audioPacketCount > 0)
+                || subtitlePacketCount > 0
+        else { return nil }
+
+        var sawVideo = false
+        var sawAudio = false
+        var sawSubtitle = false
+
+        for index in firstLiveIndex..<entries.count {
+            guard let entry = entries[index] else { continue }
+            let ready: Bool
+            switch entry.kind {
+            case UInt32(STREMIO_MEDIA_TRACK_VIDEO):
+                guard !sawVideo else { continue }
+                sawVideo = true
+                ready = videoReady
+            case UInt32(STREMIO_MEDIA_TRACK_AUDIO):
+                guard !sawAudio else { continue }
+                sawAudio = true
+                ready = audioReady
+            case UInt32(STREMIO_MEDIA_TRACK_SUBTITLE):
+                guard !sawSubtitle else { continue }
+                sawSubtitle = true
+                ready = true
+            default:
+                ready = true
+            }
+            guard ready else { continue }
+            return remove(at: index)
+        }
+        return nil
+    }
+
+    mutating func removeAll(keepingCapacity: Bool = true) {
+        entries.removeAll(keepingCapacity: keepingCapacity)
+        firstLiveIndex = 0
+        byteCount = 0
+        packetCount = 0
+        videoPacketCount = 0
+        audioPacketCount = 0
+        subtitlePacketCount = 0
+        firstTimelineStart = nil
+        latestTimelineEnd = nil
+        observedVideoPacketCount = 0
+        observedVideoKeyframeCount = 0
+        maximumObservedVideoDecodeLag = 0
+        firstObservedVideoDecodeTime = nil
+        latestObservedVideoDecodeTime = nil
+    }
+
+    mutating func removeAll(kind: UInt32) {
+        let retained = entries.compactMap { $0 }.filter { $0.kind != kind }
+        entries = retained.map(Optional.some)
+        firstLiveIndex = 0
+        byteCount = retained.reduce(into: 0) { $0 += $1.packet.data.count }
+        packetCount = retained.count
+        videoPacketCount = retained.reduce(into: 0) {
+            if $1.kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO) { $0 += 1 }
+        }
+        audioPacketCount = retained.reduce(into: 0) {
+            if $1.kind == UInt32(STREMIO_MEDIA_TRACK_AUDIO) { $0 += 1 }
+        }
+        subtitlePacketCount = retained.reduce(into: 0) {
+            if $1.kind == UInt32(STREMIO_MEDIA_TRACK_SUBTITLE) { $0 += 1 }
+        }
+        firstTimelineStart = retained.first?.timelineStart
+        latestTimelineEnd = retained.map(\.timelineEnd).max()
+        if kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO) {
+            observedVideoPacketCount = 0
+            observedVideoKeyframeCount = 0
+            maximumObservedVideoDecodeLag = 0
+            firstObservedVideoDecodeTime = nil
+            latestObservedVideoDecodeTime = nil
+        }
+    }
+
+    private mutating func remove(at index: Int) -> BunnyNativePacket? {
+        guard entries.indices.contains(index), let entry = entries[index] else { return nil }
+        entries[index] = nil
+        byteCount = max(byteCount - entry.packet.data.count, 0)
+        packetCount = max(packetCount - 1, 0)
+        switch entry.kind {
+        case UInt32(STREMIO_MEDIA_TRACK_VIDEO):
+            videoPacketCount = max(videoPacketCount - 1, 0)
+        case UInt32(STREMIO_MEDIA_TRACK_AUDIO):
+            audioPacketCount = max(audioPacketCount - 1, 0)
+        case UInt32(STREMIO_MEDIA_TRACK_SUBTITLE):
+            subtitlePacketCount = max(subtitlePacketCount - 1, 0)
+        default:
+            break
+        }
+
+        if index == firstLiveIndex {
+            while firstLiveIndex < entries.count {
+                if case .some = entries[firstLiveIndex] { break }
+                firstLiveIndex += 1
+            }
+            firstTimelineStart = firstLiveIndex < entries.count
+                ? entries[firstLiveIndex]?.timelineStart
+                : nil
+        }
+        if packetCount == 0 {
+            removeAll()
+        } else if firstLiveIndex >= 1_024, firstLiveIndex * 2 >= entries.count {
+            entries.removeFirst(firstLiveIndex)
+            firstLiveIndex = 0
+        }
+        return entry.packet
+    }
 }
 
 private struct BunnyNativeSeekTransition {
@@ -1034,6 +2382,33 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         stateLock.withLock { storedMetricsSnapshot }
     }
 
+    var presentationDiagnosticsSnapshot: BunnyPresentationDiagnosticsSnapshot {
+        var snapshot = stateLock.withLock { storedPresentationDiagnostics }
+        if let display = displayCadenceProbe?.snapshot {
+            snapshot.displayRefreshHz = display.refreshHz
+            snapshot.displayP95IntervalMilliseconds = display.p95IntervalMilliseconds
+            snapshot.displayMissedRefreshes = display.missedRefreshes
+        }
+        snapshot.appliedRate = synchronizer.rate
+        return snapshot
+    }
+
+    var hdrDiagnosticsSnapshot: BunnyHDRDiagnosticsSnapshot {
+        let values = stateLock.withLock {
+            (storedHDRDiagnostics, activeVideoDecompression)
+        }
+        var snapshot = values.0
+        if let decoded = values.1?.hdrDiagnosticsSnapshot {
+            snapshot.outputPixelFormat = decoded.pixelFormat
+            snapshot.outputColorPrimaries = decoded.colorPrimaries
+            snapshot.outputTransferFunction = decoded.transferFunction
+            snapshot.outputYCbCrMatrix = decoded.yCbCrMatrix
+            snapshot.outputHasMasteringMetadata = decoded.hasMasteringMetadata
+            snapshot.outputHasContentLightLevel = decoded.hasContentLightLevel
+        }
+        return snapshot
+    }
+
     let prefersHardwareVideoDecoding = true
 
     var isMuted: Bool {
@@ -1056,17 +2431,39 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     private var firstFrameCheckGeneration = 0
     private var firstFrameCheckScheduled = false
     private var hasVideo = false
+    private var hasAudio = false
+    private var decodedVideoBacklogEnd = -Double.infinity
     private var storedMetricsSnapshot = BunnyNativeMetricsSnapshot.empty
+    private var storedPresentationDiagnostics = BunnyPresentationDiagnosticsSnapshot.empty
+    private var storedHDRDiagnostics = BunnyHDRDiagnosticsSnapshot.empty
+    private var activeVideoDecompression: BunnyVideoDecompressionPipeline?
+    private var previousRendererMetrics: PlaybackRendererCumulativeMetrics?
+    private var previousRendererMetricsAt: TimeInterval?
+    private var rendererMetricsRequestInFlight = false
+    private var rendererMetricsGeneration = 0
     private var activeReader: BunnyMediaRangeReader?
     private var audioRendererFlushObserver: NSObjectProtocol?
+    private let diagnosticsEnabled: Bool
+    private let displayCadenceProbe: BunnyDisplayCadenceProbe?
     // Dolby layouts are encoded in the sync frame rather than Matroska's
     // channel-count field. This cache is confined to `worker`.
     private var dolbyFormatDescriptions: [Int: CMFormatDescription] = [:]
     private var reportedDolbyTimingMismatchTracks = Set<Int>()
+    private var reportedHDR10PlusInput = false
 
-    init(url: URL, trustedPrivateNetworkOrigin: URL? = nil) {
+    init(
+        url: URL,
+        trustedPrivateNetworkOrigin: URL? = nil,
+        diagnosticsEnabled: Bool = false
+    ) {
+        let resolvedDiagnosticsEnabled = diagnosticsEnabled
+            || ProcessInfo.processInfo.environment["SKELETON_PLAYER_DEBUG_OVERLAY"] == "1"
         self.url = url
         self.trustedPrivateNetworkOrigin = trustedPrivateNetworkOrigin
+        self.diagnosticsEnabled = resolvedDiagnosticsEnabled
+        displayCadenceProbe = resolvedDiagnosticsEnabled
+            ? BunnyDisplayCadenceProbe()
+            : nil
         super.init()
         videoLayer.videoGravity = .resizeAspect
         // Match the AVPlayer video default and the former player behavior.
@@ -1082,9 +2479,18 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         // deadlock startup: the renderers stop accepting samples before the
         // synchronizer begins draining them.
         synchronizer.delaysRateChangeUntilHasSufficientMediaData = false
-        synchronizer.addRenderer(videoLayer)
+        if #available(iOS 17.0, *) {
+            // AVSampleBufferDisplayLayer's legacy queue methods are not safe
+            // for Bunny's background demux worker. Its renderer is the
+            // supported background enqueue surface and also exposes actual
+            // presentation performance metrics on iOS 17.4 and newer.
+            synchronizer.addRenderer(videoLayer.sampleBufferRenderer)
+        } else {
+            synchronizer.addRenderer(videoLayer)
+        }
         synchronizer.addRenderer(audioRenderer)
         synchronizer.setRate(0, time: .zero)
+        displayCadenceProbe?.start()
         audioRendererFlushObserver = NotificationCenter.default.addObserver(
             forName: .AVSampleBufferAudioRendererWasFlushedAutomatically,
             object: audioRenderer,
@@ -1095,6 +2501,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     }
 
     deinit {
+        displayCadenceProbe?.stop()
         if let audioRendererFlushObserver {
             NotificationCenter.default.removeObserver(audioRendererFlushObserver)
         }
@@ -1152,11 +2559,17 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     }
 
     func selectAudioStreamIndex(_ streamIndex: Int) {
-        stateLock.withLock { pendingAudioSelection = streamIndex }
+        stateLock.withLock {
+            pendingAudioSelection = streamIndex
+            activeReader?.interruptForSeek()
+        }
     }
 
     func selectSubtitleStreamIndex(_ streamIndex: Int) {
-        stateLock.withLock { pendingSubtitleSelection = streamIndex }
+        stateLock.withLock {
+            pendingSubtitleSelection = streamIndex
+            activeReader?.interruptForSeek()
+        }
     }
 
     func stop() {
@@ -1169,8 +2582,9 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         }
         reader?.cancel()
         synchronizer.setRate(0, time: synchronizer.currentTime())
-        videoLayer.flushAndRemoveImage()
+        flushVideoRenderer(removingDisplayedImage: true)
         audioRenderer.flush()
+        displayCadenceProbe?.stop()
     }
 
     private func run() {
@@ -1178,7 +2592,11 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         do {
             let reader = try BunnyMediaRangeReader(
                 url: url,
-                trustedPrivateNetworkOrigin: trustedPrivateNetworkOrigin
+                trustedPrivateNetworkOrigin: trustedPrivateNetworkOrigin,
+                // Packet extraction runs on its own bounded pump. The playback
+                // worker now owns underrun decisions from actual A/V coverage,
+                // so a progressive network read must not pause the clock.
+                onBlockingRead: { _ in false }
             )
             stateLock.withLock { activeReader = reader }
             defer {
@@ -1211,18 +2629,46 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             }
             defer { stremio_pgs_decoder_destroy(pgsDecoder) }
 
-            let descriptors = try loadTracks(session: session)
+            var descriptors = try loadTracks(session: session)
             let summary = stremio_media_summary(session)
             guard summary.abi_version == 1 else {
                 throw BunnyNativeDecoderError.core("unsupported media ABI")
             }
-            let videoTracks = descriptors.filter {
+            var videoTracks = descriptors.filter {
                 $0.raw.kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO)
+            }
+            var playableVideoTracks = videoTracks.filter(Self.isApplePlayable)
+            if playableVideoTracks.isEmpty,
+               let candidate = Self.defaultTrack(
+                    in: videoTracks.filter {
+                        $0.raw.codec == UInt32(STREMIO_MEDIA_CODEC_HEVC)
+                            && $0.formatDescription == nil
+                    }
+               ),
+               let recoveredFormat = recoverInBandHEVCFormatDescription(
+                    session: session,
+                    descriptor: candidate,
+                    error: &error
+               ) {
+                let recovered = BunnyNativeTrackDescriptor(
+                    raw: candidate.raw,
+                    codecPrivate: candidate.codecPrivate,
+                    videoColor: candidate.videoColor,
+                    additionalCodecAtoms: candidate.additionalCodecAtoms,
+                    codecID: candidate.codecID,
+                    name: candidate.name,
+                    language: candidate.language,
+                    formatDescription: recoveredFormat
+                )
+                descriptors[Int(candidate.raw.index)] = recovered
+                videoTracks = descriptors.filter {
+                    $0.raw.kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO)
+                }
+                playableVideoTracks = videoTracks.filter(Self.isApplePlayable)
             }
             let audioTracks = descriptors.filter {
                 $0.raw.kind == UInt32(STREMIO_MEDIA_TRACK_AUDIO)
             }
-            let playableVideoTracks = videoTracks.filter(Self.isApplePlayable)
             let playableAudioTracks = audioTracks.filter(Self.isApplePlayable)
             let video = Self.defaultTrack(in: playableVideoTracks)
             let selectedAudio = Self.defaultTrack(in: playableAudioTracks)
@@ -1239,7 +2685,10 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             } ?? 0
             stateLock.withLock {
                 self.hasVideo = hasVideo
+                self.hasAudio = hasAudio
                 videoFormatReady = video?.formatDescription != nil
+                storedHDRDiagnostics = video.map(Self.hdrInputDiagnostics)
+                    ?? .empty
             }
             if let video {
                 guard stremio_media_select_track(
@@ -1315,36 +2764,123 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             if video == nil {
                 deliverFirstFrameOnce()
             }
+            let videoDecompression: BunnyVideoDecompressionPipeline?
+            if let videoFormat = video?.formatDescription {
+                videoDecompression = BunnyVideoDecompressionPipeline(
+                    formatDescription: videoFormat
+                )
+            } else {
+                videoDecompression = nil
+            }
+            stateLock.withLock {
+                activeVideoDecompression = videoDecompression
+            }
+            if hasVideo {
+                NSLog("BUNNY_VIDEO_PIPELINE mode=explicit-videotoolbox")
+            }
+            let packetReadPump = BunnyPacketReadPump(session: session)
+            defer {
+                reader.cancel()
+                packetReadPump.stop()
+            }
 
-            var pendingPacket: BunnyNativePacket?
+            var packetReservoir = BunnyNativePacketReservoir(
+                width: Int(video?.raw.width ?? 0),
+                height: Int(video?.raw.height ?? 0)
+            )
+            var videoTimingCalibrated = !hasVideo
+            var calibratedVideoDecodeLead: TimeInterval = 0
             var videoQueueEnd = 0.0
             var audioQueueEnd = 0.0
             var decodedVideoFrames = 0
             var renderedAudioFrames = 0
             var droppedVideoFrames = 0
             var lastMetricsAt = ProcessInfo.processInfo.systemUptime
+            var lastPresentationDiagnosticsAt = ProcessInfo.processInfo.systemUptime
+            var lastVideoPipelineDiagnosticsAt = ProcessInfo.processInfo.systemUptime
+            var lastPresentationClockTime = currentTime
+            var sourceCadence = PlaybackTimestampCadenceTracker(
+                nominalFrameRate: nominalFrameRate
+            )
+            var decodeCadence = PlaybackTimestampCadenceTracker(
+                nominalFrameRate: nominalFrameRate
+            )
             var reachedEnd = false
+            var sourceExhausted = false
+            var finishedDelayedVideoFrames = false
             var endPublished = false
             var seekTransition: BunnyNativeSeekTransition?
             var isRebuffering = true
             var lowReservePlaybackDeadline: TimeInterval = 0
+            var requiresPostSeekPreroll = false
+            var requiresCompressedPreroll = !url.isFileURL
+            var isRefillingPacketReservoir = true
+            var deferredReadResult: BunnyPacketReadResult?
+            let requiresFullRemotePreroll = !url.isFileURL
+                && reader.sourceLength
+                    >= PlaybackRangeChunkPolicy.largeSourceThresholdBytes
+            var lastReservoirDiagnosticsAt = ProcessInfo.processInfo.systemUptime
+            let videoPresentationPump = videoDecompression.map { pipeline in
+                BunnyVideoPresentationPump(
+                    pipeline: pipeline,
+                    initialQueueEnd: videoQueueEnd,
+                    rendererIsReady: { [weak self] in
+                        self?.videoRendererIsReadyForMoreMediaData ?? false
+                    },
+                    enqueue: { [weak self] sample in
+                        self?.enqueueVideoSample(sample)
+                    },
+                    onStateChanged: { [weak self] snapshot, backlogEnd in
+                        self?.storeVideoPresentationSnapshot(
+                            snapshot,
+                            deliverableBacklogEnd: backlogEnd
+                        )
+                        if snapshot.framesSinceReset > 0 {
+                            self?.scheduleFirstFrameCheck()
+                        }
+                    }
+                )
+            }
+            videoPresentationPump?.start()
+            defer {
+                videoPresentationPump?.stop()
+                videoDecompression?.invalidate()
+                stateLock.withLock {
+                    activeVideoDecompression = nil
+                }
+            }
 
             while !isStopped {
                 if let seek = takePendingSeek() {
-                    reader.resumeAfterSeekInterrupt()
+                    packetReadPump.pauseAndWait()
+                    reader.resumeAfterSeekInterrupt(prioritizeRandomAccess: true)
                     // A newer seek may have arrived after this one was taken.
                     // Leave its interruption in force and skip obsolete work.
-                    if hasPendingSeek { continue }
+                    if hasPendingSeek {
+                        packetReadPump.resume()
+                        continue
+                    }
+                    videoPresentationPump?.suspend()
+                    videoDecompression?.reset()
+                    finishedDelayedVideoFrames = false
                     let success = performSeek(
                         session: session,
                         pgsDecoder: pgsDecoder,
                         time: seek,
                         error: &error
                     )
-                    pendingPacket = nil
+                    packetReservoir.removeAll()
+                    isRefillingPacketReservoir = true
                     videoQueueEnd = seek
+                    videoPresentationPump?.reset(queueEnd: seek)
+                    videoPresentationPump?.resume()
                     audioQueueEnd = seek
+                    sourceCadence.reset()
+                    decodeCadence.reset()
+                    lastPresentationDiagnosticsAt = ProcessInfo.processInfo.systemUptime
+                    lastPresentationClockTime = seek
                     isRebuffering = true
+                    requiresPostSeekPreroll = false
                     storeMetricsSnapshot(
                         decodedVideoFrames: decodedVideoFrames,
                         droppedVideoFrames: droppedVideoFrames,
@@ -1354,6 +2890,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                     )
                     if success {
                         reachedEnd = false
+                        sourceExhausted = false
                         endPublished = false
                         seekTransition = BunnyNativeSeekTransition(
                             targetTime: seek,
@@ -1362,6 +2899,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         )
                         if completeSeekTransitionIfReady(&seekTransition) {
                             isRebuffering = false
+                            requiresPostSeekPreroll = true
                             lowReservePlaybackDeadline =
                                 ProcessInfo.processInfo.systemUptime + 0.25
                         }
@@ -1369,12 +2907,162 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         seekTransition = nil
                         publish { [weak self] in self?.onSeekCompleted?(seek, false) }
                     }
+                    packetReadPump.resume()
                 }
-                applyPendingSelections(
-                    session: session,
-                    pgsDecoder: pgsDecoder,
-                    descriptors: descriptors
-                )
+                let selectionChanges: (audio: Bool, subtitle: Bool)
+                if hasPendingTrackSelection {
+                    let completedReadResult = packetReadPump.pauseAndTakeResult()
+                    reader.resumeAfterSeekInterrupt()
+                    selectionChanges = applyPendingSelections(
+                        session: session,
+                        pgsDecoder: pgsDecoder,
+                        descriptors: descriptors
+                    )
+                    if case let .packet(raw)? = completedReadResult,
+                       let descriptor = descriptors[safe: raw.trackIndex],
+                       PlaybackTrackSelectionPacketPolicy.preservesCompletedPacket(
+                           kind: Self.packetTrackKind(descriptor.raw.kind),
+                           audioSelectionChanged: selectionChanges.audio,
+                           subtitleSelectionChanged: selectionChanges.subtitle
+                       ) {
+                        deferredReadResult = completedReadResult
+                    } else if case .endOfStream? = completedReadResult {
+                        deferredReadResult = completedReadResult
+                    }
+                    packetReadPump.resume()
+                } else {
+                    selectionChanges = (audio: false, subtitle: false)
+                }
+                if selectionChanges.audio {
+                    packetReservoir.removeAll(kind: UInt32(STREMIO_MEDIA_TRACK_AUDIO))
+                    isRefillingPacketReservoir = true
+                }
+                if selectionChanges.subtitle {
+                    packetReservoir.removeAll(kind: UInt32(STREMIO_MEDIA_TRACK_SUBTITLE))
+                    isRefillingPacketReservoir = true
+                }
+                let availableReadResult: BunnyPacketReadResult?
+                if let completedReadResult = deferredReadResult {
+                    availableReadResult = completedReadResult
+                    deferredReadResult = nil
+                } else {
+                    availableReadResult = packetReadPump.takeResult()
+                }
+                if let readResult = availableReadResult {
+                    switch readResult {
+                    case let .packet(raw):
+                        guard let descriptor = descriptors[safe: raw.trackIndex] else {
+                            packetReadPump.requestRead()
+                            continue
+                        }
+                        let packetDuration = effectivePacketDuration(
+                            rawDurationNanoseconds: raw.durationNanoseconds,
+                            trackIndex: raw.trackIndex,
+                            data: raw.data,
+                            descriptors: descriptors
+                        )
+                        let packet = BunnyNativePacket(
+                            trackIndex: raw.trackIndex,
+                            presentationTime: CMTime(
+                                value: raw.presentationTimeNanoseconds,
+                                timescale: 1_000_000_000
+                            ),
+                            decodeTime: CMTime(
+                                value: raw.decodeTimeNanoseconds,
+                                timescale: 1_000_000_000
+                            ),
+                            duration: packetDuration,
+                            flags: raw.flags,
+                            data: raw.data,
+                            hdr10PlusData: raw.hdr10PlusData
+                        )
+                        packetReservoir.append(packet, kind: descriptor.raw.kind)
+                        if descriptor.raw.kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO) {
+                            sourceCadence.observe(
+                                presentationTime: TimeInterval(
+                                    raw.presentationTimeNanoseconds
+                                ) / 1_000_000_000
+                            )
+                            decodeCadence.observe(
+                                presentationTime: TimeInterval(
+                                    raw.decodeTimeNanoseconds
+                                ) / 1_000_000_000
+                            )
+                        }
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if diagnosticsEnabled,
+                           packetReservoir.packetCount > 0,
+                           now - lastReservoirDiagnosticsAt >= 2 {
+                            lastReservoirDiagnosticsAt = now
+                            NSLog(
+                                "BUNNY_PACKET_RESERVOIR state=filling packets=%d bytes=%d duration=%.3f",
+                                packetReservoir.packetCount,
+                                packetReservoir.byteCount,
+                                packetReservoir.bufferedDuration
+                            )
+                        }
+                    case .endOfStream:
+                        sourceExhausted = true
+                    case let .failure(message):
+                        if hasPendingSeek || hasPendingTrackSelection { continue }
+                        throw BunnyNativeDecoderError.core(message)
+                    }
+                }
+                let wasRefillingPacketReservoir = isRefillingPacketReservoir
+                isRefillingPacketReservoir = PlaybackCompressedPacketBufferPolicy
+                    .shouldRefill(
+                        isRefilling: isRefillingPacketReservoir,
+                        byteCount: packetReservoir.byteCount,
+                        packetCount: packetReservoir.packetCount,
+                        bufferedDuration: packetReservoir.bufferedDuration,
+                        limits: packetReservoir.limits
+                    )
+                if diagnosticsEnabled,
+                   !wasRefillingPacketReservoir,
+                   isRefillingPacketReservoir {
+                    NSLog(
+                        "BUNNY_PACKET_RESERVOIR state=refill_begin packets=%d bytes=%d duration=%.3f",
+                        packetReservoir.packetCount,
+                        packetReservoir.byteCount,
+                        packetReservoir.bufferedDuration
+                    )
+                }
+                if !sourceExhausted, isRefillingPacketReservoir {
+                    packetReadPump.requestRead()
+                }
+                if let presentation = videoPresentationPump?.snapshot {
+                    decodedVideoFrames = presentation.totalFrames
+                    videoQueueEnd = presentation.queueEnd
+                    if presentation.framesSinceReset > 0,
+                       var transition = seekTransition {
+                        transition.videoReady = true
+                        seekTransition = transition
+                        if completeSeekTransitionIfReady(&seekTransition) {
+                            isRebuffering = false
+                            requiresPostSeekPreroll = true
+                            lowReservePlaybackDeadline =
+                                ProcessInfo.processInfo.systemUptime + 0.25
+                        }
+                    }
+                }
+
+                if diagnosticsEnabled {
+                    let diagnosticsNow = ProcessInfo.processInfo.systemUptime
+                    let diagnosticsElapsed = diagnosticsNow - lastPresentationDiagnosticsAt
+                    if diagnosticsElapsed >= 2 {
+                        let clockTime = currentTime
+                        let clockRatio = (clockTime - lastPresentationClockTime)
+                            / diagnosticsElapsed
+                        storeSourcePresentationDiagnostics(
+                            sourceCadence.snapshot(),
+                            decodeCadence: decodeCadence.snapshot(),
+                            clockRatio: clockRatio.isFinite ? clockRatio : nil
+                        )
+                        lastPresentationDiagnosticsAt = diagnosticsNow
+                        lastPresentationClockTime = clockTime
+                        requestVideoPerformanceMetrics()
+                    }
+                }
 
                 if reachedEnd {
                     updateAppliedPlaybackRate(
@@ -1385,7 +3073,8 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         hasAudio: hasAudio,
                         nominalFrameRate: nominalFrameRate,
                         allowsLowReservePlayback: false,
-                        reachedEnd: true
+                        reachedEnd: true,
+                        decodedVideoBacklogEnd: nil
                     )
                     let duration = TimeInterval(summary.duration_ns) / 1_000_000_000
                     if duration <= 0 || currentTime >= duration - 0.05 {
@@ -1399,104 +3088,179 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 }
 
                 let clock = currentTime
-                let queuedEnd: TimeInterval
-                if hasVideo, hasAudio {
-                    // Keep both renderers covered. Using the furthest queue
-                    // lets a long audio run stop demuxing while video drains.
-                    queuedEnd = min(videoQueueEnd, audioQueueEnd)
-                } else if hasVideo {
-                    queuedEnd = videoQueueEnd
+                let allowsLowReservePlayback =
+                    ProcessInfo.processInfo.systemUptime < lowReservePlaybackDeadline
+                if requiresPostSeekPreroll, !allowsLowReservePlayback {
+                    // Advancing briefly releases hidden post-seek preroll
+                    // samples. Once that bounded decoder grace expires, return
+                    // to the normal 0.70-second preroll instead of continuing
+                    // a large remote stream with only one or two frames queued.
+                    isRebuffering = true
+                    requiresPostSeekPreroll = false
+                }
+                let compressedPrerollReady = !requiresCompressedPreroll
+                    || PlaybackCompressedPacketBufferPolicy.hasRemotePreroll(
+                        bufferedDuration: packetReservoir.bufferedDuration,
+                        isFull: packetReservoir.isFull,
+                        requiresFullBuffer: requiresFullRemotePreroll
+                    )
+                if compressedPrerollReady {
+                    if requiresCompressedPreroll {
+                        requiresCompressedPreroll = false
+                        NSLog(
+                            "BUNNY_COMPRESSED_PREROLL state=ready duration=%.3f bytes=%d packets=%d",
+                            packetReservoir.bufferedDuration,
+                            packetReservoir.byteCount,
+                            packetReservoir.packetCount
+                        )
+                    }
+                    updateAppliedPlaybackRate(
+                        isRebuffering: &isRebuffering,
+                        videoQueueEnd: videoQueueEnd,
+                        audioQueueEnd: audioQueueEnd,
+                        hasVideo: hasVideo,
+                        hasAudio: hasAudio,
+                        nominalFrameRate: nominalFrameRate,
+                        allowsLowReservePlayback: allowsLowReservePlayback,
+                        reachedEnd: false,
+                        decodedVideoBacklogEnd:
+                            videoDecompression?.deliverablePresentationEnd
+                    )
                 } else {
-                    queuedEnd = audioQueueEnd
+                    isRebuffering = true
+                    if synchronizer.rate != 0 {
+                        synchronizer.setRate(0, time: synchronizer.currentTime())
+                    }
                 }
-                updateAppliedPlaybackRate(
-                    isRebuffering: &isRebuffering,
-                    videoQueueEnd: videoQueueEnd,
-                    audioQueueEnd: audioQueueEnd,
-                    hasVideo: hasVideo,
-                    hasAudio: hasAudio,
-                    nominalFrameRate: nominalFrameRate,
-                    allowsLowReservePlayback:
-                        ProcessInfo.processInfo.systemUptime < lowReservePlaybackDeadline,
-                    reachedEnd: false
+                if videoRendererStatus == .failed {
+                    throw videoRendererError
+                        ?? BunnyNativeDecoderError.formatDescription(video?.codecID ?? "video")
+                }
+                if audioRenderer.status == .failed {
+                    throw audioRenderer.error
+                        ?? BunnyNativeDecoderError.formatDescription(selectedAudio?.codecID ?? "audio")
+                }
+                if let videoDecodeFailure = videoDecompression?.failure {
+                    throw BunnyNativeDecoderError.sampleBuffer(videoDecodeFailure)
+                }
+                droppedVideoFrames = max(
+                    droppedVideoFrames,
+                    videoDecompression?.droppedFrameCount ?? 0
                 )
-                if queuedEnd - clock > 8 {
-                    Thread.sleep(forTimeInterval: 0.004)
-                    continue
-                }
-
-                if pendingPacket == nil {
-                    var raw = StremioMediaPacket()
-                    let result = error.withUnsafeMutableBufferPointer { errorBuffer in
-                        stremio_media_next_packet(
-                            session,
-                            &raw,
-                            errorBuffer.baseAddress,
-                            errorBuffer.count
-                        )
-                    }
-                    // A seek can arrive while a remote packet read is blocked.
-                    // Its intentional cancellation surfaces through the C ABI
-                    // as a failed read; discard that obsolete packet operation
-                    // and let the top of the loop process the pending seek.
-                    if result != 1, hasPendingSeek {
-                        pendingPacket = nil
-                        continue
-                    }
-                    if result == 0 {
-                        if let transition = seekTransition {
-                            publish { [weak self] in
-                                self?.onSeekCompleted?(transition.targetTime, false)
-                            }
-                            seekTransition = nil
-                        }
-                        reachedEnd = true
-                        updateAppliedPlaybackRate(
-                            isRebuffering: &isRebuffering,
-                            videoQueueEnd: videoQueueEnd,
-                            audioQueueEnd: audioQueueEnd,
-                            hasVideo: hasVideo,
-                            hasAudio: hasAudio,
-                            nominalFrameRate: nominalFrameRate,
-                            allowsLowReservePlayback: false,
-                            reachedEnd: true
-                        )
-                        continue
-                    }
-                    guard result == 1, let bytes = raw.data else {
-                        throw BunnyNativeDecoderError.core(Self.errorText(error))
-                    }
-                    guard raw.data_size <= 16 * 1024 * 1024 else {
-                        throw BunnyNativeDecoderError.core("media packet exceeds the mobile safety limit")
-                    }
-                    let packetData = Data(bytes: bytes, count: raw.data_size)
-                    let packetDuration = effectivePacketDuration(
-                        rawDurationNanoseconds: raw.duration_ns,
-                        trackIndex: Int(raw.track_index),
-                        data: packetData,
-                        descriptors: descriptors
-                    )
-                    pendingPacket = BunnyNativePacket(
-                        trackIndex: Int(raw.track_index),
-                        presentationTime: CMTime(
-                            value: raw.presentation_time_ns,
-                            timescale: 1_000_000_000
+                if diagnosticsEnabled,
+                   ProcessInfo.processInfo.systemUptime
+                    - lastVideoPipelineDiagnosticsAt >= 2,
+                   let videoPipeline = videoDecompression?.diagnosticsSnapshot {
+                    lastVideoPipelineDiagnosticsAt =
+                        ProcessInfo.processInfo.systemUptime
+                    NSLog(
+                        "BUNNY_VT_STATE inflight=%d ready=%d latest_dts=%.3f earliest_inflight_dts=%@ reorder_lag=%.3f first_ready_pts=%@ last_delivered_pts=%.3f renderer_ready=%@ clock=%.3f video_end=%.3f audio_end=%.3f rate=%.2f",
+                        videoPipeline.inFlightFrames,
+                        videoPipeline.readyFrames,
+                        videoPipeline.latestSubmittedDecodeTime,
+                        Self.diagnosticNumber(
+                            videoPipeline.earliestInFlightDecodeTime
                         ),
-                        duration: packetDuration,
-                        flags: raw.flags,
-                        data: packetData
+                        videoPipeline.maximumReorderLag,
+                        Self.diagnosticNumber(
+                            videoPipeline.firstReadyPresentationTime
+                        ),
+                        videoPipeline.lastDeliveredPresentationTime,
+                        videoRendererIsReadyForMoreMediaData ? "yes" : "no",
+                        currentTime,
+                        videoQueueEnd,
+                        audioQueueEnd,
+                        synchronizer.rate
                     )
                 }
 
-                guard let packet = pendingPacket,
-                      let descriptor = descriptors[safe: packet.trackIndex]
-                else {
-                    pendingPacket = nil
+                if !videoTimingCalibrated,
+                   packetReservoir.videoTimingCalibrationReady {
+                    calibratedVideoDecodeLead = PlaybackBufferingPolicy.videoDecodeLead(
+                        maximumObservedLag: packetReservoir.maximumObservedVideoDecodeLag
+                    )
+                    videoTimingCalibrated = true
+                    NSLog(
+                        "BUNNY_VIDEO_TIMING_CALIBRATED lead=%.6f lag=%.6f packets=%d keyframes=%d span=%.3f",
+                        calibratedVideoDecodeLead,
+                        packetReservoir.maximumObservedVideoDecodeLag,
+                        packetReservoir.observedVideoPacketCount,
+                        packetReservoir.observedVideoKeyframeCount,
+                        packetReservoir.observedVideoDecodeSpan
+                    )
+                }
+                let maximumRendererLead = PlaybackBufferingPolicy.maximumRendererQueueLead
+                let audioHasCapacity = !hasAudio
+                    || audioQueueEnd - clock < maximumRendererLead
+                let videoDecodeHasCapacity = !hasVideo
+                    || (videoDecompression?.canAcceptMore ?? false)
+                let packet = packetReservoir.takeReady(
+                    videoReady: compressedPrerollReady
+                        && videoTimingCalibrated
+                        && videoDecodeHasCapacity,
+                    audioReady: compressedPrerollReady
+                        && audioHasCapacity
+                        && audioRenderer.isReadyForMoreMediaData
+                )
+
+                guard let packet else {
+                    if sourceExhausted {
+                        if packetReservoir.isEmpty {
+                            if !finishedDelayedVideoFrames {
+                                videoDecompression?.finishDelayedFrames()
+                                finishedDelayedVideoFrames = true
+                                Thread.sleep(forTimeInterval: 0.002)
+                                continue
+                            }
+                            if videoDecompression?.isDrained == false {
+                                Thread.sleep(forTimeInterval: 0.002)
+                                continue
+                            }
+                            if let transition = seekTransition {
+                                publish { [weak self] in
+                                    self?.onSeekCompleted?(transition.targetTime, false)
+                                }
+                                seekTransition = nil
+                            }
+                            reachedEnd = true
+                        } else {
+                            Thread.sleep(forTimeInterval: 0.002)
+                        }
+                        continue
+                    }
+                    if packetReservoir.isFull {
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if diagnosticsEnabled, now - lastReservoirDiagnosticsAt >= 2 {
+                            lastReservoirDiagnosticsAt = now
+                            NSLog(
+                                "BUNNY_PACKET_RESERVOIR state=full packets=%d bytes=%d duration=%.3f",
+                                packetReservoir.packetCount,
+                                packetReservoir.byteCount,
+                                packetReservoir.bufferedDuration
+                            )
+                        }
+                        Thread.sleep(forTimeInterval: 0.002)
+                        continue
+                    }
+                    packetReadPump.requestRead()
+                    Thread.sleep(forTimeInterval: 0.002)
                     continue
                 }
+                guard let descriptor = descriptors[safe: packet.trackIndex] else { continue }
                 switch descriptor.raw.kind {
                 case UInt32(STREMIO_MEDIA_TRACK_VIDEO):
                     let isKeyframe = packet.flags & UInt32(STREMIO_MEDIA_PACKET_KEYFRAME) != 0
+                    if diagnosticsEnabled, decodedVideoFrames < 72 {
+                        NSLog(
+                            "BUNNY_VIDEO_TIMING index=%d pts=%.6f source_dts=%.6f sample_dts=%.6f duration=%.6f key=%@",
+                            decodedVideoFrames,
+                            packet.presentationTime.seconds,
+                            packet.decodeTime.seconds,
+                            packet.decodeTime.seconds - calibratedVideoDecodeLead,
+                            packet.duration.seconds,
+                            isKeyframe ? "yes" : "no"
+                        )
+                    }
                     if var transition = seekTransition {
                         if PlaybackSeekTransitionPolicy.shouldDiscardVideoBeforeRandomAccessPoint(
                             isKeyframe: isKeyframe,
@@ -1504,7 +3268,6 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         ) {
                             transition.discardedVideoPacketsBeforeRandomAccessPoint += 1
                             seekTransition = transition
-                            pendingPacket = nil
                             continue
                         }
                         if isKeyframe {
@@ -1512,16 +3275,16 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         }
                         seekTransition = transition
                     }
-                    if videoLayer.status == .failed {
-                        throw videoLayer.error
+                    if videoRendererStatus == .failed {
+                        throw videoRendererError
                             ?? BunnyNativeDecoderError.formatDescription(descriptor.codecID)
                     }
-                    guard videoLayer.isReadyForMoreMediaData else {
-                        Thread.sleep(forTimeInterval: 0.002)
-                        continue
-                    }
                     do {
-                        let sample = try makeSampleBuffer(packet: packet, descriptor: descriptor)
+                        let sample = try makeSampleBuffer(
+                            packet: packet,
+                            descriptor: descriptor,
+                            videoDecodeLead: calibratedVideoDecodeLead
+                        )
                         if !isKeyframe {
                             Self.setBooleanSampleAttachment(
                                 sample,
@@ -1543,23 +3306,21 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                                 )
                                 transition.hiddenVideoFrames += 1
                                 shouldDisplay = false
-                            } else {
-                                transition.videoReady = true
                             }
                             seekTransition = transition
                         }
-                        videoLayer.enqueue(sample)
-                        decodedVideoFrames += 1
-                        let end = packet.presentationTime.seconds + packet.duration.seconds
-                        if end.isFinite { videoQueueEnd = max(videoQueueEnd, end) }
-                        if shouldDisplay {
-                            scheduleFirstFrameCheck()
+                        guard let videoDecompression else {
+                            throw BunnyNativeDecoderError.formatDescription(
+                                descriptor.codecID
+                            )
                         }
-                        if completeSeekTransitionIfReady(&seekTransition) {
-                            isRebuffering = false
-                            lowReservePlaybackDeadline =
-                                ProcessInfo.processInfo.systemUptime + 0.25
-                        }
+                        try videoDecompression.submit(
+                            sample,
+                            shouldDisplay: shouldDisplay,
+                            decodeTime: packet.decodeTime.seconds,
+                            observedReorderLag:
+                                packetReservoir.maximumObservedVideoDecodeLag
+                        )
                     } catch {
                         droppedVideoFrames += 1
                         throw error
@@ -1575,7 +3336,6 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         if isPreroll {
                             transition.discardedAudioPackets += 1
                             seekTransition = transition
-                            pendingPacket = nil
                             continue
                         }
                         transition.audioReady = true
@@ -1585,17 +3345,18 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         throw audioRenderer.error
                             ?? BunnyNativeDecoderError.formatDescription(descriptor.codecID)
                     }
-                    guard audioRenderer.isReadyForMoreMediaData else {
-                        Thread.sleep(forTimeInterval: 0.002)
-                        continue
-                    }
-                    let sample = try makeSampleBuffer(packet: packet, descriptor: descriptor)
+                    let sample = try makeSampleBuffer(
+                        packet: packet,
+                        descriptor: descriptor,
+                        videoDecodeLead: 0
+                    )
                     audioRenderer.enqueue(sample)
                     renderedAudioFrames += 1
                     let end = packet.presentationTime.seconds + packet.duration.seconds
                     if end.isFinite { audioQueueEnd = max(audioQueueEnd, end) }
                     if completeSeekTransitionIfReady(&seekTransition) {
                         isRebuffering = false
+                        requiresPostSeekPreroll = true
                         lowReservePlaybackDeadline =
                             ProcessInfo.processInfo.systemUptime + 0.25
                     }
@@ -1621,8 +3382,6 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 default:
                     break
                 }
-                pendingPacket = nil
-
                 storeMetricsSnapshot(
                     decodedVideoFrames: decodedVideoFrames,
                     droppedVideoFrames: droppedVideoFrames,
@@ -1695,17 +3454,216 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             var privateLength = 0
             let privatePointer = stremio_media_track_codec_private(session, index, &privateLength)
             let privateData = privatePointer.map { Data(bytes: $0, count: privateLength) } ?? Data()
+            var videoColor = StremioMediaVideoColorInfo()
+            if raw.kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO) {
+                guard stremio_media_track_video_color_info(
+                    session,
+                    index,
+                    &videoColor
+                ) == 1 else {
+                    throw BunnyNativeDecoderError.core(
+                        "could not read video color metadata for track \(index)"
+                    )
+                }
+            }
+            let additionalCodecAtoms = Self.blockAdditionCodecAtoms(
+                session: session,
+                trackIndex: index
+            )
             let descriptor = BunnyNativeTrackDescriptor(
                 raw: raw,
                 codecPrivate: privateData,
+                videoColor: videoColor,
+                additionalCodecAtoms: additionalCodecAtoms,
                 codecID: codecID,
                 name: name,
                 language: language,
-                formatDescription: try makeFormatDescription(raw: raw, codecPrivate: privateData)
+                formatDescription: try makeFormatDescription(
+                    raw: raw,
+                    codecPrivate: privateData,
+                    videoColor: videoColor,
+                    additionalCodecAtoms: additionalCodecAtoms
+                )
             )
+            if raw.kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO) {
+                let atomNames = additionalCodecAtoms.keys.sorted().joined(separator: ",")
+                let formatSubtype = descriptor.formatDescription.map {
+                    bunnyFourCC(CMFormatDescriptionGetMediaSubType($0))
+                } ?? "none"
+                let hevcNALLength = raw.codec == UInt32(STREMIO_MEDIA_CODEC_HEVC)
+                    && privateData.count > 21
+                    ? Int((privateData[21] & 0x03) + 1)
+                    : 0
+                let hevcArrayCount = raw.codec == UInt32(STREMIO_MEDIA_CODEC_HEVC)
+                    && privateData.count > 22
+                    ? Int(privateData[22])
+                    : 0
+                NSLog(
+                    "BUNNY_HDR_INPUT track=%u bits=%u primaries=%u transfer=%u matrix=%u range=%u mdcv=%@ clli=%@ atoms=%@ format=%@ private=%d nal_length=%d arrays=%d",
+                    index,
+                    videoColor.bits_per_channel,
+                    videoColor.primaries,
+                    videoColor.transfer_characteristics,
+                    videoColor.matrix_coefficients,
+                    videoColor.range,
+                    videoColor.flags
+                        & UInt32(STREMIO_MEDIA_VIDEO_COLOR_MASTERING_PRESENT) != 0
+                        ? "yes" : "no",
+                    videoColor.flags
+                        & UInt32(STREMIO_MEDIA_VIDEO_COLOR_MAX_CLL_PRESENT) != 0
+                        ? "yes" : "no",
+                    atomNames.isEmpty ? "none" : atomNames,
+                    formatSubtype,
+                    privateData.count,
+                    hevcNALLength,
+                    hevcArrayCount
+                )
+            }
             result.append(descriptor)
         }
         return result
+    }
+
+    private func recoverInBandHEVCFormatDescription(
+        session: OpaquePointer,
+        descriptor: BunnyNativeTrackDescriptor,
+        error: inout [CChar]
+    ) -> CMVideoFormatDescription? {
+        guard stremio_media_select_track(
+            session,
+            UInt32(STREMIO_MEDIA_TRACK_VIDEO),
+            Int32(descriptor.raw.index)
+        ) == 1 else { return nil }
+        _ = stremio_media_select_track(
+            session,
+            UInt32(STREMIO_MEDIA_TRACK_AUDIO),
+            -1
+        )
+        _ = stremio_media_select_track(
+            session,
+            UInt32(STREMIO_MEDIA_TRACK_SUBTITLE),
+            -1
+        )
+
+        let preferredLengthFieldBytes = descriptor.codecPrivate.count > 21
+            ? Int((descriptor.codecPrivate[21] & 0x03) + 1)
+            : 4
+        var parameterSets = [UInt8: Data]()
+        var recoveredHeaderLength: Int32 = Int32(preferredLengthFieldBytes)
+        var inspectedPackets = 0
+        var inspectedBytes = 0
+        while inspectedPackets < 96, inspectedBytes < 32 * 1_024 * 1_024 {
+            var packet = StremioMediaPacket()
+            let result = error.withUnsafeMutableBufferPointer { errorBuffer in
+                stremio_media_next_packet(
+                    session,
+                    &packet,
+                    errorBuffer.baseAddress,
+                    errorBuffer.count
+                )
+            }
+            guard result == 1,
+                  packet.abi_version == 3,
+                  packet.track_index == descriptor.raw.index,
+                  packet.data_size <= 16 * 1_024 * 1_024,
+                  let bytes = packet.data
+            else { break }
+            let data = Data(bytes: bytes, count: packet.data_size)
+            inspectedPackets += 1
+            inspectedBytes += data.count
+            if let parsed = hevcParameterSetsInPacket(
+                data,
+                preferredLengthFieldBytes: preferredLengthFieldBytes
+            ) {
+                recoveredHeaderLength = parsed.nalUnitHeaderLength
+                for parameterSet in parsed.parameterSets {
+                    guard let first = parameterSet.first else { continue }
+                    parameterSets[(first >> 1) & 0x3f] = parameterSet
+                }
+            }
+            if parameterSets[32] != nil,
+               parameterSets[33] != nil,
+               parameterSets[34] != nil {
+                break
+            }
+        }
+
+        let rewound = error.withUnsafeMutableBufferPointer { errorBuffer in
+            stremio_media_rewind(
+                session,
+                errorBuffer.baseAddress,
+                errorBuffer.count
+            )
+        }
+        guard rewound == 1 else {
+            NSLog("BUNNY_HEVC_INBAND_RECOVERY rewind=failed")
+            return nil
+        }
+        guard let vps = parameterSets[32],
+              let sps = parameterSets[33],
+              let pps = parameterSets[34],
+              let format = makeHEVCFormatDescription(
+                parameterSets: [vps, sps, pps],
+                nalUnitHeaderLength: recoveredHeaderLength,
+                color: descriptor.videoColor,
+                additionalCodecAtoms: descriptor.additionalCodecAtoms
+              ),
+              videoFormatSupportsDecompression(format)
+        else {
+            NSLog(
+                "BUNNY_HEVC_INBAND_RECOVERY result=failed packets=%d bytes=%d sets=%d",
+                inspectedPackets,
+                inspectedBytes,
+                parameterSets.count
+            )
+            return nil
+        }
+        NSLog(
+            "BUNNY_HEVC_INBAND_RECOVERY result=ready packets=%d bytes=%d nal_length=%d",
+            inspectedPackets,
+            inspectedBytes,
+            recoveredHeaderLength
+        )
+        return format
+    }
+
+    private static func blockAdditionCodecAtoms(
+        session: OpaquePointer,
+        trackIndex: UInt32
+    ) -> [String: Data] {
+        let count = stremio_media_track_block_addition_mapping_count(
+            session,
+            trackIndex
+        )
+        guard count > 0, count <= 64 else { return [:] }
+        var atoms = [String: Data]()
+        for mappingIndex in 0..<count {
+            var mapping = StremioMediaBlockAdditionMappingInfo()
+            guard stremio_media_track_block_addition_mapping_info(
+                session,
+                trackIndex,
+                mappingIndex,
+                &mapping
+            ) == 1,
+            mapping.extra_data_size > 0,
+            mapping.extra_data_size <= 16 * 1_024 * 1_024,
+            let bytes = mapping.extra_data
+            else { continue }
+            let atomName: String? = switch mapping.id_type {
+            case UInt64(STREMIO_MEDIA_BLOCK_ADD_ID_TYPE_DVCC): "dvcC"
+            case UInt64(STREMIO_MEDIA_BLOCK_ADD_ID_TYPE_DVVC): "dvvC"
+            case UInt64(STREMIO_MEDIA_BLOCK_ADD_ID_TYPE_DVWC): "dvwC"
+            case UInt64(STREMIO_MEDIA_BLOCK_ADD_ID_TYPE_HVCE): "hvcE"
+            default: nil
+            }
+            if let atomName {
+                atoms[atomName] = Data(
+                    bytes: bytes,
+                    count: mapping.extra_data_size
+                )
+            }
+        }
+        return atoms
     }
 
     private func publishOpen(
@@ -1750,7 +3708,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         session: OpaquePointer,
         pgsDecoder: OpaquePointer,
         descriptors: [BunnyNativeTrackDescriptor]
-    ) {
+    ) -> (audio: Bool, subtitle: Bool) {
         let selections = stateLock.withLock { () -> (Int?, Int?) in
             defer {
                 pendingAudioSelection = nil
@@ -1758,6 +3716,11 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             }
             return (pendingAudioSelection, pendingSubtitleSelection)
         }
+        guard selections.0 != nil || selections.1 != nil else {
+            return (audio: false, subtitle: false)
+        }
+        var audioChanged = false
+        var subtitleChanged = false
         if let audio = selections.0 {
             if let descriptor = descriptors.first(where: {
                 Int($0.raw.index) == audio && Self.isApplePlayable($0)
@@ -1766,6 +3729,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 UInt32(STREMIO_MEDIA_TRACK_AUDIO),
                 Int32(audio)
             ) == 1 {
+                audioChanged = true
                 audioRenderer.flush()
                 configureAudioRenderer(for: descriptor)
                 publish {
@@ -1776,17 +3740,18 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             }
         }
         if let subtitle = selections.1 {
-            _ = stremio_media_select_track(
+            subtitleChanged = stremio_media_select_track(
                 session,
                 UInt32(STREMIO_MEDIA_TRACK_SUBTITLE),
                 Int32(subtitle)
-            )
+            ) == 1
             stremio_pgs_decoder_reset(pgsDecoder)
             publish { [weak self] in
                 self?.onSubtitle?(nil, self?.currentTime ?? 0, 0)
                 self?.onBitmapSubtitle?(nil, self?.currentTime ?? 0, 0)
             }
         }
+        return (audio: audioChanged, subtitle: subtitleChanged)
     }
 
     private func configureAudioRenderer(for descriptor: BunnyNativeTrackDescriptor) {
@@ -1851,6 +3816,59 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         return bitstreamDuration
     }
 
+    private var videoRendererStatus: AVQueuedSampleBufferRenderingStatus {
+        if #available(iOS 17.0, *) {
+            return videoLayer.sampleBufferRenderer.status
+        }
+        return videoLayer.status
+    }
+
+    private var videoRendererError: Error? {
+        if #available(iOS 17.0, *) {
+            return videoLayer.sampleBufferRenderer.error
+        }
+        return videoLayer.error
+    }
+
+    private var videoRendererIsReadyForMoreMediaData: Bool {
+        if #available(iOS 17.0, *) {
+            return videoLayer.sampleBufferRenderer.isReadyForMoreMediaData
+        }
+        return videoLayer.isReadyForMoreMediaData
+    }
+
+    private func enqueueVideoSample(_ sample: CMSampleBuffer) {
+        if #available(iOS 17.0, *) {
+            videoLayer.sampleBufferRenderer.enqueue(sample)
+        } else {
+            videoLayer.enqueue(sample)
+        }
+    }
+
+    private func flushVideoRenderer(removingDisplayedImage: Bool) {
+        stateLock.withLock {
+            rendererMetricsGeneration &+= 1
+            previousRendererMetrics = nil
+            previousRendererMetricsAt = nil
+            storedPresentationDiagnostics.rendererFramesPerSecond = nil
+            storedPresentationDiagnostics.rendererAverageDelayMilliseconds = nil
+        }
+        if #available(iOS 17.0, *) {
+            if removingDisplayedImage {
+                videoLayer.sampleBufferRenderer.flush(
+                    removingDisplayedImage: true,
+                    completionHandler: nil
+                )
+            } else {
+                videoLayer.sampleBufferRenderer.flush()
+            }
+        } else if removingDisplayedImage {
+            videoLayer.flushAndRemoveImage()
+        } else {
+            videoLayer.flush()
+        }
+    }
+
     private func performSeek(
         session: OpaquePointer,
         pgsDecoder: OpaquePointer,
@@ -1862,7 +3880,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         // references from the preceding keyframe. Preroll samples are decoded
         // with DoNotDisplay, then the first frame covering the target replaces
         // this image without exposing a fast-forward catch-up sequence.
-        videoLayer.flush()
+        flushVideoRenderer(removingDisplayedImage: false)
         audioRenderer.flush()
         stremio_pgs_decoder_reset(pgsDecoder)
         stateLock.withLock {
@@ -1890,21 +3908,27 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         hasAudio: Bool,
         nominalFrameRate: Double,
         allowsLowReservePlayback: Bool,
-        reachedEnd: Bool
+        reachedEnd: Bool,
+        decodedVideoBacklogEnd: TimeInterval?
     ) {
         let desiredRate = stateLock.withLock { self.desiredRate }
         let previousRebuffering = isRebuffering
+        let clock = currentTime
         let decision = PlaybackBufferingPolicy.decision(
             desiredRate: desiredRate,
             isRebuffering: isRebuffering,
-            clock: currentTime,
+            clock: clock,
             videoQueueEnd: videoQueueEnd,
             audioQueueEnd: audioQueueEnd,
             hasVideo: hasVideo,
             hasAudio: hasAudio,
             nominalFrameRate: nominalFrameRate,
             allowsLowReservePlayback: allowsLowReservePlayback,
-            reachedEnd: reachedEnd
+            reachedEnd: reachedEnd,
+            requiredResumeReserve: decodedVideoBacklogEnd == nil
+                ? PlaybackBufferingPolicy.resumeReserve
+                : PlaybackBufferingPolicy.predecodedVideoResumeReserve,
+            decodedVideoBacklogEnd: decodedVideoBacklogEnd
         )
         isRebuffering = decision.isRebuffering
         if PlaybackContinuityPolicy.requiresClockRateChange(
@@ -1914,9 +3938,13 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             synchronizer.setRate(decision.appliedRate, time: synchronizer.currentTime())
         }
         if previousRebuffering != decision.isRebuffering, desiredRate > 0 {
+            let effectiveVideoQueueEnd = PlaybackBufferingPolicy.effectiveVideoQueueEnd(
+                rendererQueueEnd: videoQueueEnd,
+                decodedBacklogEnd: decodedVideoBacklogEnd
+            )
             let reserve = PlaybackBufferingPolicy.commonReserve(
                 clock: currentTime,
-                videoQueueEnd: videoQueueEnd,
+                videoQueueEnd: effectiveVideoQueueEnd,
                 audioQueueEnd: audioQueueEnd,
                 hasVideo: hasVideo,
                 hasAudio: hasAudio
@@ -1964,6 +3992,27 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             dictionary,
             Unmanaged.passUnretained(key).toOpaque(),
             Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+        )
+    }
+
+    private static func setDataSampleAttachment(
+        _ sample: CMSampleBuffer,
+        key: CFString,
+        data: Data
+    ) {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sample,
+            createIfNecessary: true
+        ), CFArrayGetCount(attachments) > 0 else { return }
+        let dictionary = unsafeBitCast(
+            CFArrayGetValueAtIndex(attachments, 0),
+            to: CFMutableDictionary.self
+        )
+        let value = data as CFData
+        CFDictionarySetValue(
+            dictionary,
+            Unmanaged.passUnretained(key).toOpaque(),
+            Unmanaged.passUnretained(value).toOpaque()
         )
     }
 
@@ -2051,7 +4100,8 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
 
     private func makeSampleBuffer(
         packet: BunnyNativePacket,
-        descriptor: BunnyNativeTrackDescriptor
+        descriptor: BunnyNativeTrackDescriptor,
+        videoDecodeLead: TimeInterval
     ) throws -> CMSampleBuffer {
         guard let format = try packetFormatDescription(
             packet: packet,
@@ -2083,10 +4133,25 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             )
         }
         guard status == noErr else { throw BunnyNativeDecoderError.sampleBuffer(status) }
+        let isCompressedVideo = descriptor.raw.kind
+            == UInt32(STREMIO_MEDIA_TRACK_VIDEO)
+        let sampleDecodeTime: CMTime
+        if isCompressedVideo, packet.decodeTime.isValid {
+            sampleDecodeTime = packet.decodeTime - CMTime(
+                seconds: max(videoDecodeLead, 0),
+                preferredTimescale: 1_000_000_000
+            )
+        } else {
+            sampleDecodeTime = packet.decodeTime
+        }
         var timing = CMSampleTimingInfo(
             duration: packet.duration.isValid && packet.duration > .zero ? packet.duration : .invalid,
             presentationTimeStamp: packet.presentationTime,
-            decodeTimeStamp: .invalid
+            // Matroska packets arrive in decode order, but the container does
+            // not carry an authoritative DTS. Give VideoToolbox a conservative
+            // lead over PTS so deeply reordered B-frames are decoded before
+            // their presentation deadlines instead of being marked late.
+            decodeTimeStamp: sampleDecodeTime
         )
         var sampleSize = packet.data.count
         var sample: CMSampleBuffer?
@@ -2103,6 +4168,22 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         )
         guard status == noErr, let sample else {
             throw BunnyNativeDecoderError.sampleBuffer(status)
+        }
+        if #available(iOS 16.0, *),
+           let hdr10PlusData = packet.hdr10PlusData,
+           hdr10PlusData.first == 0xb5 {
+            Self.setDataSampleAttachment(
+                sample,
+                key: kCMSampleAttachmentKey_HDR10PlusPerFrameData,
+                data: hdr10PlusData
+            )
+            if !reportedHDR10PlusInput {
+                reportedHDR10PlusInput = true
+                NSLog(
+                    "BUNNY_HDR10_PLUS_INPUT bytes=%d",
+                    hdr10PlusData.count
+                )
+            }
         }
         return sample
     }
@@ -2179,20 +4260,32 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             } else {
                 isReadyForDisplay = self.videoLayer.status == .rendering
             }
-            if isReadyForDisplay {
+            // On the iOS 17 sample-buffer-renderer surface (notably in the
+            // Simulator), `isReadyForDisplay` can remain false even while the
+            // synchronizer is advancing and the renderer is consuming queued
+            // frames. This check is only scheduled after a presentation frame
+            // has been enqueued, so a live clock is equivalent evidence that
+            // startup presentation has begun and avoids leaving the player in
+            // its opening state indefinitely.
+            let presentationHasStarted = self.synchronizer.rate > 0
+                && self.currentTime > 0
+            if isReadyForDisplay || presentationHasStarted {
                 self.deliverFirstFrameOnce()
-            } else if attempt < 80, self.videoLayer.status != .failed {
+            } else if attempt < 80, self.videoRendererStatus != .failed {
                 self.scheduleFirstFrameCheck(
                     attempt: attempt + 1,
                     generation: generation
                 )
-            } else if self.videoLayer.status == .failed {
+            } else if self.videoRendererStatus == .failed {
                 self.stateLock.withLock {
                     if self.firstFrameCheckGeneration == generation {
                         self.firstFrameCheckScheduled = false
                     }
                 }
-                self.onFailure?(self.videoLayer.error ?? BunnyNativeDecoderError.formatDescription("video"))
+                self.onFailure?(
+                    self.videoRendererError
+                        ?? BunnyNativeDecoderError.formatDescription("video")
+                )
             }
         }
     }
@@ -2223,6 +4316,12 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         stateLock.withLock { pendingSeek != nil }
     }
 
+    private var hasPendingTrackSelection: Bool {
+        stateLock.withLock {
+            pendingAudioSelection != nil || pendingSubtitleSelection != nil
+        }
+    }
+
     private func storeMetricsSnapshot(
         decodedVideoFrames: Int,
         droppedVideoFrames: Int,
@@ -2240,8 +4339,182 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         stateLock.withLock { storedMetricsSnapshot = snapshot }
     }
 
+    private func storeVideoPresentationSnapshot(
+        _ presentation: BunnyVideoPresentationSnapshot,
+        deliverableBacklogEnd: TimeInterval?
+    ) {
+        stateLock.withLock {
+            let previous = storedMetricsSnapshot
+            storedMetricsSnapshot = BunnyNativeMetricsSnapshot(
+                decodedVideoFrames: presentation.totalFrames,
+                droppedVideoFrames: previous.droppedVideoFrames,
+                renderedAudioFrames: previous.renderedAudioFrames,
+                videoQueueEnd: presentation.queueEnd,
+                audioQueueEnd: previous.audioQueueEnd
+            )
+            decodedVideoBacklogEnd = deliverableBacklogEnd ?? -.infinity
+        }
+    }
+
+    private func storeSourcePresentationDiagnostics(
+        _ cadence: PlaybackTimestampCadenceSnapshot,
+        decodeCadence: PlaybackTimestampCadenceSnapshot,
+        clockRatio: Double?
+    ) {
+        stateLock.withLock {
+            storedPresentationDiagnostics.sourcePTSP95Milliseconds =
+                cadence.p95ForwardIntervalMilliseconds
+            storedPresentationDiagnostics.sourcePTSMaximumMilliseconds =
+                cadence.maximumForwardIntervalMilliseconds
+            storedPresentationDiagnostics.sourcePTSBackwardTransitions =
+                cadence.backwardTransitions
+            storedPresentationDiagnostics.sourcePTSDuplicateTransitions =
+                cadence.duplicateTransitions
+            storedPresentationDiagnostics.sourcePTSOutlierTransitions =
+                cadence.irregularForwardTransitions
+            storedPresentationDiagnostics.sourceDTSP95Milliseconds =
+                decodeCadence.p95ForwardIntervalMilliseconds
+            storedPresentationDiagnostics.sourceDTSBackwardTransitions =
+                decodeCadence.backwardTransitions
+            storedPresentationDiagnostics.playbackClockRatio = clockRatio
+        }
+    }
+
+    private func requestVideoPerformanceMetrics() {
+        guard diagnosticsEnabled else { return }
+        guard #available(iOS 17.4, *) else { return }
+        let generation = stateLock.withLock { () -> Int? in
+            guard !rendererMetricsRequestInFlight, !stopped else { return nil }
+            rendererMetricsRequestInFlight = true
+            return rendererMetricsGeneration
+        }
+        guard let generation else { return }
+        videoLayer.sampleBufferRenderer.loadVideoPerformanceMetrics { [weak self] metrics in
+            self?.consumeVideoPerformanceMetrics(metrics, generation: generation)
+        }
+    }
+
+    @available(iOS 17.4, *)
+    private func consumeVideoPerformanceMetrics(
+        _ metrics: AVVideoPerformanceMetrics?,
+        generation: Int
+    ) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let current = metrics.map {
+            PlaybackRendererCumulativeMetrics(
+                totalFrames: $0.totalNumberOfFrames,
+                droppedFrames: $0.numberOfDroppedFrames,
+                corruptedFrames: $0.numberOfCorruptedFrames,
+                accumulatedFrameDelay: $0.totalAccumulatedFrameDelay
+            )
+        }
+        let interval = stateLock.withLock { () -> PlaybackRendererCadenceSnapshot? in
+            rendererMetricsRequestInFlight = false
+            guard generation == rendererMetricsGeneration,
+                  !stopped,
+                  let current else { return nil }
+            defer {
+                previousRendererMetrics = current
+                previousRendererMetricsAt = now
+            }
+            storedPresentationDiagnostics.rendererTotalFrames = current.totalFrames
+            storedPresentationDiagnostics.rendererDroppedFrames = current.droppedFrames
+            storedPresentationDiagnostics.rendererCorruptedFrames = current.corruptedFrames
+            guard let previousRendererMetrics,
+                  let previousRendererMetricsAt else { return nil }
+            let snapshot = PlaybackRendererCadenceDiagnostics.interval(
+                previous: previousRendererMetrics,
+                current: current,
+                elapsed: now - previousRendererMetricsAt
+            )
+            storedPresentationDiagnostics.rendererFramesPerSecond =
+                snapshot.displayedFramesPerSecond
+            storedPresentationDiagnostics.rendererAverageDelayMilliseconds =
+                snapshot.averageFrameDelayMilliseconds
+            return snapshot
+        }
+        guard let interval else { return }
+        let snapshot = presentationDiagnosticsSnapshot
+        NSLog(
+            "BUNNY_PRESENTATION renderer_batch_fps=%@ interval_frames=%ld interval_dropped=%ld total_frames=%ld total_dropped=%ld corrupt=%ld avg_delay_ms=%@ pts_p95_ms=%@ pts_max_ms=%@ pts_back=%ld pts_dup=%ld pts_outliers=%ld dts_p95_ms=%@ dts_back=%ld clock_ratio=%@ applied_rate=%.2f display_hz=%@ display_p95_ms=%@ display_missed=%ld counters_reset=%@",
+            Self.diagnosticNumber(snapshot.rendererFramesPerSecond),
+            interval.intervalFrames,
+            interval.intervalDroppedFrames,
+            interval.totalFrames,
+            interval.totalDroppedFrames,
+            interval.totalCorruptedFrames,
+            Self.diagnosticNumber(snapshot.rendererAverageDelayMilliseconds),
+            Self.diagnosticNumber(snapshot.sourcePTSP95Milliseconds),
+            Self.diagnosticNumber(snapshot.sourcePTSMaximumMilliseconds),
+            snapshot.sourcePTSBackwardTransitions,
+            snapshot.sourcePTSDuplicateTransitions,
+            snapshot.sourcePTSOutlierTransitions,
+            Self.diagnosticNumber(snapshot.sourceDTSP95Milliseconds),
+            snapshot.sourceDTSBackwardTransitions,
+            Self.diagnosticNumber(snapshot.playbackClockRatio),
+            snapshot.appliedRate,
+            Self.diagnosticNumber(snapshot.displayRefreshHz),
+            Self.diagnosticNumber(snapshot.displayP95IntervalMilliseconds),
+            snapshot.displayMissedRefreshes,
+            interval.countersReset ? "yes" : "no"
+        )
+    }
+
+    private static func diagnosticNumber(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return "unknown" }
+        return String(format: "%.3f", value)
+    }
+
     private func publish(_ action: @escaping @MainActor @Sendable () -> Void) {
         Task { @MainActor in action() }
+    }
+
+    private static func packetTrackKind(_ rawKind: UInt32) -> PlaybackPacketTrackKind {
+        switch rawKind {
+        case UInt32(STREMIO_MEDIA_TRACK_VIDEO):
+            return .video
+        case UInt32(STREMIO_MEDIA_TRACK_AUDIO):
+            return .audio
+        case UInt32(STREMIO_MEDIA_TRACK_SUBTITLE):
+            return .subtitle
+        default:
+            return .other
+        }
+    }
+
+    private static func hdrInputDiagnostics(
+        _ descriptor: BunnyNativeTrackDescriptor
+    ) -> BunnyHDRDiagnosticsSnapshot {
+        let color = descriptor.videoColor
+        let has: (Int) -> Bool = { flag in
+            color.flags & UInt32(flag) != 0
+        }
+        let dolbyVisionConfiguration = ["dvcC", "dvvC", "dvwC"]
+            .first { descriptor.additionalCodecAtoms[$0] != nil }
+        return BunnyHDRDiagnosticsSnapshot(
+            inputBitsPerChannel: has(
+                STREMIO_MEDIA_VIDEO_COLOR_BITS_PER_CHANNEL_PRESENT
+            ) ? color.bits_per_channel : nil,
+            inputPrimaries: has(
+                STREMIO_MEDIA_VIDEO_COLOR_PRIMARIES_PRESENT
+            ) ? color.primaries : nil,
+            inputTransferCharacteristics: has(
+                STREMIO_MEDIA_VIDEO_COLOR_TRANSFER_PRESENT
+            ) ? color.transfer_characteristics : nil,
+            inputMatrixCoefficients: has(
+                STREMIO_MEDIA_VIDEO_COLOR_MATRIX_PRESENT
+            ) ? color.matrix_coefficients : nil,
+            inputRange: has(
+                STREMIO_MEDIA_VIDEO_COLOR_RANGE_PRESENT
+            ) ? color.range : nil,
+            inputHasMasteringMetadata: has(
+                STREMIO_MEDIA_VIDEO_COLOR_MASTERING_PRESENT
+            ),
+            inputHasContentLightLevel: has(
+                STREMIO_MEDIA_VIDEO_COLOR_MAX_CLL_PRESENT
+            ) || has(STREMIO_MEDIA_VIDEO_COLOR_MAX_FALL_PRESENT),
+            inputDolbyVisionConfiguration: dolbyVisionConfiguration
+        )
     }
 
     private static func presentationTrack(_ descriptor: BunnyNativeTrackDescriptor) -> BunnyNativeTrack {
@@ -2448,6 +4721,8 @@ private func dolbyAudioChannelLayout(
 private func makeFormatDescription(
     raw: StremioMediaTrackInfo,
     codecPrivate: Data,
+    videoColor: StremioMediaVideoColorInfo? = nil,
+    additionalCodecAtoms: [String: Data] = [:],
     audioChannelLayoutOverride: AudioChannelLayout? = nil
 ) throws -> CMFormatDescription? {
     switch raw.kind {
@@ -2460,7 +4735,7 @@ private func makeFormatDescription(
         case UInt32(STREMIO_MEDIA_CODEC_MPEG4): (kCMVideoCodecType_MPEG4Video, "esds")
         default: nil
         }
-        guard let (codec, atom) = codecAndAtom else { return nil }
+        guard let (baseCodec, atom) = codecAndAtom else { return nil }
         guard raw.width > 0,
               raw.height > 0,
               raw.width <= 16_384,
@@ -2468,21 +4743,65 @@ private func makeFormatDescription(
               let width = Int32(exactly: raw.width),
               let height = Int32(exactly: raw.height)
         else { return nil }
-        var description: CMVideoFormatDescription?
-        let atoms: [String: Any] = codecPrivate.isEmpty ? [:] : [atom: codecPrivate]
-        let extensions: [String: Any] = atoms.isEmpty ? [:] : [
-            kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String: atoms,
-        ]
-        let status = CMVideoFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault,
-            codecType: codec,
-            width: width,
-            height: height,
-            extensions: extensions as CFDictionary,
-            formatDescriptionOut: &description
-        )
-        guard status == noErr else { return nil }
-        return description
+        var atoms = additionalCodecAtoms.reduce(into: [String: Any]()) {
+            $0[$1.key] = $1.value
+        }
+        if !codecPrivate.isEmpty {
+            atoms[atom] = codecPrivate
+        }
+        var extensions = videoFormatExtensions(videoColor)
+        if !atoms.isEmpty {
+            extensions[
+                kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String
+            ] = atoms
+        }
+        let hasDolbyVisionConfiguration = additionalCodecAtoms.keys.contains {
+            $0 == "dvcC" || $0 == "dvvC" || $0 == "dvwC"
+        }
+        let prefersDolbyVision = baseCodec == kCMVideoCodecType_HEVC
+            && hasDolbyVisionConfiguration
+            && VTIsHardwareDecodeSupported(kCMVideoCodecType_DolbyVisionHEVC)
+        let codecCandidates: [CMVideoCodecType] = prefersDolbyVision
+            ? [kCMVideoCodecType_DolbyVisionHEVC, baseCodec]
+            : [baseCodec]
+        var descriptions = [CMVideoFormatDescription]()
+        for codec in codecCandidates {
+            var description: CMVideoFormatDescription?
+            let status = CMVideoFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                codecType: codec,
+                width: width,
+                height: height,
+                extensions: extensions as CFDictionary,
+                formatDescriptionOut: &description
+            )
+            if status == noErr, let description {
+                descriptions.append(description)
+            }
+        }
+        if baseCodec == kCMVideoCodecType_HEVC,
+           let normalized = makeHEVCFormatDescriptionFromConfigurationRecord(
+                codecPrivate,
+                color: videoColor,
+                additionalCodecAtoms: additionalCodecAtoms
+           ) {
+            descriptions.append(normalized)
+        }
+        guard !descriptions.isEmpty else { return nil }
+        for (index, description) in descriptions.enumerated()
+        where videoFormatSupportsDecompression(description) {
+            if baseCodec == kCMVideoCodecType_HEVC, index > 0 {
+                    NSLog(
+                        "BUNNY_HEVC_FORMAT_FALLBACK candidate=%d format=%@",
+                        index,
+                        bunnyFourCC(
+                            CMFormatDescriptionGetMediaSubType(description)
+                        )
+                    )
+            }
+            return description
+        }
+        return nil
     case UInt32(STREMIO_MEDIA_TRACK_AUDIO):
         let formatAndFrames: (AudioFormatID, UInt32)? = switch raw.codec {
         case UInt32(STREMIO_MEDIA_CODEC_AAC): (kAudioFormatMPEG4AAC, 1_024)
@@ -2558,6 +4877,370 @@ private func makeFormatDescription(
     default:
         return nil
     }
+}
+
+private func makeHEVCFormatDescriptionFromConfigurationRecord(
+    _ configuration: Data,
+    color: StremioMediaVideoColorInfo?,
+    additionalCodecAtoms: [String: Data]
+) -> CMVideoFormatDescription? {
+    guard let parsed = parseHEVCParameterSets(configuration) else { return nil }
+    return makeHEVCFormatDescription(
+        parameterSets: parsed.parameterSets,
+        nalUnitHeaderLength: parsed.nalUnitHeaderLength,
+        color: color,
+        additionalCodecAtoms: additionalCodecAtoms
+    )
+}
+
+private func makeHEVCFormatDescription(
+    parameterSets: [Data],
+    nalUnitHeaderLength: Int32,
+    color: StremioMediaVideoColorInfo?,
+    additionalCodecAtoms: [String: Data]
+) -> CMVideoFormatDescription? {
+    guard !parameterSets.isEmpty, (1...4).contains(nalUnitHeaderLength) else {
+        return nil
+    }
+    let allocated = parameterSets.map { data -> UnsafeMutablePointer<UInt8> in
+        let pointer = UnsafeMutablePointer<UInt8>.allocate(capacity: data.count)
+        data.copyBytes(to: pointer, count: data.count)
+        return pointer
+    }
+    defer { allocated.forEach { $0.deallocate() } }
+    var pointers = allocated.map { UnsafePointer($0) }
+    var sizes = parameterSets.map(\.count)
+    var extensions = videoFormatExtensions(color)
+    if !additionalCodecAtoms.isEmpty {
+        extensions[
+            kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String
+        ] = additionalCodecAtoms
+    }
+    var description: CMVideoFormatDescription?
+    let status = pointers.withUnsafeBufferPointer { pointerBuffer in
+        sizes.withUnsafeBufferPointer { sizeBuffer in
+            guard let pointerBase = pointerBuffer.baseAddress,
+                  let sizeBase = sizeBuffer.baseAddress else {
+                return kCMFormatDescriptionError_InvalidParameter
+            }
+            return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                allocator: kCFAllocatorDefault,
+                parameterSetCount: pointerBuffer.count,
+                parameterSetPointers: pointerBase,
+                parameterSetSizes: sizeBase,
+                nalUnitHeaderLength: nalUnitHeaderLength,
+                extensions: extensions as CFDictionary,
+                formatDescriptionOut: &description
+            )
+        }
+    }
+    return status == noErr ? description : nil
+}
+
+private func parseHEVCParameterSets(
+    _ configuration: Data
+) -> (parameterSets: [Data], nalUnitHeaderLength: Int32)? {
+    if configuration.count >= 23, configuration[0] == 1 {
+        let nalUnitHeaderLength = Int32((configuration[21] & 0x03) + 1)
+        let arrayCount = Int(configuration[22])
+        var cursor = 23
+        var parameterSets = [Data]()
+        var foundTypes = Set<UInt8>()
+        for _ in 0..<arrayCount {
+            guard cursor + 3 <= configuration.count else { return nil }
+            let nalType = configuration[cursor] & 0x3f
+            cursor += 1
+            let count = Int(configuration[cursor]) << 8
+                | Int(configuration[cursor + 1])
+            cursor += 2
+            for _ in 0..<count {
+                guard cursor + 2 <= configuration.count else { return nil }
+                let size = Int(configuration[cursor]) << 8
+                    | Int(configuration[cursor + 1])
+                cursor += 2
+                guard size > 0, cursor + size <= configuration.count else {
+                    return nil
+                }
+                if nalType == 32 || nalType == 33 || nalType == 34 {
+                    parameterSets.append(
+                        configuration.subdata(in: cursor..<(cursor + size))
+                    )
+                    foundTypes.insert(nalType)
+                }
+                cursor += size
+            }
+        }
+        guard foundTypes.isSuperset(of: [32, 33, 34]) else { return nil }
+        return (parameterSets, nalUnitHeaderLength)
+    }
+
+    let bytes = [UInt8](configuration)
+    var starts = [(offset: Int, prefixLength: Int)]()
+    var index = 0
+    while index + 3 <= bytes.count {
+        if index + 4 <= bytes.count,
+           bytes[index] == 0,
+           bytes[index + 1] == 0,
+           bytes[index + 2] == 0,
+           bytes[index + 3] == 1 {
+            starts.append((index, 4))
+            index += 4
+        } else if bytes[index] == 0,
+                  bytes[index + 1] == 0,
+                  bytes[index + 2] == 1 {
+            starts.append((index, 3))
+            index += 3
+        } else {
+            index += 1
+        }
+    }
+    guard !starts.isEmpty else { return nil }
+    var parameterSets = [Data]()
+    var foundTypes = Set<UInt8>()
+    for (startIndex, start) in starts.enumerated() {
+        let payloadStart = start.offset + start.prefixLength
+        var payloadEnd = startIndex + 1 < starts.count
+            ? starts[startIndex + 1].offset
+            : bytes.count
+        while payloadEnd > payloadStart, bytes[payloadEnd - 1] == 0 {
+            payloadEnd -= 1
+        }
+        guard payloadStart + 2 <= payloadEnd else { continue }
+        let nalType = (bytes[payloadStart] >> 1) & 0x3f
+        if nalType == 32 || nalType == 33 || nalType == 34 {
+            parameterSets.append(Data(bytes[payloadStart..<payloadEnd]))
+            foundTypes.insert(nalType)
+        }
+    }
+    guard foundTypes.isSuperset(of: [32, 33, 34]) else { return nil }
+    return (parameterSets, 4)
+}
+
+private func hevcParameterSetsInPacket(
+    _ packet: Data,
+    preferredLengthFieldBytes: Int
+) -> (parameterSets: [Data], nalUnitHeaderLength: Int32)? {
+    let lengthCandidates = ([preferredLengthFieldBytes, 4, 2, 1])
+        .filter { (1...4).contains($0) }
+        .reduce(into: [Int]()) { values, value in
+            if !values.contains(value) { values.append(value) }
+        }
+    for lengthFieldBytes in lengthCandidates {
+        if let units = lengthPrefixedNALUnits(
+            packet,
+            lengthFieldBytes: lengthFieldBytes
+        ) {
+            let parameterSets = units.filter {
+                guard let first = $0.first else { return false }
+                let type = (first >> 1) & 0x3f
+                return type == 32 || type == 33 || type == 34
+            }
+            if !parameterSets.isEmpty {
+                return (parameterSets, Int32(lengthFieldBytes))
+            }
+        }
+    }
+    let units = annexBNALUnits(packet)
+    let parameterSets = units.filter {
+        guard let first = $0.first else { return false }
+        let type = (first >> 1) & 0x3f
+        return type == 32 || type == 33 || type == 34
+    }
+    return parameterSets.isEmpty ? nil : (parameterSets, 4)
+}
+
+private func lengthPrefixedNALUnits(
+    _ packet: Data,
+    lengthFieldBytes: Int
+) -> [Data]? {
+    guard (1...4).contains(lengthFieldBytes),
+          packet.count > lengthFieldBytes else { return nil }
+    let bytes = [UInt8](packet)
+    var units = [Data]()
+    var cursor = 0
+    while cursor < bytes.count {
+        guard cursor + lengthFieldBytes <= bytes.count else { return nil }
+        var size = 0
+        for byte in bytes[cursor..<(cursor + lengthFieldBytes)] {
+            size = (size << 8) | Int(byte)
+        }
+        cursor += lengthFieldBytes
+        guard size >= 2, cursor + size <= bytes.count else { return nil }
+        let nalType = (bytes[cursor] >> 1) & 0x3f
+        guard nalType <= 63 else { return nil }
+        units.append(Data(bytes[cursor..<(cursor + size)]))
+        cursor += size
+    }
+    return cursor == bytes.count && !units.isEmpty ? units : nil
+}
+
+private func annexBNALUnits(_ packet: Data) -> [Data] {
+    let bytes = [UInt8](packet)
+    var starts = [(offset: Int, prefixLength: Int)]()
+    var index = 0
+    while index + 3 <= bytes.count {
+        if index + 4 <= bytes.count,
+           bytes[index] == 0,
+           bytes[index + 1] == 0,
+           bytes[index + 2] == 0,
+           bytes[index + 3] == 1 {
+            starts.append((index, 4))
+            index += 4
+        } else if bytes[index] == 0,
+                  bytes[index + 1] == 0,
+                  bytes[index + 2] == 1 {
+            starts.append((index, 3))
+            index += 3
+        } else {
+            index += 1
+        }
+    }
+    var units = [Data]()
+    for (startIndex, start) in starts.enumerated() {
+        let payloadStart = start.offset + start.prefixLength
+        var payloadEnd = startIndex + 1 < starts.count
+            ? starts[startIndex + 1].offset
+            : bytes.count
+        while payloadEnd > payloadStart, bytes[payloadEnd - 1] == 0 {
+            payloadEnd -= 1
+        }
+        if payloadStart + 2 <= payloadEnd {
+            units.append(Data(bytes[payloadStart..<payloadEnd]))
+        }
+    }
+    return units
+}
+
+private func videoFormatSupportsDecompression(
+    _ description: CMVideoFormatDescription
+) -> Bool {
+    var session: VTDecompressionSession?
+    let status = VTDecompressionSessionCreate(
+        allocator: kCFAllocatorDefault,
+        formatDescription: description,
+        decoderSpecification: nil,
+        imageBufferAttributes: nil,
+        outputCallback: nil,
+        decompressionSessionOut: &session
+    )
+    if let session {
+        VTDecompressionSessionInvalidate(session)
+    }
+    return status == noErr
+}
+
+private func videoFormatExtensions(
+    _ color: StremioMediaVideoColorInfo?
+) -> [String: Any] {
+    guard let color, color.abi_version == 1 else { return [:] }
+    var extensions = [String: Any]()
+    let has: (Int) -> Bool = { flag in
+        color.flags & UInt32(flag) != 0
+    }
+    if has(STREMIO_MEDIA_VIDEO_COLOR_PRIMARIES_PRESENT),
+       let codePoint = Int32(exactly: color.primaries),
+       let value = CVColorPrimariesGetStringForIntegerCodePoint(codePoint)?
+        .takeUnretainedValue() {
+        extensions[kCMFormatDescriptionExtension_ColorPrimaries as String] = value
+    }
+    if has(STREMIO_MEDIA_VIDEO_COLOR_TRANSFER_PRESENT),
+       let codePoint = Int32(exactly: color.transfer_characteristics),
+       let value = CVTransferFunctionGetStringForIntegerCodePoint(codePoint)?
+        .takeUnretainedValue() {
+        extensions[kCMFormatDescriptionExtension_TransferFunction as String] = value
+    }
+    if has(STREMIO_MEDIA_VIDEO_COLOR_MATRIX_PRESENT),
+       let codePoint = Int32(exactly: color.matrix_coefficients),
+       let value = CVYCbCrMatrixGetStringForIntegerCodePoint(codePoint)?
+        .takeUnretainedValue() {
+        extensions[kCMFormatDescriptionExtension_YCbCrMatrix as String] = value
+    }
+    if has(STREMIO_MEDIA_VIDEO_COLOR_RANGE_PRESENT) {
+        switch color.range {
+        case 1:
+            extensions[kCMFormatDescriptionExtension_FullRangeVideo as String] = false
+        case 2:
+            extensions[kCMFormatDescriptionExtension_FullRangeVideo as String] = true
+        default:
+            break
+        }
+    }
+    if has(STREMIO_MEDIA_VIDEO_COLOR_BITS_PER_CHANNEL_PRESENT),
+       color.bits_per_channel > 0 {
+        extensions[kCMFormatDescriptionExtension_BitsPerComponent as String] =
+            color.bits_per_channel
+    }
+    if has(STREMIO_MEDIA_VIDEO_COLOR_MASTERING_PRESENT),
+       let mastering = masteringDisplayColorVolumeData(color) {
+        extensions[
+            kCMFormatDescriptionExtension_MasteringDisplayColorVolume as String
+        ] = mastering
+    }
+    if has(STREMIO_MEDIA_VIDEO_COLOR_MAX_CLL_PRESENT)
+        || has(STREMIO_MEDIA_VIDEO_COLOR_MAX_FALL_PRESENT) {
+        var contentLightLevel = Data()
+        appendBigEndian(clampedUInt16(Double(color.max_cll)), to: &contentLightLevel)
+        appendBigEndian(clampedUInt16(Double(color.max_fall)), to: &contentLightLevel)
+        extensions[
+            kCMFormatDescriptionExtension_ContentLightLevelInfo as String
+        ] = contentLightLevel
+    }
+    return extensions
+}
+
+private func masteringDisplayColorVolumeData(
+    _ color: StremioMediaVideoColorInfo
+) -> Data? {
+    let chromaticities = [
+        color.primary_g_x, color.primary_g_y,
+        color.primary_b_x, color.primary_b_y,
+        color.primary_r_x, color.primary_r_y,
+        color.white_point_x, color.white_point_y,
+    ]
+    guard chromaticities.allSatisfy({ $0.isFinite && $0 >= 0 }),
+          color.luminance_max.isFinite,
+          color.luminance_max >= 0,
+          color.luminance_min.isFinite,
+          color.luminance_min >= 0
+    else { return nil }
+    var data = Data()
+    for value in chromaticities {
+        appendBigEndian(clampedUInt16(value * 50_000), to: &data)
+    }
+    appendBigEndian(clampedUInt32(color.luminance_max * 10_000), to: &data)
+    appendBigEndian(clampedUInt32(color.luminance_min * 10_000), to: &data)
+    return data.count == 24 ? data : nil
+}
+
+private func clampedUInt16(_ value: Double) -> UInt16 {
+    guard value.isFinite else { return 0 }
+    return UInt16(min(max(value.rounded(), 0), Double(UInt16.max)))
+}
+
+private func clampedUInt32(_ value: Double) -> UInt32 {
+    guard value.isFinite else { return 0 }
+    return UInt32(min(max(value.rounded(), 0), Double(UInt32.max)))
+}
+
+private func appendBigEndian(_ value: UInt16, to data: inout Data) {
+    var value = value.bigEndian
+    withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+}
+
+private func appendBigEndian(_ value: UInt32, to data: inout Data) {
+    var value = value.bigEndian
+    withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+}
+
+private func bunnyFourCC(_ value: OSType) -> String {
+    let bytes = [
+        UInt8((value >> 24) & 0xff),
+        UInt8((value >> 16) & 0xff),
+        UInt8((value >> 8) & 0xff),
+        UInt8(value & 0xff),
+    ]
+    return String(bytes: bytes, encoding: .ascii)
+        ?? String(format: "0x%08x", value)
 }
 
 private extension NSLock {

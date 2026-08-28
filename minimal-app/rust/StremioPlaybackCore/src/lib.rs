@@ -54,37 +54,49 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+fn contains_file_extension(haystack: &str, extension: &str) -> bool {
+    haystack.match_indices(extension).any(|(index, _)| {
+        let end = index + extension.len();
+        haystack
+            .as_bytes()
+            .get(end)
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric())
+    })
+}
+
 fn classify(url: &str, title: &str) -> (u32, bool, bool) {
     let normalized_url = url.to_ascii_lowercase();
     let hint = format!("{normalized_url} {title}").to_ascii_lowercase();
     let high_resolution = contains_any(&hint, &["4320p", "2160p", " 8k", " 4k", "ai upscale"]);
     let hls = contains_any(&hint, &[".m3u8", " hls", "mpegurl"]);
     let hevc = contains_any(&hint, &["x265", "hevc"]);
-    let native_file = contains_any(
-        &normalized_url,
-        &[".mp4", ".m4v", ".mov", ".m4a", ".mp3", ".aac", ".ts"],
-    );
-    let direct_container = contains_any(
-        &hint,
-        &[
-            ".mkv", " mkv", "matroska", ".webm", ".avi", "av1", "flac", "truehd", " dts",
-        ],
-    );
-    let kind = if high_resolution {
-        SOURCE_HIGH_RESOLUTION
-    } else if hls {
+    let native_file = [".mp4", ".m4v", ".mov", ".m4a", ".mp3", ".aac", ".ts"]
+        .iter()
+        .any(|extension| contains_file_extension(&hint, extension));
+    let native_mime = contains_any(&hint, &["video/mp4", "video/quicktime", "video/mp2t"]);
+    let direct_container = [".mkv", ".webm", ".avi"]
+        .iter()
+        .any(|extension| contains_file_extension(&hint, extension))
+        || contains_any(&hint, &[" mkv", "matroska", " webm"]);
+    let uncommon_codec = contains_any(&hint, &["av1", "flac", "truehd", " dts"]);
+    // Container evidence is stronger than resolution or codec hints. Provider
+    // resolvers frequently replace a descriptive filename with an extensionless
+    // signed CDN URL, so the stream title must participate in classification.
+    let kind = if hls {
         SOURCE_HLS
-    } else if direct_container {
-        SOURCE_DIRECT_CONTAINER
     } else if native_file {
         SOURCE_NATIVE_FILE
+    } else if direct_container {
+        SOURCE_DIRECT_CONTAINER
+    } else if high_resolution {
+        SOURCE_HIGH_RESOLUTION
     } else {
         SOURCE_UNKNOWN
     };
     (
         kind,
-        (hls || native_file) && !direct_container,
-        direct_container || high_resolution || hevc,
+        hls || native_file || native_mime,
+        direct_container || uncommon_codec || high_resolution || hevc,
     )
 }
 
@@ -118,14 +130,14 @@ fn policy(url: &str, title: &str, player_kind: u32) -> StremioPlaybackPolicy {
             // MP4 bytes. Let AVFoundation sniff unknown sources first; Bunny
             // still falls back to the Rust Matroska path if Apple's probe
             // cannot open them.
-            if apple_native || source_kind == SOURCE_UNKNOWN {
+            if apple_native || matches!(source_kind, SOURCE_UNKNOWN | SOURCE_HIGH_RESOLUTION) {
                 DECODER_AVFOUNDATION
             } else {
                 DECODER_BUNNY_RUST
             }
         }
         PLAYER_PERFORMANCE => {
-            if apple_native || source_kind == SOURCE_UNKNOWN {
+            if apple_native || matches!(source_kind, SOURCE_UNKNOWN | SOURCE_HIGH_RESOLUTION) {
                 DECODER_AVFOUNDATION
             } else {
                 DECODER_BUNNY_RUST
@@ -556,6 +568,50 @@ mod tests {
         assert_eq!(result.source_kind, SOURCE_NATIVE_FILE);
         assert_eq!(result.decoder_kind, DECODER_AVFOUNDATION);
         assert_eq!(result.use_bounded_renderer, 0);
+    }
+
+    #[test]
+    fn uses_mp4_title_hint_after_provider_replaces_filename_with_signed_url() {
+        let result = policy(
+            "https://cdn.example.test/signed/provider/source",
+            "The.Movie.2160p.H.265.AAC.mp4",
+            PLAYER_BUNNY,
+        );
+        assert_eq!(result.source_kind, SOURCE_NATIVE_FILE);
+        assert_eq!(result.decoder_kind, DECODER_AVFOUNDATION);
+    }
+
+    #[test]
+    fn keeps_mkv_title_hint_on_rust_after_provider_replaces_filename() {
+        let result = policy(
+            "https://cdn.example.test/signed/provider/source",
+            "The.Movie.2160p.HEVC.TrueHD.mkv",
+            PLAYER_BUNNY,
+        );
+        assert_eq!(result.source_kind, SOURCE_DIRECT_CONTAINER);
+        assert_eq!(result.decoder_kind, DECODER_BUNNY_RUST);
+    }
+
+    #[test]
+    fn sniffs_ambiguous_extensionless_hevc_before_rust_fallback() {
+        let result = policy(
+            "https://cdn.example.test/signed/provider/source",
+            "The Movie 1080p HEVC",
+            PLAYER_BUNNY,
+        );
+        assert_eq!(result.source_kind, SOURCE_UNKNOWN);
+        assert_eq!(result.decoder_kind, DECODER_AVFOUNDATION);
+    }
+
+    #[test]
+    fn sniffs_ambiguous_extensionless_4k_av1_before_rust_fallback() {
+        let result = policy(
+            "https://cdn.example.test/signed/provider/source",
+            "The Movie 2160p AV1 10-bit",
+            PLAYER_BUNNY,
+        );
+        assert_eq!(result.source_kind, SOURCE_HIGH_RESOLUTION);
+        assert_eq!(result.decoder_kind, DECODER_AVFOUNDATION);
     }
 
     #[test]

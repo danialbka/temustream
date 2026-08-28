@@ -2,6 +2,11 @@ use std::{ffi::c_void, fmt, ptr};
 
 pub const MAX_ELEMENT_HEADER_LENGTH: usize = 12;
 pub const MAX_METADATA_ELEMENT_LENGTH: u64 = 16 * 1024 * 1024;
+/// Some real-world Matroska muxers leave raw null padding between children of
+/// a Master Element instead of using an EBML Void element. Keep compatibility
+/// local to a known parent boundary and cap the scan so corrupt input cannot
+/// cause unbounded remote reads.
+pub const MAX_IGNORED_NULL_PADDING_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaError {
@@ -228,6 +233,58 @@ pub fn read_header(source: &mut dyn ReadAt, offset: u64) -> Result<ElementHeader
     })
 }
 
+pub fn read_child_header(
+    source: &mut dyn ReadAt,
+    offset: u64,
+    parent_end: u64,
+) -> Result<Option<ElementHeader>, MediaError> {
+    if offset > parent_end || parent_end > source.len() {
+        return Err(MediaError::UnexpectedEnd);
+    }
+
+    let mut cursor = offset;
+    let mut skipped = 0_u64;
+    let mut buffer = [0_u8; 256];
+    while cursor < parent_end {
+        let remaining = parent_end
+            .checked_sub(cursor)
+            .ok_or(MediaError::ArithmeticOverflow)?;
+        let count = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| MediaError::ArithmeticOverflow)?;
+        source.read_exact_at(cursor, &mut buffer[..count])?;
+
+        if let Some(index) = buffer[..count].iter().position(|byte| *byte != 0) {
+            let index = u64::try_from(index).map_err(|_| MediaError::ArithmeticOverflow)?;
+            skipped = skipped
+                .checked_add(index)
+                .ok_or(MediaError::ArithmeticOverflow)?;
+            if skipped > MAX_IGNORED_NULL_PADDING_BYTES {
+                return Err(MediaError::ElementTooLarge);
+            }
+            let header_offset = cursor
+                .checked_add(index)
+                .ok_or(MediaError::ArithmeticOverflow)?;
+            let header = read_header(source, header_offset)?;
+            if header.data_offset > parent_end {
+                return Err(MediaError::UnexpectedEnd);
+            }
+            return Ok(Some(header));
+        }
+
+        let count = u64::try_from(count).map_err(|_| MediaError::ArithmeticOverflow)?;
+        skipped = skipped
+            .checked_add(count)
+            .ok_or(MediaError::ArithmeticOverflow)?;
+        if skipped > MAX_IGNORED_NULL_PADDING_BYTES {
+            return Err(MediaError::ElementTooLarge);
+        }
+        cursor = cursor
+            .checked_add(count)
+            .ok_or(MediaError::ArithmeticOverflow)?;
+    }
+    Ok(None)
+}
+
 pub fn read_bytes(
     source: &mut dyn ReadAt,
     offset: u64,
@@ -315,5 +372,35 @@ mod tests {
         assert_eq!(header.id, 0x1a45dfa3);
         assert_eq!(header.data_offset, 5);
         assert_eq!(header.size, Some(4));
+    }
+
+    #[test]
+    fn child_header_skips_bounded_null_padding() {
+        let bytes = [0, 0, 0, 0xa3, 0x81, 0x7f];
+        let mut source = SliceSource::new(&bytes);
+        let header = read_child_header(&mut source, 0, bytes.len() as u64)
+            .unwrap()
+            .unwrap();
+        assert_eq!(header.id, 0xa3);
+        assert_eq!(header.offset, 3);
+        assert_eq!(header.data_offset, 5);
+        assert_eq!(header.size, Some(1));
+    }
+
+    #[test]
+    fn child_header_stops_at_parent_boundary() {
+        let bytes = [0, 0, 0, 0xa3, 0x81, 0x7f];
+        let mut source = SliceSource::new(&bytes);
+        assert_eq!(read_child_header(&mut source, 0, 3), Ok(None));
+    }
+
+    #[test]
+    fn child_header_rejects_excessive_null_padding() {
+        let bytes = vec![0; MAX_IGNORED_NULL_PADDING_BYTES as usize + 1];
+        let mut source = SliceSource::new(&bytes);
+        assert_eq!(
+            read_child_header(&mut source, 0, bytes.len() as u64),
+            Err(MediaError::ElementTooLarge)
+        );
     }
 }

@@ -21,6 +21,74 @@ public enum PlaybackBufferingPolicy {
     // paused video before applying backpressure. Keep the resume threshold
     // safely below that measured capacity so rebuffering cannot deadlock.
     public static let resumeReserve: TimeInterval = 0.70
+    /// A paused 4K display renderer accepts only a handful of uncompressed
+    /// frames. Once VideoToolbox already has a safe presentation-ordered
+    /// backlog, let the clock drain that queue before renderer backpressure
+    /// deadlocks further decode submissions.
+    public static let predecodedVideoResumeReserve: TimeInterval = 0.20
+    /// Keep decoded Apple renderer queues small and paced. Longer reserves stay
+    /// in Bunny's compressed packet reservoir, where a stale readiness signal
+    /// cannot turn a network burst into hundreds of late decoded frames.
+    public static let maximumRendererQueueLead: TimeInterval = 1.25
+    public static let videoTimingCalibrationPacketLimit = 48
+    public static let videoTimingCalibrationSpan: TimeInterval = 2
+
+    /// Matroska carries PTS but no authoritative DTS. Measure one decode-order
+    /// GOP before enqueueing video, then apply one stable, millisecond-quantized
+    /// lead to the monotonic decode timeline. A stable offset preserves DTS
+    /// order while ensuring every reordered B-frame is decoded before its PTS.
+    public static func videoDecodeLead(
+        maximumObservedLag: TimeInterval,
+        timestampStep: TimeInterval = 0.001
+    ) -> TimeInterval {
+        let lag = max(maximumObservedLag, 0)
+        let quantizedLag: TimeInterval
+        if timestampStep.isFinite, timestampStep > 0 {
+            quantizedLag = ceil(lag / timestampStep) * timestampStep
+        } else {
+            quantizedLag = lag
+        }
+        // Explicit VideoToolbox decompression supplies practical decode runway
+        // before presentation. DTS therefore needs only the measured reorder
+        // lead; adding presentation runway here makes temporal decoding retain
+        // an unnecessary second of 4K frames.
+        return quantizedLag
+    }
+
+    public static func videoTimingCalibrationReady(
+        keyframeCount: Int,
+        packetCount: Int,
+        decodeSpan: TimeInterval,
+        reservoirIsFull: Bool
+    ) -> Bool {
+        max(keyframeCount, 0) >= 2
+            || max(packetCount, 0) >= videoTimingCalibrationPacketLimit
+            || max(decodeSpan, 0) >= videoTimingCalibrationSpan
+            || reservoirIsFull
+    }
+
+    /// A compressed video stream is enqueued in decode order, while its PTS
+    /// can jump hundreds of milliseconds forward and then backward for
+    /// reordered B-frames. The farthest PTS is therefore not contiguous queued
+    /// coverage. Monotonic DTS is the conservative frontier: when packet N is
+    /// decoded, every earlier decode step is available, but a future-reference
+    /// PTS from packet N must not start the playback clock early.
+    public static func contiguousVideoQueueEnd(
+        previousEnd: TimeInterval,
+        presentationTime: TimeInterval,
+        decodeTime: TimeInterval,
+        duration: TimeInterval
+    ) -> TimeInterval {
+        let candidate: TimeInterval
+        if decodeTime.isFinite {
+            candidate = decodeTime
+        } else if presentationTime.isFinite {
+            candidate = presentationTime + max(duration.isFinite ? duration : 0, 0)
+        } else {
+            return previousEnd
+        }
+        return max(previousEnd, candidate)
+    }
 
     public static func decision(
         desiredRate: Float,
@@ -32,19 +100,25 @@ public enum PlaybackBufferingPolicy {
         hasAudio: Bool,
         nominalFrameRate: Double,
         allowsLowReservePlayback: Bool = false,
-        reachedEnd: Bool
+        reachedEnd: Bool,
+        requiredResumeReserve: TimeInterval = resumeReserve,
+        decodedVideoBacklogEnd: TimeInterval? = nil
     ) -> PlaybackBufferingDecision {
+        let effectiveVideoQueueEnd = effectiveVideoQueueEnd(
+            rendererQueueEnd: videoQueueEnd,
+            decodedBacklogEnd: decodedVideoBacklogEnd
+        )
         guard desiredRate > 0 else {
             let reserve = commonReserve(
                 clock: clock,
-                videoQueueEnd: videoQueueEnd,
+                videoQueueEnd: effectiveVideoQueueEnd,
                 audioQueueEnd: audioQueueEnd,
                 hasVideo: hasVideo,
                 hasAudio: hasAudio
             )
             return PlaybackBufferingDecision(
                 appliedRate: 0,
-                isRebuffering: reserve.map { $0 < resumeReserve } ?? true
+                isRebuffering: reserve.map { $0 < requiredResumeReserve } ?? true
             )
         }
 
@@ -70,7 +144,7 @@ public enum PlaybackBufferingPolicy {
 
         guard let reserve = commonReserve(
             clock: clock,
-            videoQueueEnd: videoQueueEnd,
+            videoQueueEnd: effectiveVideoQueueEnd,
             audioQueueEnd: audioQueueEnd,
             hasVideo: hasVideo,
             hasAudio: hasAudio
@@ -79,7 +153,7 @@ public enum PlaybackBufferingPolicy {
         }
 
         if isRebuffering {
-            guard reserve >= resumeReserve else {
+            guard reserve >= requiredResumeReserve else {
                 return PlaybackBufferingDecision(appliedRate: 0, isRebuffering: true)
             }
             return PlaybackBufferingDecision(
@@ -99,6 +173,21 @@ public enum PlaybackBufferingPolicy {
             appliedRate: desiredRate,
             isRebuffering: false
         )
+    }
+
+    /// VideoToolbox can safely hold decoded presentation-ordered frames beyond
+    /// AVSampleBufferDisplayLayer's small paused queue. Treat that deliverable
+    /// frontier as real video coverage so the clock does not repeatedly stop
+    /// while the presentation pump still has contiguous frames ready.
+    public static func effectiveVideoQueueEnd(
+        rendererQueueEnd: TimeInterval,
+        decodedBacklogEnd: TimeInterval?
+    ) -> TimeInterval {
+        guard let decodedBacklogEnd, decodedBacklogEnd.isFinite else {
+            return rendererQueueEnd
+        }
+        guard rendererQueueEnd.isFinite else { return decodedBacklogEnd }
+        return max(rendererQueueEnd, decodedBacklogEnd)
     }
 
     public static func commonReserve(

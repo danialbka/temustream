@@ -54,6 +54,45 @@ final class StremioSkeletonRecommendationUITests: XCTestCase {
         attachScreenshot(named: "recommendations-infinite-scroll-page-three")
     }
 
+    func testContinueWatchingLongPressOpensSeriesAndMovieDetails() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment = [
+            "SKELETON_CONTINUE_WATCHING_NAVIGATION_FIXTURE": "1",
+        ]
+        app.launchArguments = [
+            "-watchTogetherEnabled", "false",
+        ]
+        app.launch()
+
+        let seriesCard = app.descendants(matching: .any)[
+            "continue-watching-series:tt-continue-series:episode:tt-continue-series:1:2"
+        ]
+        XCTAssertTrue(seriesCard.waitForExistence(timeout: 15))
+        seriesCard.press(forDuration: 0.7)
+
+        XCTAssertTrue(app.navigationBars["Continue Series"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.buttons["resume-series"].waitForExistence(timeout: 5),
+            "A series long press should open its listing instead of resuming playback"
+        )
+        attachScreenshot(named: "continue-watching-series-long-press-details")
+
+        app.navigationBars["Continue Series"].buttons.element(boundBy: 0).tap()
+
+        let movieCard = app.descendants(matching: .any)[
+            "continue-watching-movie:tt-continue-movie"
+        ]
+        XCTAssertTrue(movieCard.waitForExistence(timeout: 5))
+        movieCard.press(forDuration: 0.7)
+
+        XCTAssertTrue(app.navigationBars["Continue Movie"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.buttons["resume-playback"].waitForExistence(timeout: 5),
+            "A movie long press should open its listing instead of resuming playback"
+        )
+        attachScreenshot(named: "continue-watching-movie-long-press-details")
+    }
+
     private func swipe(
         _ shelf: XCUIElement,
         untilExists identifier: String,

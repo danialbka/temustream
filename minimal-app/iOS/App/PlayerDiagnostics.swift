@@ -2,6 +2,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import VideoToolbox
 
 struct PlayerStressMetrics: Codable, Sendable {
     let title: String
@@ -19,7 +20,19 @@ struct PlayerStressMetrics: Codable, Sendable {
     let videoQueueStateTransitions: Int
     let nominalFPS: Double
     let enqueuedVideoFPS: Double
+    let presentedVideoFPS: Double?
     let droppedVideoFrames: UInt32
+    let corruptedVideoFrames: UInt32?
+    let averageFrameDelayMilliseconds: Double?
+    let sourcePTSP95Milliseconds: Double?
+    let sourcePTSBackwardTransitions: Int?
+    let displayRefreshHz: Double?
+    let displayP95IntervalMilliseconds: Double?
+    let displayMissedRefreshes: Int?
+    /// Frames discarded before the steady-state cadence window begins. This
+    /// keeps startup/seek damage visible without making it indistinguishable
+    /// from drops that continue while the movie is already playing.
+    let preSampleDroppedVideoFrames: UInt32
     let droppedVideoPackets: UInt32
     let realTimeRatio: Double
     let rendererUnderflowSkewP95Milliseconds: Double
@@ -28,21 +41,41 @@ struct PlayerStressMetrics: Codable, Sendable {
     let audioTrackCount: Int
     let videoTrackCount: Int
     let renderedVideoFrame: Bool
+    let hdrInputBitsPerChannel: UInt32?
+    let hdrInputPrimaries: UInt32?
+    let hdrInputTransferCharacteristics: UInt32?
+    let hdrInputMatrixCoefficients: UInt32?
+    let hdrInputRange: UInt32?
+    let hdrInputHasMasteringMetadata: Bool
+    let hdrInputHasContentLightLevel: Bool
+    let hdrInputDolbyVisionConfiguration: String?
+    let decodedPixelFormat: String?
+    let decodedColorPrimaries: String?
+    let decodedTransferFunction: String?
+    let decodedYCbCrMatrix: String?
+    let decodedHasMasteringMetadata: Bool?
+    let decodedHasContentLightLevel: Bool?
 
     var passed: Bool {
-        // This is source/sample cadence, not a claim about frames presented by
-        // AVSampleBufferDisplayLayer. The renderer does not expose a displayed
-        // frame counter, so playback smoothness is gated separately by queue
-        // underflow and media-clock continuity.
+        let seeksPassed = seekAttempts == 0
+            || (successfulSeeks == seekAttempts
+                && seekP95Milliseconds <= 2_500
+                && seekSyncRecoveryP95Milliseconds <= 3_000)
+        let pauseResumesPassed = pauseResumeAttempts == 0
+            || successfulPauseResumes == pauseResumeAttempts
         let packetCadenceIsPlausible = nominalFPS <= 0
             || enqueuedVideoFPS <= 0
             || (enqueuedVideoFPS >= nominalFPS * 0.75
                 && enqueuedVideoFPS <= nominalFPS * 1.50)
+        let rendererDelayIsPlausible = averageFrameDelayMilliseconds == nil
+            || averageFrameDelayMilliseconds! <= 20
+        let rendererCorruptionIsAbsent = corruptedVideoFrames == nil
+            || corruptedVideoFrames == 0
+        let displayCadenceIsStable = displayMissedRefreshes == nil
+            || displayMissedRefreshes! <= 3
         return startupMilliseconds <= 12_000
-            && successfulSeeks == seekAttempts
-            && seekP95Milliseconds <= 2_500
-            && seekSyncRecoveryP95Milliseconds <= 3_000
-            && successfulPauseResumes == pauseResumeAttempts
+            && seeksPassed
+            && pauseResumesPassed
             && pausedSeekPreserved
             && realTimeRatio >= 0.95
             && rendererUnderflowSkewP95Milliseconds <= 150
@@ -52,6 +85,9 @@ struct PlayerStressMetrics: Codable, Sendable {
             && videoQueueStateTransitions <= 2
             && droppedVideoFrames <= 5
             && packetCadenceIsPlausible
+            && rendererDelayIsPlausible
+            && rendererCorruptionIsAbsent
+            && displayCadenceIsStable
             && (videoTrackCount == 0 || renderedVideoFrame)
     }
 }
@@ -60,6 +96,8 @@ struct RealPlayerStressEntry: Codable, Sendable {
     let movie: String
     let provider: String
     let sourceProfile: String
+    let codecProfile: String
+    let streamMetadata: String
     let metrics: PlayerStressMetrics?
     let error: String?
 }
@@ -181,22 +219,32 @@ private enum BunnyPlayerStressBenchmark {
         startupTimeout: TimeInterval = 30,
         minimumDuration: TimeInterval = 4,
         seekFractions: [Double] = [0.10, 0.50, 0.85, 0.25, 0.70],
-        cadenceSampleSeconds: TimeInterval = 12
+        cadenceSampleSeconds: TimeInterval = 12,
+        interactionStress: Bool = true
     ) async throws -> PlayerStressMetrics {
         // Exercise the production movie-session policy as part of the stress
         // gate. Previously the simulator benchmark bypassed this setup, so it
         // could not catch AirPods/multichannel route regressions.
         PlaybackAudioSession.beginPlayback()
-        let window = foregroundWindow()
+        let window = try await waitForPresentationWindow(timeout: 5)
         let host = UIView(
             frame: visible
-                ? (window?.bounds ?? UIScreen.main.bounds)
-                : CGRect(x: -4, y: -4, width: 2, height: 2)
+                ? window.bounds
+                : CGRect(
+                    x: window.bounds.maxX - 2,
+                    y: window.bounds.maxY - 2,
+                    width: 2,
+                    height: 2
+                )
         )
         host.isUserInteractionEnabled = false
-        host.alpha = visible ? 1 : 0.01
+        // AVSampleBufferVideoRenderer can discard presentation work for a
+        // detached or effectively invisible layer. Keep nonvisual benchmarks
+        // attached at 2x2 points instead of suppressing the layer with alpha.
+        host.alpha = 1
         host.backgroundColor = .black
-        window?.addSubview(host)
+        window.addSubview(host)
+        window.bringSubviewToFront(host)
 
         #if targetEnvironment(simulator)
         let trustedPrivateOrigin = ["127.0.0.1", "localhost", "::1"]
@@ -206,7 +254,8 @@ private enum BunnyPlayerStressBenchmark {
         #endif
         let decoder = BunnyNativeDecoder(
             url: url,
-            trustedPrivateNetworkOrigin: trustedPrivateOrigin
+            trustedPrivateNetworkOrigin: trustedPrivateOrigin,
+            diagnosticsEnabled: true
         )
         decoder.videoLayer.frame = host.bounds
         decoder.videoLayer.videoGravity = .resizeAspect
@@ -223,11 +272,13 @@ private enum BunnyPlayerStressBenchmark {
 
         let startupStartedAt = ProcessInfo.processInfo.systemUptime
         NSLog("PLAYER_STRESS_STEP startup_begin title=%@", title)
+        // Mirror production autoplay ordering. The buffering policy prevents
+        // the synchronizer from advancing until both renderers are ready.
+        decoder.play(atRate: 1)
         decoder.start()
         try await waitUntil(timeout: startupTimeout, probe: probe) {
             probe.info != nil && probe.firstFrameRendered
         }
-        decoder.play(atRate: 1)
         try await waitUntil(timeout: 5, probe: probe) {
             decoder.currentTime > 0.15
         }
@@ -295,7 +346,7 @@ private enum BunnyPlayerStressBenchmark {
             }
         }
 
-        let pauseResumeAttempts = 5
+        let pauseResumeAttempts = interactionStress ? 5 : 0
         var successfulPauseResumes = 0
         for _ in 0..<pauseResumeAttempts {
             let pausedAt = decoder.currentTime
@@ -314,40 +365,54 @@ private enum BunnyPlayerStressBenchmark {
             }
         }
 
-        let pausedSeekTarget = min(max(duration * 0.48, 0.5), duration - 1)
-        decoder.pause()
-        let pausedSeekRevision = probe.seekRevision
-        decoder.seek(to: pausedSeekTarget)
-        try await waitUntil(timeout: 15, probe: probe) {
-            probe.seekRevision > pausedSeekRevision
-        }
-        decoder.pause()
-        try await Task.sleep(for: .milliseconds(350))
-        let pausedSeekPreserved = probe.seekSucceeded
-            && decoder.rate == 0
-            && abs(decoder.currentTime - pausedSeekTarget) < 2
-        decoder.play(atRate: 1)
-        do {
-            try await waitUntil(timeout: 8, probe: probe) {
-                decoder.rate > 0 && decoder.currentTime >= pausedSeekTarget + 0.35
+        var pausedSeekPreserved = true
+        if interactionStress {
+            let pausedSeekTarget = min(max(duration * 0.48, 0.5), duration - 1)
+            decoder.pause()
+            let pausedSeekRevision = probe.seekRevision
+            decoder.seek(to: pausedSeekTarget)
+            try await waitUntil(timeout: 15, probe: probe) {
+                probe.seekRevision > pausedSeekRevision
             }
-        } catch {
-            let metrics = decoder.metricsSnapshot
-            NSLog(
-                "PLAYER_STRESS_STEP paused_seek_resume_timeout title=%@ current=%.3f video=%.3f audio=%.3f desired_rate=%.2f applied_rate=%.2f",
-                title,
-                decoder.currentTime,
-                metrics.videoQueueEnd,
-                metrics.audioQueueEnd,
-                decoder.rate,
-                decoder.synchronizer.rate
-            )
-            throw error
+            decoder.pause()
+            try await Task.sleep(for: .milliseconds(350))
+            pausedSeekPreserved = probe.seekSucceeded
+                && decoder.rate == 0
+                && abs(decoder.currentTime - pausedSeekTarget) < 2
+            decoder.play(atRate: 1)
+            do {
+                try await waitUntil(timeout: 8, probe: probe) {
+                    decoder.rate > 0 && decoder.currentTime >= pausedSeekTarget + 0.35
+                }
+            } catch {
+                let metrics = decoder.metricsSnapshot
+                NSLog(
+                    "PLAYER_STRESS_STEP paused_seek_resume_timeout title=%@ current=%.3f video=%.3f audio=%.3f desired_rate=%.2f applied_rate=%.2f",
+                    title,
+                    decoder.currentTime,
+                    metrics.videoQueueEnd,
+                    metrics.audioQueueEnd,
+                    decoder.rate,
+                    decoder.synchronizer.rate
+                )
+                throw error
+            }
         }
 
         let sampleStartedAt = ProcessInfo.processInfo.systemUptime
         let mediaStartedAt = decoder.currentTime
         let rendererMetricsStartedAt = decoder.metricsSnapshot
+        let presentationMetricsStartedAt = decoder.presentationDiagnosticsSnapshot
+        let rendererDropsBeforeSample = max(
+            presentationMetricsStartedAt.rendererDroppedFrames ?? 0,
+            0
+        )
+        NSLog(
+            "PLAYER_STRESS_STEP cadence_begin title=%@ pre_sample_dropped=%ld sample_seconds=%.1f",
+            title,
+            rendererDropsBeforeSample,
+            cadenceSampleSeconds
+        )
         var underflowSince: TimeInterval?
         var isInsideCountedStall = false
         var videoUnderflowIntervals = 0
@@ -417,6 +482,17 @@ private enum BunnyPlayerStressBenchmark {
         let wallSeconds = ProcessInfo.processInfo.systemUptime - sampleStartedAt
         let mediaSeconds = max(decoder.currentTime - mediaStartedAt, 0)
         let rendererMetricsEndedAt = decoder.metricsSnapshot
+        let presentationMetrics = decoder.presentationDiagnosticsSnapshot
+        let hdrMetrics = decoder.hdrDiagnosticsSnapshot
+        let rendererDropsAtEnd = max(
+            presentationMetrics.rendererDroppedFrames
+                ?? rendererMetricsEndedAt.droppedVideoFrames,
+            0
+        )
+        let rendererDropsDuringSample = max(
+            rendererDropsAtEnd - rendererDropsBeforeSample,
+            0
+        )
         let decodedFrames = max(
             rendererMetricsEndedAt.decodedVideoFrames
                 - rendererMetricsStartedAt.decodedVideoFrames,
@@ -460,7 +536,21 @@ private enum BunnyPlayerStressBenchmark {
             videoQueueStateTransitions: videoQueueStateTransitions,
             nominalFPS: info.nominalFrameRate,
             enqueuedVideoFPS: enqueuedVideoFPS,
-            droppedVideoFrames: UInt32(clamping: rendererMetricsEndedAt.droppedVideoFrames),
+            presentedVideoFPS: presentationMetrics.rendererFramesPerSecond,
+            droppedVideoFrames: UInt32(clamping: rendererDropsDuringSample),
+            corruptedVideoFrames: presentationMetrics.rendererCorruptedFrames.map {
+                UInt32(clamping: $0)
+            },
+            averageFrameDelayMilliseconds:
+                presentationMetrics.rendererAverageDelayMilliseconds,
+            sourcePTSP95Milliseconds: presentationMetrics.sourcePTSP95Milliseconds,
+            sourcePTSBackwardTransitions:
+                presentationMetrics.sourcePTSBackwardTransitions,
+            displayRefreshHz: presentationMetrics.displayRefreshHz,
+            displayP95IntervalMilliseconds:
+                presentationMetrics.displayP95IntervalMilliseconds,
+            displayMissedRefreshes: presentationMetrics.displayMissedRefreshes,
+            preSampleDroppedVideoFrames: UInt32(clamping: rendererDropsBeforeSample),
             droppedVideoPackets: 0,
             realTimeRatio: wallSeconds > 0 ? mediaSeconds / wallSeconds : 0,
             rendererUnderflowSkewP95Milliseconds: percentile(
@@ -472,7 +562,27 @@ private enum BunnyPlayerStressBenchmark {
             longestVideoUnderflowMilliseconds: longestVideoUnderflowMilliseconds,
             audioTrackCount: info.audioTracks.count,
             videoTrackCount: info.hasVideo ? 1 : 0,
-            renderedVideoFrame: !info.hasVideo || probe.firstFrameRendered
+            renderedVideoFrame: !info.hasVideo || probe.firstFrameRendered,
+            hdrInputBitsPerChannel: hdrMetrics.inputBitsPerChannel,
+            hdrInputPrimaries: hdrMetrics.inputPrimaries,
+            hdrInputTransferCharacteristics:
+                hdrMetrics.inputTransferCharacteristics,
+            hdrInputMatrixCoefficients: hdrMetrics.inputMatrixCoefficients,
+            hdrInputRange: hdrMetrics.inputRange,
+            hdrInputHasMasteringMetadata:
+                hdrMetrics.inputHasMasteringMetadata,
+            hdrInputHasContentLightLevel:
+                hdrMetrics.inputHasContentLightLevel,
+            hdrInputDolbyVisionConfiguration:
+                hdrMetrics.inputDolbyVisionConfiguration,
+            decodedPixelFormat: hdrMetrics.outputPixelFormat,
+            decodedColorPrimaries: hdrMetrics.outputColorPrimaries,
+            decodedTransferFunction: hdrMetrics.outputTransferFunction,
+            decodedYCbCrMatrix: hdrMetrics.outputYCbCrMatrix,
+            decodedHasMasteringMetadata:
+                hdrMetrics.outputHasMasteringMetadata,
+            decodedHasContentLightLevel:
+                hdrMetrics.outputHasContentLightLevel
         )
     }
 
@@ -540,16 +650,35 @@ private enum BunnyPlayerStressBenchmark {
     }
 
     private static func foregroundWindow() -> UIWindow? {
-        UIApplication.shared.connectedScenes
+        let windows = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }?
-            .windows.first { $0.isKeyWindow }
+            .sorted { lhs, rhs in
+                lhs.activationState == .foregroundActive
+                    && rhs.activationState != .foregroundActive
+            }
+            .flatMap(\.windows)
+        return windows.first(where: \.isKeyWindow)
+            ?? windows.first { !$0.isHidden && $0.alpha > 0 }
+            ?? windows.first
+    }
+
+    private static func waitForPresentationWindow(
+        timeout: TimeInterval
+    ) async throws -> UIWindow {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if let window = foregroundWindow() { return window }
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw PlayerStressError.missingPresentationHost
     }
 }
 
 private enum PlayerStressError: LocalizedError {
     case invalidDuration(TimeInterval)
     case timedOut
+    case missingPresentationHost
     case missingAudioOutput
     case prefixCaptureRequiresByteRanges
     case invalidPrefixCaptureSize(Int64)
@@ -560,6 +689,8 @@ private enum PlayerStressError: LocalizedError {
             "Player stress source has invalid duration: \(duration)"
         case .timedOut:
             "Player stress operation timed out"
+        case .missingPresentationHost:
+            "Player stress could not attach the video renderer to a window"
         case .missingAudioOutput:
             "Bunny discovered an audio track but rendered no audio samples"
         case .prefixCaptureRequiresByteRanges:
@@ -568,6 +699,12 @@ private enum PlayerStressError: LocalizedError {
             "Provider returned an invalid prefix capture size: \(bytes) bytes"
         }
     }
+}
+
+private struct PlayerStressArtifact: Codable {
+    let passed: Bool
+    let metrics: PlayerStressMetrics?
+    let error: String?
 }
 
 @MainActor
@@ -589,7 +726,13 @@ struct PlayerStressScreen: View {
                 let result = try await BunnyPlayerStressBenchmark.measure(
                     url: url,
                     title: "bunny:rust:\(url.lastPathComponent)",
-                    visible: environment["SKELETON_PLAYER_STRESS_VISIBLE"] == "1"
+                    visible: environment["SKELETON_PLAYER_STRESS_VISIBLE"] == "1",
+                    seekFractions: environment[
+                        "SKELETON_PLAYER_STRESS_CADENCE_ONLY"
+                    ] == "1" ? [] : [0.10, 0.50, 0.85, 0.25, 0.70],
+                    interactionStress: environment[
+                        "SKELETON_PLAYER_STRESS_CADENCE_ONLY"
+                    ] != "1"
                 )
                 let encoder = JSONEncoder()
                 encoder.nonConformingFloatEncodingStrategy = .convertToString(
@@ -598,14 +741,56 @@ struct PlayerStressScreen: View {
                     nan: "NaN"
                 )
                 let data = try encoder.encode(result)
-                let json = String(decoding: data, as: UTF8.self)
+                try writeStressArtifact(
+                    PlayerStressArtifact(
+                        passed: result.passed,
+                        metrics: result,
+                        error: nil
+                    ),
+                    encoder: encoder
+                )
                 status = result.passed ? "Player stress PASS" : "Player stress FAIL"
-                NSLog("PLAYER_STRESS %@ %@", result.passed ? "PASS" : "FAIL", json)
+                NSLog(
+                    "PLAYER_STRESS %@ artifact=player-stress-result.json bytes=%ld",
+                    result.passed ? "PASS" : "FAIL",
+                    data.count
+                )
             } catch {
                 status = "Player stress FAIL: \(error.localizedDescription)"
-                NSLog("PLAYER_STRESS FAIL error=%@", error.localizedDescription)
+                let encoder = JSONEncoder()
+                try? writeStressArtifact(
+                    PlayerStressArtifact(
+                        passed: false,
+                        metrics: nil,
+                        error: error.localizedDescription
+                    ),
+                    encoder: encoder
+                )
+                NSLog(
+                    "PLAYER_STRESS FAIL artifact=player-stress-result.json error=%@",
+                    error.localizedDescription
+                )
             }
         }
+    }
+
+    private func writeStressArtifact(
+        _ artifact: PlayerStressArtifact,
+        encoder: JSONEncoder
+    ) throws {
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(
+            positiveInfinity: "Infinity",
+            negativeInfinity: "-Infinity",
+            nan: "NaN"
+        )
+        let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        )[0]
+        try encoder.encode(artifact).write(
+            to: documents.appendingPathComponent("player-stress-result.json"),
+            options: .atomic
+        )
     }
 }
 
@@ -996,6 +1181,7 @@ extension AppModel {
         requestedStreams: Int = 20,
         startIndex: Int = 0
     ) async {
+        let stressEnvironment = ProcessInfo.processInfo.environment
         let providerNeedle = "Debridio - Scraper TB"
         let obsession = catalog.first {
             $0.name.range(of: "Obsession", options: .caseInsensitive) != nil
@@ -1026,17 +1212,35 @@ extension AppModel {
             return
         }
 
+        let rankingMode: StreamRankingMode =
+            stressEnvironment["SKELETON_OBSESSION_STREAM_RANKING"] == "biggestFiles"
+                ? .biggestFiles
+                : .current
+        let minimumSizeGB = Double(
+            stressEnvironment["SKELETON_OBSESSION_STREAM_MIN_GB"] ?? ""
+        )
+        let maximumSizeGB = Double(
+            stressEnvironment["SKELETON_OBSESSION_STREAM_MAX_GB"] ?? ""
+        )
         var seen = Set<String>()
-        let streams = provider.streams
+        let streams = rankedPresentedStreams(
+            from: [provider],
+            mode: rankingMode
+        )
+            .map(\.stream)
             .filter { stream in
                 guard stream.url != nil else { return false }
-                return seen.insert(stream.id).inserted
-            }
-            .sorted {
-                let lhs = playerStressPriority(for: playerStressMetadata(for: $0))
-                let rhs = playerStressPriority(for: playerStressMetadata(for: $1))
-                if lhs != rhs { return lhs < rhs }
-                return $0.id < $1.id
+                guard seen.insert(stream.id).inserted else { return false }
+                let size = playerStressFileSize(
+                    in: playerStressMetadata(for: stream)
+                )
+                if let minimumSizeGB, (size ?? -.infinity) < minimumSizeGB {
+                    return false
+                }
+                if let maximumSizeGB, (size ?? .infinity) > maximumSizeGB {
+                    return false
+                }
+                return true
             }
         let selectedStreams = Array(
             streams.dropFirst(max(startIndex, 0)).prefix(requestedStreams)
@@ -1055,12 +1259,24 @@ extension AppModel {
 
             do {
                 let plan = try await playbackPlan(for: stream, providerName: provider.name)
+                let steadyOnly = stressEnvironment[
+                    "SKELETON_OBSESSION_STREAM_STEADY_ONLY"
+                ] == "1"
+                let cadenceSampleSeconds = Double(
+                    stressEnvironment["SKELETON_OBSESSION_STREAM_SAMPLE_SECONDS"] ?? ""
+                ) ?? 12
+                let startupTimeout = Double(
+                    stressEnvironment["SKELETON_OBSESSION_STREAM_STARTUP_TIMEOUT"] ?? ""
+                ) ?? 12
                 let metrics = try await BunnyPlayerStressBenchmark.measure(
                     url: plan.primaryURL,
                     title: "Obsession stream \(index)",
                     visible: true,
-                    startupTimeout: 12,
-                    minimumDuration: 20 * 60
+                    startupTimeout: startupTimeout,
+                    minimumDuration: 20 * 60,
+                    seekFractions: steadyOnly ? [] : [0.10, 0.50, 0.85, 0.25, 0.70],
+                    cadenceSampleSeconds: cadenceSampleSeconds,
+                    interactionStress: !steadyOnly
                 )
 
                 entries.append(
@@ -1097,10 +1313,43 @@ extension AppModel {
     }
 
     func runRealPlayerStressBenchmark(requestedMovies: Int = 5) async {
+        let environment = ProcessInfo.processInfo.environment
         let providerNeedle = "Debridio - Scraper TB"
+        let requestedMovieCount = Int(
+            environment["SKELETON_REAL_PLAYER_STRESS_COUNT"] ?? ""
+        ) ?? requestedMovies
+        let visible = environment["SKELETON_REAL_PLAYER_STRESS_VISIBLE"] == "1"
+        let codecDiverse = environment[
+            "SKELETON_REAL_PLAYER_STRESS_CODEC_DIVERSE"
+        ] == "1"
+        let hdrOnly = environment[
+            "SKELETON_REAL_PLAYER_STRESS_HDR_ONLY"
+        ] == "1"
+        let cadenceSampleSeconds = Double(
+            environment["SKELETON_REAL_PLAYER_STRESS_CADENCE_SECONDS"] ?? ""
+        ) ?? 12
+        let configuredSeekFractions = environment[
+            "SKELETON_REAL_PLAYER_STRESS_SEEK_FRACTIONS"
+        ]?.split(separator: ",").compactMap { Double($0) }.filter {
+            $0 > 0 && $0 < 1
+        }
+        let cadenceOnly = environment[
+            "SKELETON_REAL_PLAYER_STRESS_CADENCE_ONLY"
+        ] == "1"
+        let seekFractions = cadenceOnly
+            ? []
+            : configuredSeekFractions?.isEmpty == false
+                ? configuredSeekFractions!
+                : [0.10, 0.50, 0.85, 0.25, 0.70]
+        let interactionStress = environment[
+            "SKELETON_REAL_PLAYER_STRESS_INTERACTIONS"
+        ] != "0" && !cadenceOnly
         var entries = [RealPlayerStressEntry]()
+        var usedCodecSignatures = Set<String>()
+        var usedCodecTokens = Set<String>()
 
-        for item in catalog.prefix(12) where entries.count < requestedMovies {
+        for item in catalog.prefix(max(requestedMovieCount * 4, 12))
+        where entries.count < requestedMovieCount {
             let detail = await details(for: item)
             let providers = await streamProviders(for: detail)
             guard let provider = providers.first(where: {
@@ -1109,16 +1358,22 @@ extension AppModel {
 
             guard let selected = playerStressStream(
                 from: provider.streams,
-                prefer4K: entries.count.isMultiple(of: 2)
+                prefer4K: entries.count.isMultiple(of: 2),
+                requireHDR: hdrOnly,
+                usedCodecSignatures: codecDiverse ? usedCodecSignatures : [],
+                usedCodecTokens: codecDiverse ? usedCodecTokens : []
             ) else {
                 continue
             }
+            usedCodecSignatures.insert(selected.codecSignature)
+            usedCodecTokens.formUnion(selected.codecTokens)
 
             do {
                 NSLog(
-                    "REAL_PLAYER_STRESS begin movie=%@ source=%@",
+                    "REAL_PLAYER_STRESS begin movie=%@ source=%@ codec=%@",
                     detail.name,
-                    selected.profile
+                    selected.profile,
+                    selected.codecProfile
                 )
                 let plan = try await playbackPlan(
                     for: selected.stream,
@@ -1126,13 +1381,19 @@ extension AppModel {
                 )
                 let result = try await BunnyPlayerStressBenchmark.measure(
                     url: plan.primaryURL,
-                    title: detail.name
+                    title: detail.name,
+                    visible: visible,
+                    seekFractions: seekFractions,
+                    cadenceSampleSeconds: cadenceSampleSeconds,
+                    interactionStress: interactionStress
                 )
                 entries.append(
                     RealPlayerStressEntry(
                         movie: detail.name,
                         provider: provider.name,
                         sourceProfile: selected.profile,
+                        codecProfile: selected.codecProfile,
+                        streamMetadata: selected.metadata,
                         metrics: result,
                         error: nil
                     )
@@ -1143,6 +1404,8 @@ extension AppModel {
                         movie: detail.name,
                         provider: provider.name,
                         sourceProfile: selected.profile,
+                        codecProfile: selected.codecProfile,
+                        streamMetadata: selected.metadata,
                         metrics: nil,
                         error: error.localizedDescription
                     )
@@ -1152,7 +1415,7 @@ extension AppModel {
 
         let report = RealPlayerStressReport(
             generatedAt: Date(),
-            requestedMovies: requestedMovies,
+            requestedMovies: requestedMovieCount,
             testedMovies: entries.count,
             passedMovies: entries.filter { $0.metrics?.passed == true }.count,
             entries: entries
@@ -1195,17 +1458,51 @@ extension AppModel {
     /// sources. The UI still exposes every provider result to the user.
     private func playerStressStream(
         from streams: [Stream],
-        prefer4K: Bool
-    ) -> (stream: Stream, profile: String)? {
-        streams
-            .compactMap { stream -> (stream: Stream, profile: String, score: Int)? in
+        prefer4K: Bool,
+        requireHDR: Bool,
+        usedCodecSignatures: Set<String>,
+        usedCodecTokens: Set<String>
+    ) -> (
+        stream: Stream,
+        profile: String,
+        metadata: String,
+        codecProfile: String,
+        codecSignature: String,
+        codecTokens: Set<String>
+    )? {
+        let candidates = streams
+            .compactMap { stream -> (
+                stream: Stream,
+                profile: String,
+                metadata: String,
+                codecProfile: String,
+                codecSignature: String,
+                codecTokens: Set<String>,
+                cached: Bool,
+                score: Int
+            )? in
                 guard stream.url != nil else { return nil }
                 let metadata = [stream.title, stream.name, stream.description]
                     .compactMap { $0 }
                     .joined(separator: " ")
                 let uppercased = metadata.uppercased()
                 guard !uppercased.contains("4320P"),
-                      !uppercased.contains("8K") else { return nil }
+                      !uppercased.contains("8K"),
+                      !uppercased.contains(".MP4"),
+                      !uppercased.contains(" MP4 ") else { return nil }
+                let hasStandaloneHDR = uppercased.range(
+                    of: #"(?<![A-Z0-9])HDR(?:10\+?)?(?![A-Z])"#,
+                    options: .regularExpression
+                ) != nil
+                let hasHDR = uppercased.contains("DOLBY VISION")
+                    || uppercased.contains("DOVI")
+                    || uppercased.contains("HLG")
+                    || hasStandaloneHDR
+                    || uppercased.range(
+                        of: #"(?<![A-Z])DV(?![A-Z])"#,
+                        options: .regularExpression
+                    ) != nil
+                guard !requireHDR || hasHDR else { return nil }
 
                 let cached = metadata.contains("⚡")
                 let quality: String
@@ -1234,8 +1531,23 @@ extension AppModel {
                     oversizedPenalty = 0
                 }
                 let formatPenalty = uppercased.contains("REMUX") ? 8 : 0
+                let codec = playerStressCodecProfile(for: metadata)
+                #if targetEnvironment(simulator)
+                if codec.tokens.contains("AV1"),
+                   !VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) {
+                    return nil
+                }
+                #endif
+                let signatureNovelty = usedCodecSignatures.contains(codec.signature)
+                    ? 0
+                    : 600
+                let tokenNovelty = codec.tokens.filter {
+                    !usedCodecTokens.contains($0)
+                }.count * 120
                 let score = (cached ? 100 : 0)
                     + qualityScore
+                    + signatureNovelty
+                    + tokenNovelty
                     - oversizedPenalty
                     - formatPenalty
                 let profile = [
@@ -1245,10 +1557,113 @@ extension AppModel {
                 ]
                 .compactMap { $0 }
                 .joined(separator: ", ")
-                return (stream, profile, score)
+                return (
+                    stream,
+                    profile,
+                    String(metadata.prefix(500)),
+                    codec.label,
+                    codec.signature,
+                    codec.tokens,
+                    cached,
+                    score
+                )
             }
+        let availableCandidates = candidates.contains(where: \.cached)
+            ? candidates.filter(\.cached)
+            : candidates
+        return availableCandidates
             .max { $0.score < $1.score }
-            .map { ($0.stream, $0.profile) }
+            .map {
+                (
+                    $0.stream,
+                    $0.profile,
+                    $0.metadata,
+                    $0.codecProfile,
+                    $0.codecSignature,
+                    $0.codecTokens
+                )
+            }
+    }
+
+    private func playerStressCodecProfile(
+        for metadata: String
+    ) -> (label: String, signature: String, tokens: Set<String>) {
+        let value = metadata.uppercased()
+        let video: String
+        if value.contains("AV1") || value.contains("AV01") {
+            video = "AV1"
+        } else if value.contains("HEVC") || value.contains("H265")
+                    || value.contains("H.265") || value.contains("X265") {
+            video = "HEVC"
+        } else if value.contains("AVC") || value.contains("H264")
+                    || value.contains("H.264") || value.contains("X264") {
+            video = "H.264"
+        } else if value.contains("VP9") {
+            video = "VP9"
+        } else {
+            video = "unspecified-video"
+        }
+
+        let dynamicRange: String
+        if value.contains("DOLBY VISION") || value.contains("DOVI")
+            || value.range(of: #"(?<![A-Z])DV(?![A-Z])"#, options: .regularExpression) != nil {
+            dynamicRange = "Dolby Vision"
+        } else if value.contains("HDR10+") {
+            dynamicRange = "HDR10+"
+        } else if value.contains("HLG") {
+            dynamicRange = "HLG"
+        } else if value.contains("HDR10") {
+            dynamicRange = "HDR10"
+        } else if value.range(
+            of: #"(?<![A-Z0-9])HDR(?![A-Z])"#,
+            options: .regularExpression
+        ) != nil {
+            dynamicRange = "HDR"
+        } else if value.contains("10BIT") || value.contains("10-BIT") {
+            dynamicRange = "10-bit"
+        } else {
+            dynamicRange = "SDR/unspecified-depth"
+        }
+
+        let audio: String
+        if value.contains("ATMOS") {
+            audio = "Atmos"
+        } else if value.contains("TRUEHD") {
+            audio = "TrueHD"
+        } else if value.contains("DTS") {
+            audio = "DTS"
+        } else if value.contains("EAC3") || value.contains("E-AC3")
+                    || value.contains("DDP") || value.contains("DD+") {
+            audio = "E-AC-3"
+        } else if value.contains("AC3") || value.contains("AC-3") {
+            audio = "AC-3"
+        } else if value.contains("AAC") {
+            audio = "AAC"
+        } else if value.contains("FLAC") {
+            audio = "FLAC"
+        } else if value.contains("OPUS") {
+            audio = "Opus"
+        } else {
+            audio = "unspecified-audio"
+        }
+
+        let container: String
+        if value.contains(".MP4") || value.contains(" MP4 ") {
+            container = "MP4"
+        } else if value.contains(".WEBM") || value.contains(" WEBM ") {
+            container = "WebM"
+        } else if value.contains(".MKV") || value.contains(" MKV ") {
+            container = "MKV"
+        } else {
+            container = "container-unspecified"
+        }
+
+        let values = [video, dynamicRange, audio, container]
+        return (
+            values.joined(separator: " / "),
+            values.joined(separator: "|"),
+            Set(values)
+        )
     }
 
     private func playerStressFileSize(in metadata: String) -> Double? {
