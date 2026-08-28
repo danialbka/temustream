@@ -50,9 +50,14 @@ For App Store or TestFlight packaging, see [the release guide](docs/RELEASING.md
 Player details and supported containers are in
 [the media-core notes](minimal-app/docs/RUST_MEDIA_CORE.md).
 
-## License
+## License and credits
 
-The project is available under the [MIT License](LICENSE). See
-[third-party notices](THIRD_PARTY_NOTICES.md) for the exact release bundle.
+TemuStremio and Bunny are open source under the [MIT License](LICENSE).
 
+Bunny is an independent client built to work with Stremio accounts and add-ons.
+Thank you to the Stremio maintainers and contributors for the ecosystem that
+made this kind of client possible. No Stremio source code is included in Bunny.
+
+See the [third-party notices](THIRD_PARTY_NOTICES.md) for Stremio project
+credits, the Rust standard library license, and the optional backend licenses.
 TemuStremio and Bunny are not affiliated with or endorsed by Stremio or Temu.

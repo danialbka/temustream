@@ -4,6 +4,23 @@ The root [MIT License](LICENSE) covers original project code. It does not
 replace licenses or terms for tools, platform SDKs, hosted services, add-ons,
 metadata, codecs, or media.
 
+## Stremio credit
+
+Bunny is an independent client that works with Stremio accounts and add-ons.
+Thank you to the Stremio maintainers and contributors for building and sharing
+that ecosystem.
+
+No Stremio source code is copied into the Bunny iOS target. Stremio projects
+keep their own licenses. For reference, the official
+[stremio-core](https://github.com/Stremio/stremio-core/blob/development/LICENSE.md)
+project is published under the MIT License, while
+[stremio-web](https://github.com/Stremio/stremio-web) is published under
+GPL-2.0. Those licenses govern those projects and do not replace this
+repository's MIT License.
+
+TemuStremio and Bunny are not affiliated with or endorsed by Stremio. The
+Stremio name is used only to explain account and add-on compatibility.
+
 ## Current iOS app
 
 The Bunny Matroska, WebM, subtitle, and PGS implementation in
