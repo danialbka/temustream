@@ -49,13 +49,12 @@ ffmpeg -hide_banner -loglevel error -y \
   -hls_segment_filename "$SERVER_DIR/sample-%d.m4s" \
   "$SERVER_DIR/sample.m3u8"
 
-# Keep the compatibility-path vector deterministic; live SVT-AV1 encoding can
-# deadlock on GitHub's macOS runners before the simulator even launches.
-if ! base64 -D < "$SERVER_DIR/sample-av1-flac.mkv.b64" \
-  > "$SERVER_DIR/sample-av1-flac.mkv" 2>/dev/null; then
-  base64 --decode < "$SERVER_DIR/sample-av1-flac.mkv.b64" \
-    > "$SERVER_DIR/sample-av1-flac.mkv"
-fi
+# Exercise the Rust Matroska path with codecs that the Apple Simulator can
+# actually render. AV1 and FLAC stay in the parser benchmark and unit matrix;
+# they are not claimed as visible Simulator playback proof.
+ffmpeg -hide_banner -loglevel error -y \
+  -i "$SERVER_DIR/sample.mp4" -map 0:v:0 -map 0:a:0 -c copy \
+  "$SERVER_DIR/sample-h264-aac.mkv"
 
 python3 "$ROOT_DIR/scripts/range_server.py" "$PORT" "$SERVER_DIR" \
   >"$ROOT_DIR/build/e2e-server.log" 2>&1 &

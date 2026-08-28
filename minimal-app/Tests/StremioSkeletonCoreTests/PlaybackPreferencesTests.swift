@@ -78,41 +78,4 @@ final class PlaybackPreferencesTests: XCTestCase {
         XCTAssertNil(StreamFailoverPolicy.nextSourceIndex(after: -1, sourceCount: 3))
     }
 
-    func testVLCRoutesAppleNativeStreamsToHardwareFastPath() throws {
-        XCTAssertEqual(
-            VLCPlaybackRouting.backend(
-                for: try XCTUnwrap(URL(string: "https://media.example/movie/master.m3u8"))
-            ),
-            .nativeHardware
-        )
-        XCTAssertEqual(
-            VLCPlaybackRouting.backend(
-                for: try XCTUnwrap(URL(string: "https://media.example/signed/playback")),
-                detectedMIMEType: "video/mp4; charset=binary"
-            ),
-            .nativeHardware
-        )
-        XCTAssertEqual(
-            VLCPlaybackRouting.backend(
-                for: try XCTUnwrap(URL(string: "https://media.example/movie.mkv")),
-                detectedMIMEType: "video/x-matroska"
-            ),
-            .compatibility
-        )
-        XCTAssertEqual(
-            VLCPlaybackRouting.backend(
-                for: try XCTUnwrap(URL(string: "https://media.example/movie.webm"))
-            ),
-            .compatibility
-        )
-        XCTAssertEqual(
-            VLCPlaybackRouting.backend(
-                for: try XCTUnwrap(
-                    URL(string: "https://addon.debridio.com/signed/movie.mp4")
-                ),
-                detectedMIMEType: "video/mp4"
-            ),
-            .compatibility
-        )
-    }
 }

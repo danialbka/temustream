@@ -11,6 +11,22 @@ final class TorBoxStreamSelectionTests: XCTestCase {
         )
     }
 
+    func testParsesFortyThroughTerabyteProviderSizesWithoutNarrowing() {
+        let cases: [([String?], Int64)] = [
+            (["💾 40 GiB"], 40 * 1_024 * 1_024 * 1_024),
+            (["Remux", "55.48 GB"], 55_480_000_000),
+            (["80 GB", "2160p"], 80_000_000_000),
+            (["1.10 TB"], 1_100_000_000_000),
+        ]
+
+        for (metadata, expected) in cases {
+            XCTAssertEqual(
+                TorBoxStreamSelection.expectedSizeBytes(in: metadata),
+                expected
+            )
+        }
+    }
+
     func testDetectsSampleSizedResponse() {
         XCTAssertTrue(
             TorBoxStreamSelection.shouldRepair(

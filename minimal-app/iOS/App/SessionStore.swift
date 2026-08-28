@@ -50,11 +50,24 @@ struct SessionStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(key as CFDictionary)
-        var insert = key
-        insert[kSecValueData as String] = data
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(insert as CFDictionary, nil)
+        let status = SecureStoreWritePolicy.updateOrAdd(
+            successStatus: errSecSuccess,
+            itemNotFoundStatus: errSecItemNotFound,
+            duplicateItemStatus: errSecDuplicateItem,
+            update: {
+                SecItemUpdate(
+                    key as CFDictionary,
+                    [kSecValueData as String: data] as CFDictionary
+                )
+            },
+            add: {
+                var insert = key
+                insert[kSecValueData as String] = data
+                insert[kSecAttrAccessible as String] =
+                    kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                return SecItemAdd(insert as CFDictionary, nil)
+            }
+        )
         guard status == errSecSuccess else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }

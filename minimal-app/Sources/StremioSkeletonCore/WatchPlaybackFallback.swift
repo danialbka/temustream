@@ -37,3 +37,26 @@ public enum WatchPlaybackFallbackPolicy {
         return nextIndex < sourceCount ? nextIndex : nil
     }
 }
+
+/// Removes URL fields that commonly carry short-lived credentials before a
+/// watch playback reference is written to progress storage. Resolved playback
+/// URLs never pass through this policy because they are session-only values.
+public enum WatchPlaybackPersistencePolicy {
+    public static func sanitizedReferenceURL(_ url: URL?) -> URL? {
+        guard let url,
+              var components = URLComponents(
+                url: url,
+                resolvingAgainstBaseURL: false
+              ),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              components.host?.isEmpty == false
+        else { return nil }
+
+        components.user = nil
+        components.password = nil
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+}

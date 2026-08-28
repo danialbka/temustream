@@ -25,6 +25,7 @@ typecheck() {
   cd "$ROOT_DIR"
   set -- $(rg --files Sources/StremioSkeletonCore tvOS/App | LC_ALL=C sort)
   set -- "$@" \
+    iOS/App/AddonURLStore.swift \
     iOS/App/AppModel.swift \
     iOS/App/SessionStore.swift \
     iOS/App/TorBoxPlaybackResolver.swift

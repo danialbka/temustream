@@ -106,10 +106,12 @@ private struct MoreView: View {
             }
             .accessibilityIdentifier("more-account-link")
 
+            #if WATCH_TOGETHER_ENABLED || SKELETON_SCREENSHOT_HARNESS
             NavigationLink(value: MoreDestination.friends) {
                 Label("Friends", systemImage: "person.2")
             }
             .accessibilityIdentifier("more-friends-link")
+            #endif
 
             NavigationLink(value: MoreDestination.settings) {
                 Label("Settings", systemImage: "gearshape")
@@ -1130,6 +1132,7 @@ struct DetailsView: View {
     @State private var rankedStreams: [PresentedStream] = []
     @State private var relatedTitles: [MetaItem] = []
     @State private var selectedProviderID = Self.allProvidersID
+    @AppStorage("stream-ranking-mode") private var streamRankingMode = StreamRankingMode.current
     @State private var selectedSeason: Int?
     @State private var visibleStreamLimit = Self.streamBatchSize
     @State private var streamLoadRevision = 0
@@ -1520,6 +1523,8 @@ struct DetailsView: View {
                         message: "Install a compatible direct or torrent add-on."
                     )
                 } else {
+                    StreamRankingPicker(selection: $streamRankingMode)
+
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             providerButton(
@@ -1670,6 +1675,10 @@ struct DetailsView: View {
             }
             .task(id: item.id) {
                 await loadWikipediaTrivia()
+            }
+            .onChange(of: streamRankingMode) { _ in
+                visibleStreamLimit = Self.streamBatchSize
+                Task { await refreshPrimaryMovieCandidates() }
             }
         }
         .fullScreenCover(item: $activeTrailer) { destination in
@@ -2231,9 +2240,13 @@ struct DetailsView: View {
                 hasScheduledInitialMovieCandidates = true
                 let target = item
                 Task { @MainActor in
+                    let rankingMode = streamRankingMode
                     let proposed = await Task.detached(priority: .userInitiated) {
                         primaryMoviePlaybackCandidates(
-                            from: rankedPresentedStreams(from: partial),
+                            from: rankedPresentedStreams(
+                                from: partial,
+                                mode: rankingMode
+                            ),
                             item: target
                         )
                     }.value
@@ -2246,8 +2259,9 @@ struct DetailsView: View {
             }
         }
         guard revision == streamLoadRevision, !Task.isCancelled else { return }
+        let rankingMode = streamRankingMode
         let preparedStreams = await Task.detached(priority: .userInitiated) {
-            rankedPresentedStreams(from: loaded)
+            rankedPresentedStreams(from: loaded, mode: rankingMode)
         }.value
         guard revision == streamLoadRevision, !Task.isCancelled else { return }
         streamProviders = loaded
@@ -2282,13 +2296,20 @@ struct DetailsView: View {
     }
 
     private var visibleStreams: [PresentedStream] {
-        guard selectedProviderID != Self.allProvidersID else { return rankedStreams }
-        return rankedStreams.filter { $0.providerID == selectedProviderID }
+        let ordered = StreamPresentationPolicy.ranked(
+            rankedStreams,
+            mode: streamRankingMode
+        )
+        guard selectedProviderID != Self.allProvidersID else { return ordered }
+        return ordered.filter { $0.providerID == selectedProviderID }
     }
 
     @MainActor
     private func refreshPrimaryMovieCandidates() async {
-        let streams = rankedStreams
+        let streams = StreamPresentationPolicy.ranked(
+            rankedStreams,
+            mode: streamRankingMode
+        )
         let target = item
         let proposed = await Task.detached(priority: .userInitiated) {
             let startedAt = ProcessInfo.processInfo.systemUptime
@@ -2754,6 +2775,7 @@ struct EpisodeStreamsView: View {
     let episode: Video
     @State private var streamProviders: [StreamProviderGroup] = []
     @State private var selectedProviderID = Self.allProvidersID
+    @AppStorage("stream-ranking-mode") private var streamRankingMode = StreamRankingMode.current
     @State private var visibleStreamLimit = Self.streamBatchSize
     @State private var isLoading = true
 
@@ -2861,6 +2883,8 @@ struct EpisodeStreamsView: View {
                         message: "No installed add-on returned a stream for this episode."
                     )
                 } else {
+                    StreamRankingPicker(selection: $streamRankingMode)
+
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             providerButton(
@@ -2954,6 +2978,9 @@ struct EpisodeStreamsView: View {
         .accessibilityIdentifier("episode-streams-route")
         .navigationTitle("\(episodeLocation) Streams")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: streamRankingMode) { _ in
+            visibleStreamLimit = Self.streamBatchSize
+        }
         .task(id: episode.id) {
             isLoading = true
             streamProviders = []
@@ -3050,7 +3077,7 @@ struct EpisodeStreamsView: View {
         let providers = selectedProviderID == Self.allProvidersID
             ? streamProviders
             : streamProviders.filter { $0.id == selectedProviderID }
-        return rankedPresentedStreams(from: providers)
+        return rankedPresentedStreams(from: providers, mode: streamRankingMode)
     }
 
     private var selectedProviderName: String {
@@ -3146,6 +3173,26 @@ private struct TrailerDestination: Identifiable {
     var id: String { url.absoluteString }
 }
 
+private struct StreamRankingPicker: View {
+    @Binding var selection: StreamRankingMode
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label("Order", systemImage: "arrow.up.arrow.down")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Picker("Stream order", selection: $selection) {
+                ForEach(StreamRankingMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("stream-ranking-picker")
+    }
+}
+
 private struct TrailerBrowser: UIViewControllerRepresentable {
     let url: URL
 
@@ -3165,117 +3212,24 @@ private struct TrailerBrowser: UIViewControllerRepresentable {
     ) {}
 }
 
-struct PresentedStream: Identifiable, Sendable {
-    let id: String
-    let providerID: String
-    let providerName: String
-    let stream: Stream
-    let playbackPriority: Int
-    let fileSizeBadge: String?
-    let qualityBadge: String?
-
-    private static let sizeExpression = try! NSRegularExpression(
-        pattern: #"(?<![A-Z0-9])(\d+(?:\.\d+)?)\s*(TB|GB|MB)(?![A-Z0-9])"#,
-        options: [.caseInsensitive]
-    )
-    private static let qualityExpression = try! NSRegularExpression(
-        pattern: #"(?:4320P|8K|2160P|4K|1080P|720P|480P)"#,
-        options: [.caseInsensitive]
-    )
-
-    /// Put cached, phone-decodable releases ahead of extreme AI upscales and
-    /// huge remuxes. Every provider result remains available; this only keeps
-    /// an unsafe 8K entry from looking like the default choice on an iPhone.
-    init(id: String, providerID: String, providerName: String, stream: Stream) {
-        self.id = id
-        self.providerID = providerID
-        self.providerName = providerName
-        self.stream = stream
-
-        let metadata = [stream.title, stream.name, stream.description]
-            .compactMap { $0 }
-            .joined(separator: " ")
-        let uppercased = metadata.uppercased()
-        let sizeMatch = Self.firstMatch(Self.sizeExpression, in: metadata)
-        let sizeInGB = Self.sizeInGB(from: sizeMatch)
-
-        fileSizeBadge = sizeMatch?
-            .uppercased()
-            .replacingOccurrences(of: " ", with: " ")
-
-        if let quality = Self.firstMatch(Self.qualityExpression, in: metadata) {
-            qualityBadge = switch quality.uppercased() {
-            case "4320P", "8K": "8K"
-            case "2160P", "4K": "4K"
-            default: quality.uppercased()
-            }
-        } else {
-            qualityBadge = nil
-        }
-
-        var score = metadata.contains("⚡") ? -1_000 : 0
-        if uppercased.contains("4320P") || uppercased.contains("8K") {
-            score += 1_000
-        } else if uppercased.contains("1080P") {
-            score -= 120
-        } else if uppercased.contains("2160P") || uppercased.contains("4K") {
-            score -= 100
-        } else if uppercased.contains("720P") {
-            score -= 70
-        }
-        if uppercased.contains("REMUX") { score += 12 }
-        if let sizeInGB, sizeInGB > 50 {
-            score += 60
-        } else if let sizeInGB, sizeInGB > 25 {
-            score += 25
-        }
-        playbackPriority = score
-    }
-
-    private static func sizeInGB(from value: String?) -> Double? {
-        guard let value else { return nil }
-        let scanner = Scanner(string: value)
-        guard let amount = scanner.scanDouble() else { return nil }
-        let unit = value.uppercased()
-        if unit.contains("TB") { return amount * 1_024 }
-        if unit.contains("MB") { return amount / 1_024 }
-        return amount
-    }
-
-    private static func firstMatch(
-        _ expression: NSRegularExpression,
-        in text: String
-    ) -> String? {
-        let searchRange = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = expression.firstMatch(
-            in: text,
-            options: [],
-            range: searchRange
-        ), let range = Range(match.range, in: text) else { return nil }
-        return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
 func rankedPresentedStreams(
-    from providers: [StreamProviderGroup]
+    from providers: [StreamProviderGroup],
+    mode: StreamRankingMode = .current
 ) -> [PresentedStream] {
     let startedAt = ProcessInfo.processInfo.systemUptime
-    let ranked = providers.flatMap { provider in
-        provider.streams.enumerated().map { index, stream in
-            PresentedStream(
-                id: "\(provider.id)#\(index)#\(stream.id)",
-                providerID: provider.id,
-                providerName: provider.name,
-                stream: stream
-            )
-        }
-    }
-    .sorted {
-        if $0.playbackPriority != $1.playbackPriority {
-            return $0.playbackPriority < $1.playbackPriority
-        }
-        return $0.id < $1.id
-    }
+    let ranked = StreamPresentationPolicy.ranked(
+        providers.flatMap { provider in
+            provider.streams.enumerated().map { index, stream in
+                PresentedStream(
+                    id: "\(provider.id)#\(index)#\(stream.id)",
+                    providerID: provider.id,
+                    providerName: provider.name,
+                    stream: stream
+                )
+            }
+        },
+        mode: mode
+    )
     #if SKELETON_SCREENSHOT_HARNESS
     NSLog(
         "DETAIL_STREAM_RANK_BENCHMARK elapsed_ms=%.1f providers=%ld streams=%ld main=%d",
@@ -3420,7 +3374,7 @@ struct AddonsView: View {
                 ForEach(model.installedAddons, id: \.self) { url in
                     VStack(alignment: .leading) {
                         Text(url.host ?? "Add-on").font(.headline)
-                        Text(url.absoluteString).font(.caption).foregroundStyle(.secondary)
+                        Text(redactedAddonURL(url)).font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 .onDelete { offsets in
@@ -3452,6 +3406,13 @@ struct AddonsView: View {
             }
         }
         .navigationTitle("Add-ons")
+    }
+
+    private func redactedAddonURL(_ url: URL) -> String {
+        let scheme = url.scheme.map { "\($0)://" } ?? ""
+        let host = url.host ?? "Add-on"
+        let port = url.port.map { ":\($0)" } ?? ""
+        return "\(scheme)\(host)\(port)/…/manifest.json"
     }
 }
 
@@ -3590,6 +3551,7 @@ struct SettingsView: View {
                 Text("System follows your iPhone. Your colour and mode are saved for future launches.")
             }
 
+            #if WATCH_TOGETHER_ENABLED || SKELETON_SCREENSHOT_HARNESS
             Section {
                 Toggle(isOn: $watchTogetherEnabled) {
                     Label {
@@ -3611,6 +3573,7 @@ struct SettingsView: View {
             } footer: {
                 Text("Off by default. When disabled, room sync does not connect and the room and microphone controls are hidden from every player.")
             }
+            #endif
 
             Section {
                 ForEach(StremioInternalPlayer.allCases) { player in
@@ -3643,7 +3606,7 @@ struct SettingsView: View {
             } header: {
                 Text("Player")
             } footer: {
-                Text("Bunny keeps playback inside its Apple and custom FFmpeg engines. Other choices may use a compatibility player only after their own path is exhausted.")
+                Text("Bunny uses our Rust container core with Apple system decoders. A configured streaming server can provide an HLS fallback for codecs Apple does not decode.")
             }
 
             Section("Preferred player") {
@@ -3899,7 +3862,7 @@ struct SubtitleStyleSettingsView: View {
             } header: {
                 Text("Readability")
             } footer: {
-                Text("These settings are used by Bunny, KSPlayer, VLC, and AVPlayer.")
+                Text("These settings are used by Bunny and Apple’s native playback path.")
             }
 
             Section {
@@ -4016,10 +3979,10 @@ struct E2EStatusView: View {
                 resultRow("Details", result.detail)
                 resultRow("Streams", "\(result.streamCount) direct + torrent")
                 resultRow("Providers", result.providerGrouping ? "grouped by add-on" : "failed")
-                resultRow("KSPlayer MP4", String(format: "%.1f ms", result.ksDirectStartupMilliseconds))
-                resultRow("KSPlayer HLS", String(format: "%.1f ms", result.ksHLSStartupMilliseconds))
-                resultRow("KSPlayer MKV/AV1", String(format: "%.1f ms", result.ksContainerStartupMilliseconds))
-                resultRow("KSPlayer torrent", String(format: "%.1f ms", result.ksTorrentStartupMilliseconds))
+                resultRow("Bunny MP4", String(format: "%.1f ms", result.bunnyDirectStartupMilliseconds))
+                resultRow("Bunny HLS", String(format: "%.1f ms", result.bunnyHLSStartupMilliseconds))
+                resultRow("Bunny MKV/H.264", String(format: "%.1f ms", result.bunnyContainerStartupMilliseconds))
+                resultRow("Bunny torrent", String(format: "%.1f ms", result.bunnyTorrentStartupMilliseconds))
                 resultRow("Library", result.libraryRoundTrip ? "add + persist + remove" : "failed")
                 resultRow("Account", result.accountSync ? "login + pull + push" : "failed")
                 resultRow(

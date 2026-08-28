@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>AVInitialRouteSharingPolicy</key>
+	<string>LongFormVideo</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
@@ -22,8 +24,6 @@
 	<string>21</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>TemuStremio connects to streaming servers on your local network when you configure one for playback.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>TemuStremio uses your microphone only when you enable voice chat in a Watch Together room.</string>
 	<key>StremioSourceIdentity</key>
 	<string>$(STREMIO_SOURCE_ID)</string>
 	<key>UIBackgroundModes</key>
@@ -38,9 +38,5 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>WatchTogetherConvexURL</key>
-	<string>$(WATCH_TOGETHER_CONVEX_URL)</string>
-	<key>WatchTogetherLiveKitURL</key>
-	<string>$(WATCH_TOGETHER_LIVEKIT_URL)</string>
 </dict>
 </plist>

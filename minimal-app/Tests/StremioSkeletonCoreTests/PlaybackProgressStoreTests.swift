@@ -24,7 +24,10 @@ final class PlaybackProgressStoreTests: XCTestCase {
         _ = try await store.record(latest)
 
         let reloaded = try await PlaybackProgressStore(fileURL: url).items()
-        XCTAssertEqual(reloaded, [latest])
+        XCTAssertEqual(reloaded.map(\.contentIdentifier), [latest.contentIdentifier])
+        XCTAssertEqual(reloaded.first?.position, latest.position)
+        XCTAssertNil(reloaded.first?.stream.url)
+        XCTAssertEqual(reloaded.first?.stream.name, latest.stream.name)
     }
 
     func testProgressIsKeptSeparatelyPerTitle() async throws {
@@ -49,7 +52,9 @@ final class PlaybackProgressStoreTests: XCTestCase {
         _ = try await store.record(saved)
         let items = try await store.record(progress(identifier: "movie:tt1", position: 2))
 
-        XCTAssertEqual(items, [saved])
+        XCTAssertEqual(items.first?.contentIdentifier, saved.contentIdentifier)
+        XCTAssertEqual(items.first?.position, saved.position)
+        XCTAssertNil(items.first?.stream.url)
     }
 
     func testOlderAsynchronousSampleCannotResurrectCompletedTitle() async throws {
@@ -159,6 +164,35 @@ final class PlaybackProgressStoreTests: XCTestCase {
 
         let reloaded = try await PlaybackProgressStore(fileURL: storeURL).items()
         XCTAssertEqual(reloaded.first?.mediaMetadata, metadata)
+    }
+
+    func testPersistenceOmitsSignedPlaybackURLs() async throws {
+        let storeURL = temporaryStoreURL()
+        let sensitiveStream = Stream(
+            url: URL(string: "https://media.example.test/movie.mkv?token=fixture-private-value"),
+            externalUrl: nil,
+            name: "Direct",
+            title: "1080p",
+            description: nil,
+            infoHash: nil,
+            fileIdx: nil,
+            sources: nil
+        )
+        let progress = PlaybackProgress(
+            contentIdentifier: "movie:safe",
+            contentTitle: "Movie",
+            stream: sensitiveStream,
+            position: 60,
+            duration: 3_600
+        )
+
+        let recorded = try await PlaybackProgressStore(fileURL: storeURL).record(progress)
+
+        let persisted = try String(contentsOf: storeURL, encoding: .utf8)
+        XCTAssertFalse(persisted.contains("fixture-private-value"))
+        XCTAssertNil(recorded.first?.stream.url)
+        let reloaded = try await PlaybackProgressStore(fileURL: storeURL).items()
+        XCTAssertNil(reloaded.first?.stream.url)
     }
 
     private func progress(

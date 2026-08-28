@@ -2,8 +2,8 @@
 import SwiftUI
 
 /// The UI-state binary does not exercise playback. Keeping a tiny Bunny
-/// surface here lets that lightweight harness avoid linking the full FFmpeg
-/// decoder while the production simulator build continues to compile it.
+/// surface here lets that lightweight harness avoid linking the Rust media
+/// core while the production simulator build continues to compile it.
 struct BunnyPlayerScreen: View {
     init(
         plan: PlaybackPlan,

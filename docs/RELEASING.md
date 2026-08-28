@@ -1,204 +1,235 @@
-# Releasing TemuStremio
+# Releasing Bunny for iOS
 
-This guide separates a public source release, a local sideloading IPA, an ad
-hoc export for registered devices, and an App Store or TestFlight upload. They
-are not interchangeable.
+This release pass covers the Bunny iOS target only. A public source release, a
+local sideloading IPA, a registered-device export, and an App Store upload are
+different outputs. Test and record each one separately.
 
-## Release blockers to settle first
+The tvOS and watchOS sources remain in the repository, but they are not release
+gates for this iOS build.
 
-The checked-in bundle identifiers begin with `local.` and are development
-placeholders. Replace them in `minimal-app/project.yml` with unique identifiers
-owned by the release team, then regenerate the Xcode project. Do not add a
-developer team, certificate, provisioning profile, authentication key, or
-exported signing file to Git.
+## Resolve these blockers first
 
-The name **TemuStremio** contains third-party product names. Apple's review
-rules prohibit using another developer's product name or protected material in
-an app name without approval. Obtain the necessary permission or choose a name
-you can document the rights to before an App Store submission. The unofficial
-notice in the README helps users understand the project, but it is not a grant
-of trademark rights.
+The source bundle identifier local.bunny.player is for development. Replace it
+in minimal-app/project.yml with an identifier owned by the release team before
+TestFlight or App Store submission. Keep developer teams, certificates,
+provisioning profiles, authentication keys, and export settings outside Git.
 
-Binary distribution also needs a license review. KSPlayer and the selected
-FFmpegKit package are GPL-3.0, while MobileVLCKit and its bundled components
-have their own terms. Work through [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)
-for the exact build before publishing an IPA.
+The installed name Bunny avoids the Temu and Stremio names. It still needs a
+normal trademark clearance search. The repository name and banner continue to
+use TemuStremio, so public repository branding needs its own review.
 
-The current tree no longer contains the personal device label that appeared in
-older benchmark and OTA-script revisions, and the history audit found no
-credential or Apple device identifier. The old label is still reachable in Git
-history. Before making this existing repository public, either approve a
-carefully reviewed history rewrite with a backup, or publish a new repository
-from a clean `git archive`. Do not rewrite or force-push history as an ordinary
-release-script step.
+The app currently defaults to Stremio-operated services:
+
+- StremioAccountClient uses https://api.strem.io
+- the default Cinemeta catalog uses a manifest on strem.io
+
+Before public binary distribution, obtain written authorization for those
+endpoints or replace them with project-controlled or separately authorized
+services. Open-source code does not grant access to a hosted service.
+
+The current iOS target has no Swift package dependencies. Its original Rust
+media crate has no third-party Cargo packages, but the static library uses the
+Rust standard library. Bundle the exact Rust notice from the pinned toolchain
+and inspect the finished app against
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+
+The custom player removes KSPlayer, FFmpegKit, FFmpeg, and MobileVLCKit from the
+iOS binary. It does not settle the project's MIT license, Rust notices, codec
+patents, media rights, service terms, or trademarks.
+
+An old personal device label remains reachable in repository history. Before
+publishing this existing history, either approve a reviewed history rewrite
+with a backup or create a clean repository from git archive. Do not rewrite or
+force-push history as a routine release step.
+
+This guide is an engineering checklist, not legal advice.
 
 ## 1. Freeze and inspect the source
 
 From the repository root:
 
-```sh
+~~~sh
 git status --short
 ./scripts/public-release-check.sh --history
 ./minimal-app/scripts/test.sh
-SKELETON_PUBLIC_RELEASE=1 ./minimal-app/scripts/verify.sh
-```
+./minimal-app/scripts/benchmark-rust-media-core.sh
+SKELETON_PUBLIC_RELEASE=1 \
+  ./minimal-app/scripts/dev-workflow.sh build-bunny-simulator
+~~~
 
-Review every tracked, staged, unstaged, and untracked file. The release gate
-hides matched credential values, but it cannot tell whether ordinary text is
-private. Read documentation, fixtures, screenshots, and benchmark notes for
-names, device labels, account details, private URLs, and copyrighted test media.
+Read every changed and untracked source file before tagging. The scanner hides
+matched credential values, but it cannot decide whether ordinary prose,
+screenshots, fixtures, or benchmark notes are private.
 
-Keep source tests tracked. Ignore only generated results, coverage, logs,
-screenshots, archives, provisioning material, and machine-local configuration.
+Keep source tests in Git. Ignore generated results, coverage, logs,
+screenshots, archives, provisioning files, and machine-local configuration.
 
 Before tagging:
 
-- update the marketing version and monotonically increasing build number for
-  each target in `minimal-app/project.yml`
-- regenerate with `xcodegen generate --spec project.yml`
-- confirm the generated project matches the spec
-- validate the iOS, tvOS, and standalone watchOS schemes separately
-- check that Watch Together endpoints are empty unless the production backend
-  has completed its security, privacy, retention, and abuse-readiness work
-- review `Package.resolved`, `package-lock.json`, licenses, and notices
-- archive the exact commit, not a dirty working tree
+- update Bunny's version and build number in minimal-app/project.yml
+- regenerate the project with xcodegen generate --spec project.yml
+- run the Swift and Rust tests
+- build and launch the Bunny simulator target
+- inspect the exact device IPA and bundled notices
+- confirm no package resolution file or third-party framework entered the app
+- verify provider results above 40 GB remain available through the stream list
+- archive a committed source state, not an unexplained dirty tree
 
 ## 2. Make a public source release
 
-Use a signed or annotated tag and let GitHub create source archives from tracked
-files. If building a source archive locally, use `git archive` so ignored local
-files cannot slip into it:
+Use an annotated or signed tag. Let GitHub create its source archives, or build
+one locally with git archive so ignored files cannot enter it:
 
-```sh
+~~~sh
 version='vX.Y.Z'
-git archive --format=tar.gz --prefix="TemuStremio-${version}/" \
-  -o "TemuStremio-${version}.tar.gz" "$version"
-shasum -a 256 "TemuStremio-${version}.tar.gz" \
-  > "TemuStremio-${version}.tar.gz.sha256"
-```
+git archive --format=tar.gz --prefix="Bunny-$version/" \
+  -o "Bunny-$version.tar.gz" "$version"
+shasum -a 256 "Bunny-$version.tar.gz" \
+  > "Bunny-$version.tar.gz.sha256"
+~~~
 
-Attach the checksum and release notes. Do not attach a local `.env`, signing
-configuration, Xcode archive, app container, Sideloadly snapshot, private log,
-or credentials. Enable GitHub private vulnerability reporting, secret
-scanning, dependency alerts, and branch protection before announcing the repo.
+Attach the checksum and release notes. Do not attach .env files, signing
+configuration, Xcode archives, app containers, Sideloadly snapshots, private
+logs, or credentials. Enable private vulnerability reporting, secret scanning,
+dependency alerts, and branch protection before announcing the repository.
 
-## 3. Build a local sideloading handoff IPA
+## 3. Build a local Bunny IPA
 
-`minimal-app/scripts/build-device.sh` compiles an arm64 device app without Apple
-signing, applies an ad hoc code signature, and packages the expected `Payload/`
+The materialized build copies and hashes the current source, builds the arm64
+Bunny target, applies an ad hoc signature, and creates the expected Payload/
 layout:
 
-```sh
+~~~sh
 cd minimal-app
+SKELETON_PUBLIC_RELEASE=1 ./scripts/dev-workflow.sh build-bunny-device
+~~~
+
+The default output is:
+
+~~~text
+/private/tmp/stremio-dev-workflow/workspace/build/Bunny-device.ipa
+/private/tmp/stremio-dev-workflow/workspace/build/Bunny-device.ipa.source.json
+/private/tmp/stremio-dev-workflow/latest.json
+~~~
+
+A direct source-tree build is also available:
+
+~~~sh
+SKELETON_IOS_VARIANT=bunny \
 SKELETON_PUBLIC_RELEASE=1 \
-  STREMIO_SOURCE_ID="$(git rev-parse HEAD)" \
+STREMIO_SOURCE_ID="$(git rev-parse HEAD)" \
   ./scripts/build-device.sh
-unzip -tq build/StremioSkeleton-device.ipa
-shasum -a 256 build/StremioSkeleton-device.ipa
-```
+~~~
 
-Public-release mode performs a clean app-target build and forces both optional
-Watch Together endpoint values to empty, even if this Mac has an ignored local
-configuration file. Omit that mode only for a deliberate internal build whose
-backend has completed the security and privacy review below.
+Audit the handoff before signing:
 
-For an iCloud or File Provider checkout, run the same build from a verified
-local scratch workspace:
+~~~sh
+ipa='/private/tmp/stremio-dev-workflow/workspace/build/Bunny-device.ipa'
+work_dir="$(mktemp -d)"
+unzip -q "$ipa" -d "$work_dir"
+plutil -p "$work_dir/Payload/Bunny.app/Info.plist"
+otool -L "$work_dir/Payload/Bunny.app/Bunny"
+find "$work_dir/Payload/Bunny.app" -maxdepth 2 -type f -print
+codesign -d --entitlements :- "$work_dir/Payload/Bunny.app"
+shasum -a 256 "$ipa"
+~~~
 
-```sh
-SKELETON_PUBLIC_RELEASE=1 ./scripts/dev-workflow.sh build-device
-```
+Check that the app is named Bunny, the source bundle identifier is
+local.bunny.player, the version and build match project.yml, and the root
+license plus Rust notice are present. The app must contain no KSPlayer, FFmpeg,
+MobileVLC, Convex, LiveKit, WebRTC, or SwiftProtobuf binaries.
 
-With the default scratch location, the resulting IPA and provenance JSON are
-under `/private/tmp/stremio-dev-workflow/workspace/build/`. The workflow hashes
-every overlaid source file and records its materialized source identity in
-`/private/tmp/stremio-dev-workflow/latest.json`.
+The resulting IPA is a sideloading handoff. It is not an App Store archive and
+will not install until a signing tool provisions it for the destination
+device. Keep the signed result private because provisioning data can identify
+the team and device.
 
-The resulting IPA is a local handoff for a sideloading tool. It is not an App
-Store build, not an ad hoc distribution export, and not installable until it is
-signed with an appropriate identity and provisioning profile. Keep the signed
-result private. Registered-device profiles expose team and device information.
+## 4. Install as a separate local app
 
-## 4. Export for registered devices
+Sign Bunny with a profile for its distinct bundle identifier. Do not rewrite
+it to the existing TemuStremio bundle identifier. After installation, verify:
 
-Apple's ad hoc flow requires an explicit App ID, an Apple Distribution
-certificate, registered devices, and an ad hoc provisioning profile. Automatic
-signing can manage the profile, or it can be created in the developer account.
+- both apps remain installed
+- the new Home Screen label is Bunny
+- Bunny's installed bundle identifier and build number match the signed result
+- Bunny launches without a trust or provisioning error
+- a legal direct file and HLS fixture play on the phone
+- a provider list can reveal its remaining results through "Show more streams"
 
-1. Generate and open the project:
+An installed build is not playback proof. Record physical-device playback
+separately from the simulator and from the IPA audit.
 
-   ```sh
-   cd minimal-app
-   xcodegen generate --spec project.yml
-   open StremioSkeleton.xcodeproj
-   ```
+## 5. Export for registered devices
 
-2. Set the release team's unique bundle identifiers and team in Xcode. Keep
-   machine-local export settings in `config/ExportOptions.local.plist`, which is
-   ignored.
-3. Select a generic device destination, choose **Product > Archive**, and wait
-   for Organizer.
-4. Choose **Distribute App**, then **Ad Hoc** or **Development** as appropriate.
-5. Install only on registered devices and verify the installed version, build,
-   signing identity, launch, and legal test playback.
+Apple's registered-device flow needs an explicit App ID, an Apple Distribution
+certificate, registered devices, and a matching profile.
 
-Apple's current registered-device documentation is
-[Distributing your app to registered devices](https://developer.apple.com/documentation/xcode/distributing-your-app-to-registered-devices),
-and its profile steps are in
+1. Run xcodegen generate --spec project.yml and open
+   StremioSkeleton.xcodeproj.
+2. Assign the release team's Bunny bundle identifier and development team.
+3. Keep machine-local export settings in the ignored
+   config/ExportOptions.local.plist.
+4. Select a generic iOS device and choose **Product > Archive**.
+5. In Organizer, choose **Distribute App**, then the appropriate Development
+   or Ad Hoc path.
+6. Install the export and record its signing identity, version, build, launch,
+   and legal playback results.
+
+Apple documents this flow in
+[Distributing your app to registered devices](https://developer.apple.com/documentation/xcode/distributing-your-app-to-registered-devices)
+and
 [Create an ad hoc provisioning profile](https://developer.apple.com/help/account/provisioning-profiles/create-an-ad-hoc-provisioning-profile).
 
-## 5. Upload to TestFlight or the App Store
+## 6. Upload to TestFlight or the App Store
 
-Create the app record in App Store Connect before uploading. Archive a Release
-build, then use Organizer's **Distribute App** flow to upload it. TestFlight and
-App Store distribution normally use the uploaded archive; they do not require
-posting an IPA on GitHub.
+Create the App Store Connect record before uploading. Archive a Release build
+and use Organizer's **Distribute App** flow. TestFlight and App Store releases
+normally use that archive instead of an IPA posted on GitHub.
 
-Apple changes its accepted Xcode and SDK versions. Check
-[Upload builds](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/)
-immediately before the release rather than relying on a version copied into
-this guide. Apple's broader flow is documented in
+Check Apple's current accepted Xcode and SDK versions immediately before the
+release:
+[Upload builds](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/).
+Apple's broader workflow is in
 [Distributing your app for beta testing and releases](https://developer.apple.com/documentation/xcode/distributing-your-app-for-beta-testing-and-releases/).
 
-For every platform build:
+For the exact archive:
 
-- confirm the app record, bundle ID, version, build, signing, entitlements, and
-  icon belong to the intended target
-- generate Xcode's privacy report and compare it with `PRIVACY.md`, the bundled
-  `PrivacyInfo.xcprivacy`, and App Store Connect answers
-- supply a working review account or an approved demo mode for account-only
+- confirm the App Store record, bundle ID, version, build, team, signing,
+  entitlements, and icon
+- generate Xcode's privacy report and compare it with PRIVACY.md, the bundled
+  PrivacyInfo.xcprivacy, and App Store Connect answers
+- supply a working review account or approved demo mode for account-only
   features
-- explain add-ons, streaming-server behavior, and optional Watch Together in
-  review notes
-- provide documentation showing the right to use third-party names, services,
-  streaming content, and metadata when requested
-- test the exact archive through TestFlight before submitting it for review
+- explain add-ons and streaming-server behavior in review notes
+- provide proof of rights for names, services, metadata, and streaming content
+  if Apple asks
+- test the processed build through TestFlight before App Review
 
-Apple requires required-reason API declarations in the privacy manifest. The
-current app declares its app-local UserDefaults use and elapsed-time measurement
-with system uptime. Recheck this after dependency or code changes against
-[Apple's required-reason API documentation](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api).
+Recheck Apple's
+[required-reason API documentation](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api)
+after dependency or code changes. The
+[App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
+are the final Apple reference for metadata, service access, streaming rights,
+privacy, and trademark review.
 
-Apple's [App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
-are the final reference for metadata, third-party services, streaming rights,
-privacy, and copycat or trademark review.
+## 7. Record the exact evidence
 
-## 6. Verify the exact release artifact
+Keep separate records for:
 
-A release is not complete when compilation succeeds. Record separate evidence
-for:
+- the source commit, dirty-tree review, and public-release scanner
+- Rust and Swift test totals
+- benchmark fixture checksum and methodology
+- Bunny simulator install, launch, and deterministic playback
+- device IPA checksum, architecture, bundle metadata, signature, and notices
+- physical iPhone or iPad install and cold launch
+- direct file, HLS, provider, subtitle, audio-track, seek, pause, resume,
+  fallback, rotation, and Picture in Picture behavior
+- TestFlight processing, App Review, and publication status
 
-- source tests and the clean-tree security scan
-- simulator launch and deterministic E2E checks
-- Apple TV launch, remote focus, playback, and stream failover
-- standalone Apple Watch install, on-watch navigation, and direct HTTPS/HLS
-  playback without an iPhone app
-- physical iPhone or iPad install, cold launch, account persistence, direct
-  file playback, HLS, provider streams, subtitles, audio tracks, seeking,
-  rotation, Picture in Picture, and fallback behavior
-- the uploaded build's processing, TestFlight availability, App Review state,
-  and final publication state
+For Matroska playback, record the container, video and audio codecs, subtitle
+type, visible frames, audio, seek result, track switching, stalls, and drops.
+Apple decoder support varies by device and OS. A Rust benchmark does not prove
+codec parity or physical-device playback.
 
-Keep a SHA-256 checksum and the Git commit identity with each local artifact.
-Never publish an artifact merely because an earlier build with the same version
-passed.
+Never publish an artifact only because an earlier build with the same version
+passed. Record the SHA-256 checksum and source identity for every new artifact.

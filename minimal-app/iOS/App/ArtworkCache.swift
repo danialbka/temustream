@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import SwiftUI
 import UIKit
 
@@ -27,18 +28,32 @@ actor ArtworkDataCache {
 
         let byteLimit = maximumBytesPerImage
         let request = Task<Data?, Never> {
+            guard let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  url.user == nil,
+                  url.password == nil
+            else { return nil }
             var urlRequest = URLRequest(
                 url: url,
                 cachePolicy: .returnCacheDataElseLoad,
                 timeoutInterval: 15
             )
             urlRequest.setValue("image/*", forHTTPHeaderField: "Accept")
-            guard let (data, response) = try? await URLSession.shared.data(for: urlRequest),
+            let configuration = URLSessionConfiguration.default
+            guard let (data, response) = try? await BoundedHTTPDataLoader.load(
+                request: urlRequest,
+                maximumBytes: byteLimit,
+                configuration: configuration
+            ),
                   !Task.isCancelled,
                   let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode),
+                  http.value(forHTTPHeaderField: "Content-Type")?
+                    .lowercased()
+                    .hasPrefix("image/") == true,
                   !data.isEmpty,
-                  data.count <= byteLimit
+                  data.count <= byteLimit,
+                  Self.hasSafeDecodedDimensions(data)
             else { return nil }
             return data
         }
@@ -78,6 +93,22 @@ actor ArtworkDataCache {
     private func touch(_ url: URL) {
         recency.removeAll { $0 == url }
         recency.append(url)
+    }
+
+    private nonisolated static func hasSafeDecodedDimensions(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber
+        else { return false }
+        let widthValue = width.int64Value
+        let heightValue = height.int64Value
+        guard (1...16_384).contains(widthValue),
+              (1...16_384).contains(heightValue),
+              widthValue <= Int64.max / heightValue
+        else { return false }
+        return widthValue * heightValue <= 100_000_000
     }
 }
 

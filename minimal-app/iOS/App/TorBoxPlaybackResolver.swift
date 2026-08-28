@@ -20,19 +20,6 @@ enum TorBoxPlaybackError: LocalizedError {
     }
 }
 
-private final class TorBoxRedirectBlocker: NSObject, URLSessionTaskDelegate,
-    @unchecked Sendable {
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        completionHandler(nil)
-    }
-}
-
 /// Resolves TorBox permalinks immediately before playback. TorBox's API docs
 /// recommend keeping requestdl permalinks and following them to a short-lived
 /// CDN URL instead of saving the CDN URL. A 4 KiB range request follows that
@@ -75,13 +62,8 @@ enum TorBoxPlaybackResolver {
         var redirectHops = 0
         var readinessPollCount = 0
         var consecutiveNetworkFailures = 0
-        let queryKeys = URLComponents(url: input, resolvingAgainstBaseURL: false)?
-            .queryItems?.map(\.name).sorted().joined(separator: ",") ?? ""
         NSLog(
-            "TORBOX_STREAM_SOURCE host=%@ file=%@ query_keys=%@ expected_bytes=%lld",
-            input.host ?? "unknown",
-            input.lastPathComponent,
-            queryKeys,
+            "TORBOX_STREAM_SOURCE expected_bytes=%lld",
             expectedSizeBytes ?? 0
         )
 
@@ -89,10 +71,6 @@ enum TorBoxPlaybackResolver {
         configuration.timeoutIntervalForRequest = 8
         configuration.timeoutIntervalForResource = 10
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-
-        let redirectBlocker = TorBoxRedirectBlocker()
         for _ in 0..<160 {
             var request = URLRequest(url: url)
             request.setValue("bytes=0-4095", forHTTPHeaderField: "Range")
@@ -100,23 +78,36 @@ enum TorBoxPlaybackResolver {
             let signature: Data
             let response: URLResponse
             do {
-                (signature, response) = try await session.data(
-                    for: request,
-                    delegate: redirectBlocker
+                (signature, response) = try await BoundedHTTPDataLoader.load(
+                    request: request,
+                    maximumBytes: 4_096,
+                    configuration: configuration,
+                    redirectPolicy: .reject
                 )
                 consecutiveNetworkFailures = 0
+            } catch BoundedHTTPDataLoaderError.responseTooLarge {
+                // A provider ignored the probe Range. Preserve the resolved
+                // URL so native or configured compatibility playback can try
+                // it, but never materialize the movie in the resolver.
+                return TorBoxResolvedSource(
+                    url: url,
+                    detectedMIMEType: nil,
+                    contentLength: expectedSizeBytes,
+                    supportsByteRanges: false
+                )
             } catch {
                 guard isRetryableNetworkError(error), consecutiveNetworkFailures < 2 else {
                     throw error
                 }
                 consecutiveNetworkFailures += 1
                 let delay = 0.35 * Double(consecutiveNetworkFailures)
+                let networkError = error as NSError
                 NSLog(
-                    "TORBOX_STREAM_RETRY attempt=%ld delay_s=%.2f host=%@ error=%@",
+                    "TORBOX_STREAM_RETRY attempt=%ld delay_s=%.2f error_domain=%@ error_code=%ld",
                     consecutiveNetworkFailures,
                     delay,
-                    url.host ?? "unknown",
-                    (error as NSError).localizedDescription
+                    networkError.domain,
+                    networkError.code
                 )
                 try await Task.sleep(for: .seconds(delay))
                 continue
@@ -163,14 +154,10 @@ enum TorBoxPlaybackResolver {
                        repairPermalink,
                        expectedSizeBytes: expectedSizeBytes
                    ) {
-                    let oldID = queryValue("file_id", in: repairPermalink) ?? "unknown"
-                    let newID = queryValue("file_id", in: repaired) ?? "unknown"
                     NSLog(
-                        "TORBOX_STREAM_REPAIR reason=size-mismatch expected_bytes=%lld actual_bytes=%lld old_file_id=%@ new_file_id=%@",
+                        "TORBOX_STREAM_REPAIR reason=size-mismatch expected_bytes=%lld actual_bytes=%lld",
                         expectedSizeBytes,
-                        resolvedSizeBytes,
-                        oldID,
-                        newID
+                        resolvedSizeBytes
                     )
                     repairedFileSelection = true
                     url = repaired
@@ -209,8 +196,10 @@ enum TorBoxPlaybackResolver {
                     serverMIMEType: contentType
                 ),
                 contentLength: responseSize(http),
-                supportsByteRanges: http.statusCode == 206
-                    && http.value(forHTTPHeaderField: "Content-Range") != nil
+                supportsByteRanges: probeRangeIsExact(
+                    http,
+                    receivedBytes: signature.count
+                )
             )
         }
         throw TorBoxPlaybackError.invalidRedirect
@@ -245,6 +234,28 @@ enum TorBoxPlaybackResolver {
         return response.expectedContentLength
     }
 
+    private static func probeRangeIsExact(
+        _ response: HTTPURLResponse,
+        receivedBytes: Int
+    ) -> Bool {
+        guard response.statusCode == 206,
+              receivedBytes > 0,
+              receivedBytes <= 4_096,
+              let header = response.value(forHTTPHeaderField: "Content-Range")?
+                .lowercased(),
+              header.hasPrefix("bytes ")
+        else { return false }
+        let components = header.dropFirst("bytes ".count)
+            .split(separator: "/", maxSplits: 1)
+        guard let range = components.first else { return false }
+        let bounds = range.split(separator: "-", maxSplits: 1)
+        guard bounds.count == 2,
+              let lower = Int64(bounds[0]),
+              let upper = Int64(bounds[1])
+        else { return false }
+        return lower == 0 && upper == Int64(receivedBytes - 1)
+    }
+
     private static func repairedPermalink(
         _ permalink: URL,
         expectedSizeBytes: Int64
@@ -267,9 +278,11 @@ enum TorBoxPlaybackResolver {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 5
         configuration.timeoutIntervalForResource = 7
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await BoundedHTTPDataLoader.load(
+            request: request,
+            maximumBytes: 4 * 1_024 * 1_024,
+            configuration: configuration
+        )
         guard let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode),
               let envelope = try? JSONDecoder().decode(TorBoxTorrentListEnvelope.self, from: data),

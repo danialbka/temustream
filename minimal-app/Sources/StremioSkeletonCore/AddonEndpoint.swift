@@ -26,6 +26,9 @@ public struct AddonEndpoint: Equatable, Sendable {
     public init(manifestURL: URL) throws {
         guard let scheme = manifestURL.scheme?.lowercased(),
               scheme == "https" || (scheme == "http" && manifestURL.isLoopback),
+              manifestURL.user == nil,
+              manifestURL.password == nil,
+              manifestURL.fragment == nil,
               manifestURL.lastPathComponent == "manifest.json"
         else {
             throw AddonEndpointError.invalidManifestURL

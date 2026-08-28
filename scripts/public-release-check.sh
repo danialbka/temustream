@@ -49,7 +49,6 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 inventory="$scan_tmp/inventory"
-tracked="$scan_tmp/tracked"
 history_paths="$scan_tmp/history-paths"
 history_matches="$scan_tmp/history-matches"
 history_personal_matches="$scan_tmp/history-personal-matches"
@@ -57,8 +56,13 @@ history_paths_raw="$scan_tmp/history-paths-raw"
 history_matches_raw="$scan_tmp/history-matches-raw"
 history_personal_matches_raw="$scan_tmp/history-personal-matches-raw"
 
-git -C "$repo_root" ls-files --cached -- . >"$tracked"
 git -C "$repo_root" ls-files --cached --others --exclude-standard -- . \
+  | while IFS= read -r path; do
+      # A tracked file can be deleted in the working tree before the release
+      # commit exists. Scan the tree that would actually be reviewed instead
+      # of reporting already-removed files as current artifacts.
+      [ -e "$repo_root/$path" ] && printf '%s\n' "$path"
+    done \
   | LC_ALL=C sort -u >"$inventory"
 
 errors=0
@@ -141,6 +145,41 @@ for required_path in \
     error MISSING "$required_path"
   fi
 done
+
+printf '\nCurrent iOS dependency and notice inputs\n'
+project_spec="$repo_root/minimal-app/project.yml"
+rust_toolchain="$repo_root/minimal-app/rust-toolchain.toml"
+rust_notice="$repo_root/minimal-app/ThirdParty/Rust/1.95.0/COPYRIGHT-library.html"
+rust_notice_sha256='90567e2718bf7fd65a71a3a43c5596488e80e5f51ed02bfea6fec54458b5f3d1'
+
+if [ ! -s "$project_spec" ]; then
+  error MISSING "minimal-app/project.yml"
+else
+  if grep -Eq '^[[:space:]]*packages:' "$project_spec"; then
+    error IOS_PACKAGE_GRAPH "project.yml declares Swift packages; update the release inventory"
+  fi
+  if grep -Eqi 'KSPlayer|FFmpegKit|MobileVLCKit|ConvexMobile|LiveKit|SwiftProtobuf|WebRTC' "$project_spec"; then
+    error REMOVED_IOS_DEPENDENCY "project.yml references a removed iOS dependency"
+  fi
+  for bundled_resource in \
+    '../LICENSE' \
+    '../THIRD_PARTY_NOTICES.md' \
+    'ThirdParty/Rust/1.95.0/COPYRIGHT-library.html'; do
+    if ! grep -Fq "$bundled_resource" "$project_spec"; then
+      error MISSING_BUNDLED_NOTICE "$bundled_resource"
+    fi
+  done
+fi
+
+if [ ! -s "$rust_toolchain" ] \
+    || ! grep -Eq 'channel[[:space:]]*=[[:space:]]*"1\.95\.0"' "$rust_toolchain"; then
+  error RUST_TOOLCHAIN "minimal-app/rust-toolchain.toml is missing the 1.95.0 pin"
+fi
+if [ ! -s "$rust_notice" ]; then
+  error MISSING_RUST_NOTICE "minimal-app/ThirdParty/Rust/1.95.0/COPYRIGHT-library.html"
+elif [ "$(shasum -a 256 "$rust_notice" | awk '{print $1}')" != "$rust_notice_sha256" ]; then
+  error RUST_NOTICE_MISMATCH "the bundled Rust 1.95.0 library notice has changed"
+fi
 
 printf '\nSensitive paths and release artifacts\n'
 while IFS= read -r path; do

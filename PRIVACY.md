@@ -37,6 +37,11 @@ state, or join Watch Together rooms. Resolved media and conversion URLs stay in
 memory; watch playback history stores the title, provider, catalog origin, and
 time position instead.
 
+TemuStremio's watch code does not log the components of resolved media URLs.
+Apple's AVPlayer and CoreMedia diagnostics can still include a full asset URL in
+device or simulator system logs. Streaming services should issue short-lived
+URLs, and users should avoid sharing media playback logs.
+
 Third-party services have their own retention, logging, and privacy practices.
 Review an add-on or server before installing it. Do not enter a private manifest
 URL into a build, screenshot, issue, or log that will be shared publicly.

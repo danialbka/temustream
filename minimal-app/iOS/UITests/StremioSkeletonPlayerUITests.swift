@@ -3,6 +3,8 @@ import XCTest
 @MainActor
 final class StremioSkeletonPlayerUITests: XCTestCase {
     private let fixtureBaseURL = "http://127.0.0.1:18766"
+    private let interruptedRangeFixtureBaseURL = "http://127.0.0.1:18767"
+    private let stressFixtureDuration: CGFloat = 60
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -119,9 +121,176 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
 
         let skipIntro = app.buttons["player-skip-intro"]
         XCTAssertTrue(skipIntro.waitForExistence(timeout: 20))
+        let actionable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "enabled == true AND hittable == true"),
+            object: skipIntro
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [actionable], timeout: 4),
+            .completed,
+            "Skip Intro should become actionable before accepting a tap"
+        )
         skipIntro.tap()
         XCTAssertTrue(skipIntro.waitForNonExistence(timeout: 4))
         attachScreenshot(named: "mobile-skip-intro-completed")
+    }
+
+    func testInterruptedRangeSeekRecoversBeforeThePlayerTimeout() throws {
+        let app = launchApp(
+            environment: [
+                "SKELETON_PLAYER_FIXTURE_URL":
+                    "\(interruptedRangeFixtureBaseURL)/stress-subtitles.mkv",
+                "SKELETON_PLAYER_FIXTURE_MANUAL_START": "1",
+                "SKELETON_PLAYER_CONTROLS_LOCKED": "1",
+                "SKELETON_PLAYER_DEBUG_OVERLAY": "1",
+            ]
+        )
+        startFixturePlayback(in: app)
+
+        XCTAssertTrue(
+            waitForDebugState("Playing", in: app, timeout: 20),
+            "The custom player should render before the interrupted-read seek"
+        )
+        let timeline = app.descendants(matching: .any)["player-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+        let timelineValueBeforeSeek = String(describing: timeline.value)
+        let forward = app.buttons["Forward 15 seconds"]
+        XCTAssertTrue(forward.waitForExistence(timeout: 5))
+
+        // The test server leaves the decoder's next range request open. A seek
+        // must cancel that obsolete request and immediately read the target.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        forward.tap()
+
+        let deadline = Date().addingTimeInterval(7)
+        var recovered = false
+        var sawTimeoutToast = false
+        while Date() < deadline {
+            sawTimeoutToast = sawTimeoutToast
+                || app.descendants(matching: .any)["bunny-player-toast"].exists
+            XCTAssertFalse(app.otherElements["player-error"].exists)
+            let timelineAdvanced = String(describing: timeline.value)
+                != timelineValueBeforeSeek
+            if timelineAdvanced,
+               waitForDebugState("Playing", in: app, timeout: 0.15) {
+                recovered = true
+                break
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+        }
+
+        XCTAssertTrue(recovered, "Playback should resume after superseding the stalled read")
+        XCTAssertFalse(sawTimeoutToast, "The seek must finish before the six-second UI deadline")
+        XCTAssertEqual(app.state, .runningForeground)
+        attachScreenshot(named: "mobile-interrupted-range-seek-recovered")
+    }
+
+    func testUserStylePlayerInteractionStressRemainsResponsive() throws {
+        let app = launchApp(
+            environment: [
+                "SKELETON_PLAYER_FIXTURE_URL": "\(fixtureBaseURL)/stress-subtitles.mkv",
+                "SKELETON_PLAYER_FIXTURE_MANUAL_START": "1",
+                "SKELETON_PLAYER_CONTROLS_LOCKED": "1",
+                "SKELETON_PLAYER_DEBUG_OVERLAY": "1",
+            ]
+        )
+        startFixturePlayback(in: app)
+        XCTAssertTrue(waitForDebugState("Playing", in: app, timeout: 20))
+
+        let timeline = app.descendants(matching: .any)["player-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+        for position in [0.72, 0.18, 0.88, 0.35] {
+            // XCTest can spend several seconds resolving each coordinate. A
+            // real finger follows the moving thumb continuously; pause first
+            // so the synthetic coordinate cannot drift away before contact.
+            app.buttons["Pause"].tap()
+            XCTAssertTrue(waitForDebugState("Paused", in: app, timeout: 3))
+            let startingPosition = normalizedSliderPosition(timeline) ?? 0.03
+            let dragStart = timeline.coordinate(
+                withNormalizedOffset: CGVector(dx: startingPosition, dy: 0.5)
+            )
+            let dragEnd = timeline.coordinate(
+                withNormalizedOffset: CGVector(dx: position, dy: 0.5)
+            )
+            dragStart.press(
+                forDuration: 0.15,
+                thenDragTo: dragEnd,
+                withVelocity: 200,
+                thenHoldForDuration: 0.12
+            )
+            XCTAssertTrue(
+                waitForSliderMovement(
+                    timeline,
+                    from: startingPosition,
+                    toward: position,
+                    timeout: 3
+                ),
+                "A real thumb drag should move the timeline in the intended direction; value=\(String(describing: timeline.value))"
+            )
+            XCTAssertTrue(waitForDebugState("Paused", in: app, timeout: 8))
+            XCTAssertFalse(app.otherElements["player-error"].exists)
+            app.buttons["Play"].tap()
+            XCTAssertTrue(waitForDebugState("Playing", in: app, timeout: 5))
+        }
+
+        for _ in 0..<4 {
+            app.buttons["Pause"].tap()
+            XCTAssertTrue(waitForDebugState("Paused", in: app, timeout: 3))
+            app.buttons["Play"].tap()
+            XCTAssertTrue(waitForDebugState("Playing", in: app, timeout: 5))
+        }
+
+        for _ in 0..<6 {
+            app.buttons["Forward 15 seconds"].tap()
+            app.buttons["Back 15 seconds"].tap()
+        }
+        let rapidSeekDeadline = Date().addingTimeInterval(10)
+        var sawSeekFailure = false
+        while Date() < rapidSeekDeadline {
+            sawSeekFailure = sawSeekFailure
+                || app.descendants(matching: .any)["bunny-player-toast"].exists
+            XCTAssertFalse(app.otherElements["player-error"].exists)
+            if waitForDebugState("Playing", in: app, timeout: 0.15),
+               !app.descendants(matching: .any)["player-seeking-indicator"].exists {
+                break
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+        }
+        XCTAssertFalse(
+            sawSeekFailure,
+            "Superseded rapid taps must not be reported as failed seeks"
+        )
+        XCTAssertTrue(waitForDebugState("Playing", in: app, timeout: 1))
+        XCTAssertFalse(
+            app.descendants(matching: .any)["player-seeking-indicator"].exists,
+            "The newest rapid seek should settle and own the final playback state"
+        )
+
+        app.buttons["player-content-mode"].tap()
+        app.buttons["player-content-mode"].tap()
+        app.buttons["Mute"].tap()
+        app.buttons["Unmute"].tap()
+
+        app.buttons["player-subtitles"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["bunny-subtitles-track-picker"]
+                .waitForExistence(timeout: 3)
+        )
+        app.buttons["Off"].tap()
+        app.buttons["player-audio-tracks"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["bunny-audio-track-picker"]
+                .waitForExistence(timeout: 3)
+        )
+        app.buttons["Close audio"].tap()
+
+        XCUIDevice.shared.press(.home)
+        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        app.activate()
+        XCTAssertTrue(waitForDebugState("Playing", in: app, timeout: 8))
+        XCTAssertFalse(app.otherElements["player-error"].exists)
+        XCTAssertEqual(app.state, .runningForeground)
+        attachScreenshot(named: "mobile-user-style-player-stress-pass")
     }
 
     @discardableResult
@@ -147,6 +316,55 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }
 
+    private func waitForDebugState(
+        _ state: String,
+        in app: XCUIApplication,
+        timeout: TimeInterval
+    ) -> Bool {
+        let overlay = app.descendants(matching: .any)["player-debug-overlay"]
+        guard overlay.waitForExistence(timeout: timeout) else { return false }
+        if overlay.label.localizedCaseInsensitiveContains(state) {
+            return true
+        }
+        let predicate = NSPredicate(format: "label CONTAINS[c] %@", state)
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: overlay)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func normalizedSliderPosition(_ slider: XCUIElement) -> CGFloat? {
+        if let number = slider.value as? NSNumber {
+            let value = CGFloat(truncating: number)
+            return value > 1 ? value / stressFixtureDuration : value
+        }
+        guard let rawValue = slider.value as? String else { return nil }
+        let usesPercent = rawValue.contains("%")
+        let numericText = rawValue.filter { $0.isNumber || $0 == "." || $0 == "," }
+            .replacingOccurrences(of: ",", with: ".")
+        guard let value = Double(numericText) else { return nil }
+        if usesPercent {
+            return CGFloat(value / 100)
+        }
+        return CGFloat(value > 1 ? value / Double(stressFixtureDuration) : value)
+    }
+
+    private func waitForSliderMovement(
+        _ slider: XCUIElement,
+        from start: CGFloat,
+        toward target: CGFloat,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        let direction: CGFloat = target >= start ? 1 : -1
+        while Date() < deadline {
+            if let actual = normalizedSliderPosition(slider),
+               (actual - start) * direction >= 0.12 {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+        }
+        return false
+    }
+
     private func startFixturePlayback(in app: XCUIApplication) {
         let startButton = app.buttons["start-player-fixture"]
         XCTAssertTrue(startButton.waitForExistence(timeout: 30))
@@ -156,6 +374,13 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 30), .completed)
         startButton.tap()
+        if !startButton.waitForNonExistence(timeout: 3), startButton.isHittable {
+            startButton.tap()
+        }
+        XCTAssertTrue(
+            startButton.waitForNonExistence(timeout: 5),
+            "The simulator fixture should leave its start gate after tapping"
+        )
     }
 
     private func attachScreenshot(named name: String) {

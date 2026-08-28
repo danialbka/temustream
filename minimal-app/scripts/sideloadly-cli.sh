@@ -125,6 +125,7 @@ ensure_tmp_dir() {
 }
 
 load_snapshot() {
+  local configured_source_bundle_id installed_suffix app_variant
   [[ -f "$snapshot_path" ]] || fail "Settings snapshot not found: $snapshot_path"
   snapshot_schema="$(json_value '.schemaVersion')"
   [[ "$snapshot_schema" == "1" ]] || fail "Unsupported snapshot schema: $snapshot_schema"
@@ -137,9 +138,28 @@ load_snapshot() {
   source_bundle_id="$(json_value '.app.sourceBundleID')"
   installed_bundle_id="$(json_value '.app.installedBundleID')"
   required_entitlement="$(json_value '.app.requiredEntitlement')"
+  default_ipa="$repo_root/$(json_value '.app.defaultIPA')"
   expected_anisette_value="$(json_value '.sideloadly.settings.anisetteDatabaseValue')"
   expected_sign_mode="$(json_value '.sideloadly.settings.signingModeDatabaseValue')"
   expected_refresh_hours="$(json_value '.sideloadly.settings.refreshAfterHours')"
+
+  app_variant="${SKELETON_IOS_VARIANT:-temustremio}"
+  case "$app_variant" in
+    temustremio)
+      ;;
+    bunny)
+      configured_source_bundle_id="$source_bundle_id"
+      [[ "$installed_bundle_id" == "$configured_source_bundle_id".* ]] || fail \
+        "Configured installed bundle ID does not extend $configured_source_bundle_id"
+      installed_suffix="${installed_bundle_id#$configured_source_bundle_id}"
+      source_bundle_id="local.bunny.player"
+      installed_bundle_id="$source_bundle_id$installed_suffix"
+      default_ipa="$repo_root/build/Bunny-device.ipa"
+      ;;
+    *)
+      fail "SKELETON_IOS_VARIANT must be temustremio or bunny"
+      ;;
+  esac
 }
 
 load_installation_record() {
@@ -373,11 +393,11 @@ capture_signing_profile_from_log() {
   [[ -f "$raw_install_log" ]] || return 0
 
   signed_app="$(sed -nE \
-    's#^((/private)?/var/folders/[^:]+/T/tmp_[^/]+/[^/]+/[^:]+\.app): Adding new Info\.plist key: ALTBundleIdentifier$#\1#p' \
+    's#^((/private)?/var/folders/[^:]+/T/tmp_?[^/]+/[^/]+/[^:]+\.app): Adding new Info\.plist key: ALTBundleIdentifier$#\1#p' \
     "$raw_install_log" | tail -n 1)"
   [[ -n "$signed_app" ]] || return 0
-  if [[ "$signed_app" != /var/folders/*/T/tmp_*/*.app \
-        && "$signed_app" != /private/var/folders/*/T/tmp_*/*.app ]]; then
+  if [[ "$signed_app" != /var/folders/*/T/tmp*/*.app \
+        && "$signed_app" != /private/var/folders/*/T/tmp*/*.app ]]; then
     return 0
   fi
   profile_source="$signed_app/embedded.mobileprovision"
@@ -544,7 +564,7 @@ case "$command_name" in
     run_doctor
     ;;
   stage)
-    ipa_path="$repo_root/$(json_value '.app.defaultIPA')"
+    ipa_path="$default_ipa"
     dry_run=0
     while (( $# > 0 )); do
       case "$1" in
@@ -575,7 +595,7 @@ case "$command_name" in
     stage_ipa_for_record 0
     ;;
   update)
-    ipa_path="$repo_root/$(json_value '.app.defaultIPA')"
+    ipa_path="$default_ipa"
     skip_build=0
     dry_run=0
     launch_after_install=1

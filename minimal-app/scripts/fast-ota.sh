@@ -105,6 +105,7 @@ ensure_work_dir() {
 }
 
 load_snapshot() {
+  local configured_source_bundle_id installed_suffix app_variant
   [[ -f "$snapshot_path" ]] || fail "Settings snapshot not found: $snapshot_path"
   [[ "$(json_value '.schemaVersion')" == "1" ]] || fail "Unsupported snapshot schema"
   device_name="$(json_value '.device.name')"
@@ -113,6 +114,24 @@ load_snapshot() {
   source_bundle_id="$(json_value '.app.sourceBundleID')"
   installed_bundle_id="$(json_value '.app.installedBundleID')"
   default_ipa="$repo_root/$(json_value '.app.defaultIPA')"
+
+  app_variant="${SKELETON_IOS_VARIANT:-temustremio}"
+  case "$app_variant" in
+    temustremio)
+      ;;
+    bunny)
+      configured_source_bundle_id="$source_bundle_id"
+      [[ "$installed_bundle_id" == "$configured_source_bundle_id".* ]] || fail \
+        "Configured installed bundle ID does not extend $configured_source_bundle_id"
+      installed_suffix="${installed_bundle_id#$configured_source_bundle_id}"
+      source_bundle_id="local.bunny.player"
+      installed_bundle_id="$source_bundle_id$installed_suffix"
+      default_ipa="$repo_root/build/Bunny-device.ipa"
+      ;;
+    *)
+      fail "SKELETON_IOS_VARIANT must be temustremio or bunny"
+      ;;
+  esac
 }
 
 read_keychain_search_list() {
@@ -357,7 +376,6 @@ create_signing_keychain() {
 
 inspect_source_artifacts() {
   local ipa_path="$1" info_entry info_count unpacked_app_count
-  local local_watch_config shipped_convex_url shipped_livekit_url
   local provenance_path provenance_source_id provenance_ipa_sha256
   [[ -f "$ipa_path" ]] || fail "IPA not found: $ipa_path"
   unzip -tq "$ipa_path" >/dev/null || fail "IPA archive validation failed"
@@ -378,30 +396,6 @@ inspect_source_artifacts() {
     "IPA is missing a verified source identity; rebuild it with dev-workflow.sh"
   if [[ -n "$expected_source_id" && "$ipa_source_id" != "$expected_source_id" ]]; then
     fail "IPA source ${ipa_source_id[1,12]} does not match current source ${expected_source_id[1,12]}; refusing a stale install"
-  fi
-
-  # WatchTogether.local.xcconfig is intentionally ignored because it is a
-  # machine-local endpoint snapshot. Clean build copies must carry that file.
-  # Refuse an OTA when this checkout is configured but the supplied IPA lost
-  # those values, rather than shipping a Create profile button that can only
-  # return early as unconfigured.
-  local_watch_config="$repo_root/config/WatchTogether.local.xcconfig"
-  if [[ -f "$local_watch_config" ]] \
-      && grep -Eq '^[[:space:]]*WATCH_TOGETHER_CONVEX_URL[[:space:]]*=[[:space:]]*https:' \
-        "$local_watch_config"; then
-    shipped_convex_url="$(plutil -extract WatchTogetherConvexURL raw -o - \
-      "$work_dir/ipa-Info.plist" 2>/dev/null || true)"
-    [[ "$shipped_convex_url" == https://* ]] || fail \
-      "This checkout configures Watch Together, but the IPA is missing its Convex endpoint"
-
-    if grep -Eq '^[[:space:]]*WATCH_TOGETHER_LIVEKIT_URL[[:space:]]*=[[:space:]]*wss:' \
-        "$local_watch_config"; then
-      shipped_livekit_url="$(plutil -extract WatchTogetherLiveKitURL raw -o - \
-        "$work_dir/ipa-Info.plist" 2>/dev/null || true)"
-      [[ "$shipped_livekit_url" == wss://* ]] || fail \
-        "This checkout configures LiveKit, but the IPA is missing its LiveKit endpoint"
-    fi
-    note "artifact: Watch Together endpoints are present"
   fi
 
   # The requested IPA is the release artifact and must also be the exact source
@@ -727,9 +721,13 @@ case "$command_name" in
     if (( skip_build == 0 )); then
       note "build: materializing current source outside File Provider and reusing local caches"
       dev_metadata="$work_dir/dev-build.json"
+      dev_build_command="build-device"
+      if [[ "${SKELETON_IOS_VARIANT:-temustremio}" == "bunny" ]]; then
+        dev_build_command="build-bunny-device"
+      fi
       STREMIO_DEV_METADATA_OUT="$dev_metadata" \
         SKELETON_SKIP_DEVICE_ZIP=1 \
-        "$repo_root/scripts/dev-workflow.sh" build-device
+        "$repo_root/scripts/dev-workflow.sh" "$dev_build_command"
       ipa_path="$(jq -er '.artifact' "$dev_metadata")"
       expected_source_id="$(jq -er '.sourceID' "$dev_metadata")"
     elif [[ -z "$expected_source_id" ]]; then

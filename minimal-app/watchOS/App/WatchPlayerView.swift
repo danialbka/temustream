@@ -524,73 +524,67 @@ struct WatchPlayerView: View {
     }
 
     var body: some View {
-        ZStack {
-            playerControls
+        Group {
             if isVideoExpanded {
                 expandedVideo
-                    .zIndex(1)
+            } else {
+                playerControls
             }
         }
-            .sheet(isPresented: $showsTracks) {
-                WatchPlayerMediaSelectionView(controller: controller)
-                    .environmentObject(model)
+        .sheet(isPresented: $showsTracks) {
+            WatchPlayerMediaSelectionView(controller: controller)
+                .environmentObject(model)
+        }
+        .onAppear {
+            controller.prepare()
+        }
+        .onChange(of: controller.position) { _, newPosition in
+            if !timelineFocused { crownPosition = newPosition }
+            let bucket = Int(newPosition / 15)
+            guard bucket > 0, bucket != lastCheckpointBucket else { return }
+            lastCheckpointBucket = bucket
+            let duration = controller.duration
+            Task {
+                await model.recordPlayback(
+                    request,
+                    position: newPosition,
+                    duration: duration
+                )
             }
-            .onAppear {
-                controller.prepare()
-            }
-            .onChange(of: controller.position) { _, newPosition in
-                if !timelineFocused { crownPosition = newPosition }
-                let bucket = Int(newPosition / 15)
-                guard bucket > 0, bucket != lastCheckpointBucket else { return }
-                lastCheckpointBucket = bucket
-                let duration = controller.duration
-                Task {
-                    await model.recordPlayback(
-                        request,
-                        position: newPosition,
-                        duration: duration
-                    )
-                }
-            }
-            .onChange(of: crownPosition) { _, newPosition in
-                if timelineFocused { controller.seek(to: newPosition) }
-            }
-            .onChange(of: controller.playbackRate) { _, rate in
-                model.preferredPlaybackRate = rate
-            }
-            .onChange(of: controller.status) { _, status in
-                guard status == .ready, !didReportReady else { return }
-                didReportReady = true
-                model.recordSuccessfulPlayback(request)
-            }
-            .onChange(of: controller.playbackEndedCount) { _, _ in onPlaybackEnded() }
-            .onDisappear {
-                let position = controller.position
-                let duration = controller.duration
-                controller.stop()
-                Task { await model.recordPlayback(request, position: position, duration: duration) }
-            }
+        }
+        .onChange(of: crownPosition) { _, newPosition in
+            if timelineFocused { controller.seek(to: newPosition) }
+        }
+        .onChange(of: controller.playbackRate) { _, rate in
+            model.preferredPlaybackRate = rate
+        }
+        .onChange(of: controller.status) { _, status in
+            guard status == .ready, !didReportReady else { return }
+            didReportReady = true
+            model.recordSuccessfulPlayback(request)
+        }
+        .onChange(of: controller.playbackEndedCount) { _, _ in onPlaybackEnded() }
+        .onDisappear {
+            let position = controller.position
+            let duration = controller.duration
+            controller.stop()
+            Task { await model.recordPlayback(request, position: position, duration: duration) }
+        }
     }
 
     private var playerControls: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 8) {
-                    if isVideoExpanded {
-                        Color.black
-                            .aspectRatio(16 / 9, contentMode: .fit)
-                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    } else {
-                        VideoPlayer(player: controller.player)
-                            .allowsHitTesting(false)
-                            .aspectRatio(16 / 9, contentMode: .fit)
-                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                            .accessibilityLabel("Video")
-                            .accessibilityHint("Triple-tap to expand the video")
-                            .overlay {
-                                tripleTapTarget(expanded: true)
-                            }
-                    }
+                    VideoPlayer(player: controller.player)
+                        .allowsHitTesting(false)
+                        .aspectRatio(16 / 9, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .accessibilityLabel("Video")
+                        .accessibilityHint("Triple-tap to expand the video")
+                        .overlay {
+                            tripleTapTarget(expanded: true)
+                        }
 
                     VStack(spacing: 2) {
                         Text(request.title).font(.headline).lineLimit(1)

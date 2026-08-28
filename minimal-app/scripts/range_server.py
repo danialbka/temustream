@@ -7,11 +7,15 @@ import os
 import json
 import re
 import sys
+import threading
 import time
 
 
 class RangeRequestHandler(SimpleHTTPRequestHandler):
     range_to_send = None
+    request_ordinal = 0
+    _request_counter = 0
+    _request_counter_lock = threading.Lock()
 
     def send_json(self, value, status=200):
         payload = json.dumps(value).encode("utf-8")
@@ -120,6 +124,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         return super().translate_path(path)
 
     def send_head(self):
+        with type(self)._request_counter_lock:
+            type(self)._request_counter += 1
+            self.request_ordinal = type(self)._request_counter
         path = self.translate_path(self.path)
         if os.path.isdir(path):
             return super().send_head()
@@ -168,6 +175,17 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         throttle = int(os.environ.get("SKELETON_RANGE_THROTTLE_BPS", "0"))
         stall_every = int(os.environ.get("SKELETON_RANGE_STALL_EVERY_BYTES", "0"))
         stall_seconds = float(os.environ.get("SKELETON_RANGE_STALL_SECONDS", "0"))
+        selected_stall_requests = {
+            int(value)
+            for value in os.environ.get(
+                "SKELETON_RANGE_STALL_REQUEST_ORDINALS", ""
+            ).split(",")
+            if value.strip().isdigit()
+        }
+        should_stall = (
+            not selected_stall_requests
+            or self.request_ordinal in selected_stall_requests
+        )
         next_stall = stall_every
         while remaining > 0:
             chunk = source.read(min(64 * 1024, remaining))
@@ -176,7 +194,12 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
             outputfile.write(chunk)
             sent += len(chunk)
             remaining -= len(chunk)
-            if stall_every > 0 and stall_seconds > 0 and sent >= next_stall:
+            if (
+                should_stall
+                and stall_every > 0
+                and stall_seconds > 0
+                and sent >= next_stall
+            ):
                 time.sleep(stall_seconds)
                 next_stall += stall_every
             if throttle > 0:

@@ -15,7 +15,9 @@ StremioSkeletonApp
      -> direct URL, TorrentStreamingClient, or TorBoxPlaybackResolver
      -> optional StreamTransportBridge / compatibility URL
   -> PlayerScreen
-     -> Bunny, Performance, KSPlayer, or VLC
+     -> Bunny
+        -> AVFoundation for Apple-native sources
+        -> BunnyNativeDecoder + Rust Matroska/WebM core for direct containers
 ```
 
 The Apple TV target keeps the protocol and app-state layers but replaces the
@@ -42,8 +44,8 @@ TemuStremioWatchApp
 ```
 
 `ResolvingPlayerScreen` owns source failover, resume state, and next-episode
-autoplay. `PlayerScreen` owns player selection/fallback and shared overlays. The
-individual engines own decoding and engine-specific controls.
+autoplay. `PlayerScreen` owns the Bunny handoff and shared overlays. Bunny
+selects either Apple's native asset path or the Rust direct-container path.
 
 ## Ownership by area
 
@@ -61,10 +63,11 @@ individual engines own decoding and engine-specific controls.
 | Catalog paging | `Sources/StremioSkeletonCore/CatalogPaging.swift` | Deduplication, skip progression, and terminal-page policy |
 | Local/account data | `Sources/StremioSkeletonCore/LibraryStore.swift`, `Sources/StremioSkeletonCore/PlaybackProgressStore.swift`, `Sources/StremioSkeletonCore/PlaybackCompletionStore.swift`, `Sources/StremioSkeletonCore/StremioAccountClient.swift`, `iOS/App/SessionStore.swift` | Persistence, resume/completion state, Stremio account sync, and session storage |
 | Episode policy | `Sources/StremioSkeletonCore/EpisodeResumeSelection.swift` | Default/persisted season, series/season resume, and next-episode timing |
-| Shared player flow | `iOS/App/PlayerView.swift` | Player setting, resolving/failover, autoplay card, resume handoff, KS/VLC/Performance/AVFoundation surfaces, shared chrome |
+| Shared player flow | `iOS/App/PlayerView.swift` | Resolving/failover, autoplay card, resume handoff, Bunny presentation, and shared chrome |
 | Bunny player | `iOS/App/BunnyPlayerView.swift` | Bunny playback model, renderer, controls, tracks, timeline, subtitles, and diagnostics |
-| Bunny decoder | `iOS/App/BunnyFFmpegDecoder.h`, `iOS/App/BunnyFFmpegDecoder.m` | FFmpeg demux/decode, VideoToolbox path, audio/video queues, seeking, and track selection |
-| Playback policy core | `rust/StremioPlaybackCore/src/lib.rs`, `iOS/App/PlaybackPerformanceCore.swift` | Rust FFI policy/clock/transport timing and Swift bridge |
+| Bunny direct decoder | `iOS/App/BunnyNativeDecoder.swift` | Bounded file/HTTP range reads, Rust ABI bridge, Core Media descriptions, sample-buffer rendering, seeking, and track selection |
+| Rust media core | `rust/StremioPlaybackCore/src/media/`, `rust/StremioPlaybackCore/include/StremioPlaybackCore.h` | Matroska/WebM EBML, tracks, cues, lacing, compressed packets, text subtitles, bounded PGS, and C ABI |
+| Playback policy core | `rust/StremioPlaybackCore/src/lib.rs`, `iOS/App/PlaybackPerformanceCore.swift` | Player routing, clock, MPEG-TS timing, and Swift bridge |
 | Audio session | `iOS/App/PlaybackAudioSession.swift` | Playback/voice audio-session transitions and microphone permission |
 | Provider transport | `iOS/App/TorBoxPlaybackResolver.swift`, `iOS/App/StreamTransportBridge.swift`, `Sources/StremioSkeletonCore/TorrentStreamingClient.swift` | Short-lived provider URL resolution, mislabeled TS normalization, range serving/cache, and streaming-server API |
 | Diagnostics | `iOS/App/PlayerDiagnostics.swift` | Simulator stress/probe screens and structured playback reports |
@@ -84,7 +87,8 @@ individual engines own decoding and engine-specific controls.
 - `scripts/e2e-simulator.sh` runs the production app against a local range
   server and synthetic media. `scripts/ui-state-screenshots.sh` captures named,
   deterministic UI states described in `UI_STATE_MATRIX.md`.
-- `scripts/benchmark-player-smoothness.sh` is a synthetic decoder matrix.
+- `scripts/benchmark-rust-media-core.sh` measures same-fixture open, demux, and
+  seek work. `scripts/benchmark-player-smoothness.sh` is a playback gate.
   `scripts/benchmark-obsession-20.sh` is a provider-stream gate and is not
   interchangeable with fixtures or physical-device playback.
 - Playback expectations and evidence boundaries live in
@@ -99,8 +103,8 @@ individual engines own decoding and engine-specific controls.
 | `StremioSkeleton.xcodeproj/` | XcodeGen output; regenerate, do not hand-edit |
 | `scripts/build-support.sh` | Shared Xcode/Rust build lock helpers |
 | `scripts/build-cache-retention.sh` | Marker ownership, active leases, shared-cache retention, and report-only legacy inventory |
-| `scripts/fetch-vlc.sh` | Integrity-pinned MobileVLCKit materialization |
 | `scripts/build-rust-core.sh` | Rust device/simulator libraries and XCFramework packaging |
+| `scripts/benchmark-rust-media-core.sh` | Reproducible Matroska open/demux/seek benchmark and JSON report |
 | `scripts/build-simulator.sh` | Release Simulator app and ZIP |
 | `scripts/build-tvos.sh` | tvOS Swift SDK type-check plus Release Apple TV Simulator app and ZIP when the tvOS runtime is installed |
 | `scripts/build-watchos.sh` | watchOS Swift SDK type-check plus Release Apple Watch Simulator app and ZIP when the watchOS runtime is installed |
@@ -157,8 +161,8 @@ rg -n 'resume|recordPlaybackProgress|PlaybackCompletion|EpisodeAutoplay' iOS/App
 # Trace stream preparation and failover.
 rg -n 'playbackPlan|TorBoxPlaybackResolver|StreamTransportBridge|compatibility|failover' iOS/App Sources Tests
 
-# Trace an engine without loading all player code.
-rg -n 'Bunny|KSPlayer|VLC|PerformancePlayer' iOS/App/PlayerView.swift iOS/App/BunnyPlayerView.swift iOS/App/PlayerDiagnostics.swift
+# Trace the Bunny native and Rust paths without loading all player code.
+rg -n 'Bunny|customRust|bunnyRust' iOS/App/PlayerView.swift iOS/App/BunnyPlayerView.swift iOS/App/BunnyNativeDecoder.swift rust/StremioPlaybackCore/src
 
 # Find harness switches and their consumers.
 rg -n 'SKELETON_[A-Z0-9_]+' iOS/App scripts

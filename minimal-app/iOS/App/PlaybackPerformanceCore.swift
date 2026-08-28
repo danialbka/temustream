@@ -3,9 +3,7 @@ import Foundation
 enum PerformanceDecoder: UInt32, Sendable {
     case automatic = 0
     case avFoundation = 1
-    case ffmpegVideoToolbox = 2
-    case vlcVideoToolboxBridge = 3
-    case bunnyFFmpeg = 4
+    case bunnyRust = 2
 }
 
 struct PlaybackPerformancePolicy: Sendable {
@@ -62,10 +60,7 @@ enum PlaybackPerformanceCore {
         player: StremioInternalPlayer
     ) -> PlaybackPerformancePolicy {
         let playerKind: UInt32 = switch player {
-        case .performance: 0
         case .bunny: 4
-        case .ksPlayer: 1
-        case .vlcKit: 2
         }
         let raw = url.absoluteString.withCString { urlPointer in
             title.withCString { titlePointer in

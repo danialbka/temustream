@@ -168,7 +168,8 @@ public actor PlaybackProgressStore {
             [PlaybackProgress].self,
             from: Data(contentsOf: fileURL)
         )
-        let current = decoded.reduce(into: [String: PlaybackProgress]()) { result, progress in
+        let sanitized = decoded.map(\.persistenceSafe)
+        let current = sanitized.reduce(into: [String: PlaybackProgress]()) { result, progress in
             if result[progress.contentIdentifier]?.updatedAt ?? .distantPast < progress.updatedAt {
                 result[progress.contentIdentifier] = progress
             }
@@ -179,6 +180,9 @@ public actor PlaybackProgressStore {
         latestUpdates = Dictionary(
             uniqueKeysWithValues: current.map { ($0.contentIdentifier, $0.updatedAt) }
         )
+        if decoded != sanitized {
+            try persist(current)
+        }
         return current
     }
 
@@ -201,7 +205,7 @@ public actor PlaybackProgressStore {
             position: progress.position,
             duration: progress.duration
         ) {
-            current.append(progress)
+            current.append(progress.persistenceSafe)
         }
         current.sort { $0.updatedAt > $1.updatedAt }
         try persist(current)
@@ -228,7 +232,58 @@ public actor PlaybackProgressStore {
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try encoder.encode(items).write(to: fileURL, options: .atomic)
-        cache = items
+        try encoder.encode(items.map(\.persistenceSafe)).write(to: fileURL, options: .atomic)
+        cache = items.map(\.persistenceSafe)
+    }
+}
+
+private extension PlaybackProgress {
+    var persistenceSafe: PlaybackProgress {
+        PlaybackProgress(
+            contentIdentifier: contentIdentifier,
+            contentTitle: contentTitle,
+            stream: Stream(
+                url: nil,
+                externalUrl: nil,
+                name: stream.name,
+                title: stream.title,
+                description: nil,
+                infoHash: stream.infoHash,
+                fileIdx: stream.fileIdx,
+                sources: nil,
+                skipSegments: stream.skipSegments,
+                behaviorHints: stream.behaviorHints
+            ),
+            providerName: providerName,
+            position: position,
+            duration: duration,
+            updatedAt: updatedAt,
+            mediaMetadata: mediaMetadata.map { metadata in
+                PlaybackMediaMetadata(
+                    mediaID: metadata.mediaID,
+                    mediaType: metadata.mediaType,
+                    mediaTitle: metadata.mediaTitle,
+                    posterURL: metadata.posterURL?.removingPrivateURLComponents,
+                    episodeID: metadata.episodeID,
+                    episodeTitle: metadata.episodeTitle,
+                    season: metadata.season,
+                    episode: metadata.episode,
+                    episodeThumbnailURL: metadata.episodeThumbnailURL?.removingPrivateURLComponents
+                )
+            }
+        )
+    }
+}
+
+private extension URL {
+    var removingPrivateURLComponents: URL {
+        guard var components = URLComponents(url: self, resolvingAgainstBaseURL: false) else {
+            return self
+        }
+        components.user = nil
+        components.password = nil
+        components.query = nil
+        components.fragment = nil
+        return components.url ?? self
     }
 }

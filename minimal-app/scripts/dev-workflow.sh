@@ -101,9 +101,11 @@ Usage:
   ./scripts/dev-workflow.sh typecheck-watchos
   ./scripts/dev-workflow.sh typecheck-tvos
   ./scripts/dev-workflow.sh build-simulator
+  ./scripts/dev-workflow.sh build-bunny-simulator
   ./scripts/dev-workflow.sh build-watchos
   ./scripts/dev-workflow.sh build-tvos
   ./scripts/dev-workflow.sh build-device
+  ./scripts/dev-workflow.sh build-bunny-device
   ./scripts/dev-workflow.sh screenshots [STATE ...]
   ./scripts/dev-workflow.sh cache-report
   ./scripts/dev-workflow.sh prune-cache
@@ -111,7 +113,7 @@ Usage:
 The workflow creates an exact local scratch workspace from the current remote
 commit, overlays current tracked/untracked source edits one file at a time,
 verifies source/destination sizes and SHA-256 hashes, and reuses persistent
-SwiftPM, Xcode, Rust, VLC, and screenshot caches outside File Provider.
+  SwiftPM, Xcode, Rust, and screenshot caches outside File Provider.
 
 Set STREMIO_DEV_ROOT to choose another local scratch root. Set
 STREMIO_BUILD_CACHE_ROOT to relocate the single shared bounded cache. Advanced
@@ -200,7 +202,7 @@ allowed_untracked_source() {
   local relative="$1"
   case "$relative" in
     'iOS/Resources/Info '[0-9]*'.plist') return 1 ;;
-    Sources/*.swift|Sources/**/*.swift|Tests/*.swift|Tests/**/*.swift|iOS/App/*|iOS/App/**/*|iOS/UITests/*|iOS/UITests/**/*|iOS/Resources/PrivacyInfo.xcprivacy|iOS/Resources/Assets.xcassets/*|iOS/Resources/Assets.xcassets/**/*|tvOS/*|tvOS/**/*|watchOS/*|watchOS/**/*|rust/*|rust/**/*|Fixtures/*|Fixtures/**/*|scripts/*.sh|Backend/watch-together/*|Backend/watch-together/**/*) return 0 ;;
+    Sources/*.swift|Sources/**/*.swift|Tests/*.swift|Tests/**/*.swift|iOS/App/*|iOS/App/**/*|iOS/UITests/*|iOS/UITests/**/*|iOS/Resources/PrivacyInfo.xcprivacy|iOS/Resources/Assets.xcassets/*|iOS/Resources/Assets.xcassets/**/*|tvOS/*|tvOS/**/*|watchOS/*|watchOS/**/*|rust-toolchain.toml|rust/*|rust/**/*|ThirdParty/*|ThirdParty/**/*|Fixtures/*|Fixtures/**/*|scripts/*.sh|Backend/watch-together/*|Backend/watch-together/**/*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -290,7 +292,7 @@ write_manifest() {
 
   (
     cd "$root"
-    for candidate in Package.swift project.yml Sources Tests iOS tvOS watchOS Vendor/KSPlayer rust Fixtures scripts config; do
+    for candidate in Package.swift project.yml rust-toolchain.toml Sources Tests iOS tvOS watchOS rust ThirdParty Fixtures scripts config ../LICENSE ../THIRD_PARTY_NOTICES.md; do
       if [[ -f "$candidate" ]]; then
         print -r -- "$candidate"
       elif [[ -d "$candidate" ]]; then
@@ -395,6 +397,19 @@ prepare_workspace() {
     --exclude '/.build/' \
     --exclude '/node_modules/' \
     "$stage_dir/" "$workspace/"
+  # The iOS targets bundle the repository-level license and third-party notice.
+  # Mirror those two inputs beside the materialized app directory and verify
+  # their bytes so the source identity covers the exact legal files shipped.
+  for public_resource in LICENSE THIRD_PARTY_NOTICES.md; do
+    source_resource="$git_root/$public_resource"
+    destination_resource="${workspace:h}/$public_resource"
+    [[ -s "$source_resource" ]] || fail "missing public resource: $public_resource"
+    /bin/cp -p "$source_resource" "$destination_resource.tmp.$$"
+    [[ "$(shasum -a 256 "$source_resource" | awk '{print $1}')" == \
+      "$(shasum -a 256 "$destination_resource.tmp.$$" | awk '{print $1}')" ]] \
+      || fail "public resource copy failed: $public_resource"
+    mv -f -- "$destination_resource.tmp.$$" "$destination_resource"
+  done
   manifest="$cleanup_stage/workspace-manifest.tsv"
   write_manifest "$workspace" "$manifest"
   file_count="$(wc -l < "$manifest" | tr -d ' ')"
@@ -468,7 +483,7 @@ run_in_workspace() {
     STREMIO_BUILD_CACHE_ROOT="$cache_root" \
     SKELETON_BUILD_LOCK="$build_lock" \
     SKELETON_RUST_BUILD_LOCK="$rust_lock" \
-    SKELETON_VLC_VALIDATION_CACHE=1 \
+    SKELETON_IOS_VARIANT="${SKELETON_IOS_VARIANT:-temustremio}" \
     STREMIO_SOURCE_ID="$current_source_id" \
     UI_SCREENSHOT_SOURCE_ID="$current_source_id" \
       "$command_path" "$@"
@@ -519,6 +534,14 @@ case "$command_name" in
     operation_seconds=$((SECONDS - operation_started))
     write_metadata build-simulator "$workspace/build/StremioSkeleton-simulator.zip"
     ;;
+  build-bunny-simulator)
+    (( $# == 0 )) || fail "build-bunny-simulator does not accept arguments"
+    prepare_workspace
+    operation_started=$SECONDS
+    SKELETON_IOS_VARIANT=bunny run_in_workspace "$workspace/scripts/build-simulator.sh"
+    operation_seconds=$((SECONDS - operation_started))
+    write_metadata build-bunny-simulator "$workspace/build/Bunny-simulator.zip"
+    ;;
   build-tvos)
     (( $# == 0 )) || fail "build-tvos does not accept arguments"
     prepare_workspace
@@ -542,6 +565,14 @@ case "$command_name" in
     run_in_workspace "$workspace/scripts/build-device.sh"
     operation_seconds=$((SECONDS - operation_started))
     write_metadata build-device "$workspace/build/StremioSkeleton-device.ipa"
+    ;;
+  build-bunny-device)
+    (( $# == 0 )) || fail "build-bunny-device does not accept arguments"
+    prepare_workspace
+    operation_started=$SECONDS
+    SKELETON_IOS_VARIANT=bunny run_in_workspace "$workspace/scripts/build-device.sh"
+    operation_seconds=$((SECONDS - operation_started))
+    write_metadata build-bunny-device "$workspace/build/Bunny-device.ipa"
     ;;
   screenshots)
     prepare_workspace

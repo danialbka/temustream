@@ -168,7 +168,10 @@ final class ViewingProfileStoreTests: XCTestCase {
         ).items()
 
         XCTAssertEqual(migratedLibrary, [item])
-        XCTAssertEqual(migratedProgress, [progress])
+        XCTAssertEqual(migratedProgress.map(\.contentIdentifier), [progress.contentIdentifier])
+        XCTAssertEqual(migratedProgress.first?.position, progress.position)
+        XCTAssertNil(migratedProgress.first?.stream.url)
+        XCTAssertEqual(migratedProgress.first?.stream.name, progress.stream.name)
         XCTAssertEqual(migratedCompletions.map(\.contentIdentifier), ["movie:finished"])
         XCTAssertTrue(FileManager.default.fileExists(atPath: libraryURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: progressURL.path))

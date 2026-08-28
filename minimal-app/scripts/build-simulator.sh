@@ -3,20 +3,39 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 CACHE_ROOT="${STREMIO_BUILD_CACHE_ROOT:-/private/tmp/stremio-build-cache}"
+APP_VARIANT="${SKELETON_IOS_VARIANT:-temustremio}"
+case "$APP_VARIANT" in
+  temustremio)
+    SCHEME="StremioSkeleton"
+    PRODUCT_NAME="StremioSkeleton"
+    ARTIFACT_NAME="StremioSkeleton"
+    BUILD_SUBDIR="simulator"
+    ;;
+  bunny)
+    SCHEME="Bunny"
+    PRODUCT_NAME="Bunny"
+    ARTIFACT_NAME="Bunny"
+    BUILD_SUBDIR="bunny-simulator"
+    ;;
+  *)
+    echo "SKELETON_IOS_VARIANT must be temustremio or bunny" >&2
+    exit 2
+    ;;
+esac
 BUILD_ROOT="${SKELETON_BUILD_ROOT:-$CACHE_ROOT/products}"
-BUILD_DIR="$BUILD_ROOT/simulator"
-APP_DIR="$BUILD_DIR/StremioSkeleton.app"
-ARCHIVE="$ROOT_DIR/build/StremioSkeleton-simulator.zip"
+BUILD_DIR="$BUILD_ROOT/$BUILD_SUBDIR"
+APP_DIR="$BUILD_DIR/$PRODUCT_NAME.app"
+ARCHIVE="$ROOT_DIR/build/$ARTIFACT_NAME-simulator.zip"
 DERIVED_DATA="${SKELETON_DERIVED_DATA:-$CACHE_ROOT/DerivedData}"
-BUILT_APP="$DERIVED_DATA/Build/Products/Release-iphonesimulator/StremioSkeleton.app"
+BUILT_APP="$DERIVED_DATA/Build/Products/Release-iphonesimulator/$PRODUCT_NAME.app"
 SIMULATOR_ARCH="${SIMULATOR_ARCH:-$(uname -m)}"
-BUILD_LOG="$ROOT_DIR/build/build-simulator.log"
+BUILD_LOG="$ROOT_DIR/build/build-$ARTIFACT_NAME-simulator.log"
 BUILD_LOCK="${SKELETON_BUILD_LOCK:-$CACHE_ROOT/locks/xcode.lock}"
 RETENTION_TOOL="$ROOT_DIR/scripts/build-cache-retention.sh"
 SOURCE_ID="${STREMIO_SOURCE_ID:-unverified}"
 PUBLIC_RELEASE="${SKELETON_PUBLIC_RELEASE:-0}"
-STAGED_APP="$BUILD_DIR/.StremioSkeleton.app.tmp.$$"
-ARCHIVE_TEMP="$ROOT_DIR/build/.StremioSkeleton-simulator.zip.tmp.$$"
+STAGED_APP="$BUILD_DIR/.$PRODUCT_NAME.app.tmp.$$"
+ARCHIVE_TEMP="$ROOT_DIR/build/.$ARTIFACT_NAME-simulator.zip.tmp.$$"
 PRODUCT_CACHE_REGISTERED=0
 DERIVED_CACHE_REGISTERED=0
 
@@ -59,24 +78,24 @@ rm -rf "$APP_DIR" "$STAGED_APP" "$BUILT_APP" "$BUILT_APP.dSYM"
 mkdir -p "$BUILD_DIR" "$ROOT_DIR/build"
 
 cd "$ROOT_DIR"
-"$ROOT_DIR/scripts/fetch-vlc.sh"
 "$ROOT_DIR/scripts/build-rust-core.sh"
 xcodegen generate --spec project.yml >/dev/null
 set -- build
 if [ "$PUBLIC_RELEASE" -eq 1 ]; then
-  echo "Public release mode: disabling Watch Together endpoints and cleaning the app target"
-  set -- \
-    WATCH_TOGETHER_CONVEX_URL= \
-    WATCH_TOGETHER_LIVEKIT_URL= \
-    clean build
+  echo "Public release mode: cleaning the iOS app target"
+  set -- clean build
 fi
 if ! xcodebuild \
   -project StremioSkeleton.xcodeproj \
-  -scheme StremioSkeleton \
+  -scheme "$SCHEME" \
   -configuration Release \
   -sdk iphonesimulator \
   -destination 'generic/platform=iOS Simulator' \
+  -destination-timeout 5 \
   -derivedDataPath "$DERIVED_DATA" \
+  -skipPackageUpdates \
+  -disableAutomaticPackageResolution \
+  -onlyUsePackageVersionsFromResolvedFile \
   CODE_SIGNING_ALLOWED=NO \
   ARCHS="$SIMULATOR_ARCH" \
   ONLY_ACTIVE_ARCH=YES \
@@ -85,14 +104,10 @@ if ! xcodebuild \
   tail -n 80 "$BUILD_LOG" >&2
   exit 1
 fi
-test -s "$BUILT_APP/StremioSkeleton"
+test -s "$BUILT_APP/$PRODUCT_NAME"
 ditto "$BUILT_APP" "$STAGED_APP"
-test -s "$STAGED_APP/StremioSkeleton"
+test -s "$STAGED_APP/$PRODUCT_NAME"
 test "$(plutil -extract StremioSourceIdentity raw -o - "$STAGED_APP/Info.plist")" = "$SOURCE_ID"
-if [ "$PUBLIC_RELEASE" -eq 1 ]; then
-  test -z "$(plutil -extract WatchTogetherConvexURL raw -o - "$STAGED_APP/Info.plist")"
-  test -z "$(plutil -extract WatchTogetherLiveKitURL raw -o - "$STAGED_APP/Info.plist")"
-fi
 mv "$STAGED_APP" "$APP_DIR"
 
 xattr -cr "$APP_DIR"

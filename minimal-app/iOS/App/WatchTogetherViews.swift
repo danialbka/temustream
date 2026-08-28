@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 
+#if WATCH_TOGETHER_ENABLED
 struct FriendsView: View {
     @EnvironmentObject private var watch: WatchTogetherModel
     @AppStorage(WatchTogetherPreferences.enabledKey)
@@ -421,3 +422,43 @@ private struct WatchRoomPlayerSheet: View {
         Task { await watch.createProfile(displayName: name) }
     }
 }
+#else
+struct FriendsView: View {
+    var body: some View { EmptyView() }
+}
+
+struct WatchRoomPlayerButton: View {
+    @ObservedObject var controls: WatchPlayerControlsModel
+    let contentKey: String
+    let contentType: String
+    let contentTitle: String
+    @Binding var showsRoom: Bool
+
+    var body: some View { EmptyView() }
+}
+
+struct WatchRoomVoiceButton: View {
+    let watch: WatchTogetherModel
+    @ObservedObject var controls: WatchPlayerControlsModel
+    let contentKey: String
+
+    var body: some View { EmptyView() }
+}
+
+extension View {
+    func watchTogetherRoomSheet(
+        watch: WatchTogetherModel,
+        isPresented: Binding<Bool>,
+        contentKey: String,
+        contentType: String,
+        contentTitle: String
+    ) -> some View {
+        _ = watch
+        _ = isPresented
+        _ = contentKey
+        _ = contentType
+        _ = contentTitle
+        return self
+    }
+}
+#endif

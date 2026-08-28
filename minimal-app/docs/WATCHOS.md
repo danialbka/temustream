@@ -120,7 +120,7 @@ AVPlayer after conversion to HLS.
 | Previous/next/autoplay | Implemented | Manual controls plus true-end autoplay; specials stay isolated from regular seasons. |
 | Retry and fallback | Implemented | Resolution tries candidates in sequence; player exposes retry and next-source recovery without persisting candidate URLs. |
 | Torrent and incompatible containers | Configurable | Requires an authorized user-configured streaming server that resolves/transcodes to trusted-origin HLS. No server is bundled. |
-| TorBox permalinks | Implemented | Foundation-only just-in-time resolution; CDN/token URLs remain in memory and are never logged or persisted. |
+| TorBox permalinks | Implemented | Foundation-only just-in-time resolution. First-party code keeps CDN/token URLs session-only and does not persist or log their components. Apple AVPlayer/CoreMedia diagnostics can expose the full asset URL, so use short-lived URLs and do not share system logs. |
 | Playback speed and preferences | Implemented | Per-profile autoplay, rate, audio/caption languages, captions enabled, and a restrained accent preset. |
 | Watch Together, friends, voice chat | Excluded by product scope | No WatchConnectivity, LiveKit, Convex, microphone access, room state, or phone dependency is linked into the target. |
 | VLC, FFmpeg, KSPlayer, Bunny decoders | Platform/product limit | Those desktop/mobile compatibility stacks are not watchOS products. The watch uses AVPlayer or an authorized HLS server and reports unsupported codecs/containers. |
@@ -142,7 +142,7 @@ xcrun simctl install booted /absolute/path/to/TemuStremioWatch.app
 SIMCTL_CHILD_TEMUSTREMIO_WATCH_DEMO=1 \
 SIMCTL_CHILD_TEMUSTREMIO_WATCH_DEMO_STREAM_URL="$WATCH_DEMO_HLS_URL" \
 SIMCTL_CHILD_TEMUSTREMIO_WATCH_DEMO_TITLE='TemuStremio Watch Playback' \
-xcrun simctl launch --terminate-running booted local.stremio.skeleton.watch.watchkitapp
+xcrun simctl launch --terminate-running-process booted local.stremio.skeleton.watch.watchkitapp
 ```
 
 The hook rejects non-HTTPS URLs, embedded credentials, and non-HLS paths. A

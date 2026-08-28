@@ -1,86 +1,110 @@
-# Playback benchmark results
+# Bunny Rust playback benchmarks
 
-## Physical iPhone cadence regression
+Date: 2026-08-28
 
-Measured 2026-08-22 on an iPhone 14 Pro Max test device with a user-authorized
-1080p MKV stream (6.80 GB, 23.98 fps). Each result below uses only
-uninterrupted `state=playing` samples.
-The VLC pause/buffer event caused by manual timeline scrubbing is deliberately
-outside its comparison window.
+This file records results for the `no-license` branch. The older KSPlayer,
+FFmpegKit, and MobileVLCKit comparison belongs to
+`archive/full-player-stack-2026-08-27` and is not evidence for the current
+binary.
 
-| Renderer | Continuous window | Mean / minimum fps | Added drops | Buffer | Result |
-| --- | ---: | ---: | ---: | ---: | --- |
-| KSPlayer before fix | 81.4 s | 18.204 / 11.51 | 467 | 14.81–45.46 s | fail |
-| VLC control, before scrub | 59.9 s | 23.981 / 21.53 | 0 | unavailable | pass |
-| KSPlayer after fix | 84.6 s | 23.974 / 23.51 | 0 | 22.58–45.16 s | pass |
+## Container-core benchmark
 
-The failing KSPlayer run had no packet drops and retained at least 14.81 seconds
-of decoded-forward buffer, ruling out download starvation for this regression.
-Its modern `CADisplayLink` range preferred one callback per source frame even
-though `videoClockSync` can hold until half a frame interval. The legacy path
-already requested two callbacks per frame. Matching that cadence removed all
-467 drops without switching player or decoder.
+The release benchmark used a generated 300-second AV1 and FLAC Matroska fixture
+with SHA-256
+`c2a6d345d306dc68429eda5ac4266f4d5d10281347851c2b551dc17f7d06ca50`.
+It contained 300 cues, 300 clusters, and 7,800 compressed packets.
 
-Paired Time Profiler captures also show that the cadence fix did not buy
-smoothness with extra app CPU: the sampled CPU equivalent was 13.77% before and
-13.15% after. The after-fix trace held source cadence for 67.46 seconds while
-the device reported a Serious thermal state, with zero drops.
+| Operation | Median |
+| --- | ---: |
+| Open and index | 37.250 microseconds |
+| Demux every packet | 1.626 milliseconds |
+| Payload throughput | 2,090.62 MiB/s |
+| Cue seek plus first packet | 339 nanoseconds |
 
-Raw device evidence is under `build/device-player-comparison/`:
+The benchmark ran 5 warmups and 25 recorded repetitions, with 500 deterministic
+seek operations per repetition. Run it with:
 
-- `performance-exact-before.log` and `.trace`
-- `vlc-exact-control.log` and `.trace`
-- `performance-exact-after.log` and `.trace`
+```sh
+./scripts/benchmark-rust-media-core.sh
+```
 
-## Simulator matrix
+The JSON report is written to the ignored
+`build/benchmarks/rust-media-core.json`.
 
-Measured on the iPhone 17 Pro simulator in strict single-player mode. The debug
-overlay and logs require a visible decoded frame; audio-only state is not
-counted as successful video playback. Parity means autoplay, visible frame,
-seek, pause, resume, and duration all passed without silently switching to
-another selectable player.
+The same run recorded `ffprobe` process time as 23.415 milliseconds for
+metadata and 27.738 milliseconds for packet counting. This is not a direct
+performance comparison. It includes process startup and file I/O, and each
+implementation performs different work.
 
-## Real network streams
+## Visible Simulator playback
 
-| Selection | Real source | Rust route / decoder | Resolve | Visible playback | Steady cadence | Drops | Parity |
-| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| Performance | Debridio/TorBox 1080p HEVC | bounded VLC, VideoToolbox-first | 0.98 s | 2.55 s | about 24 fps | 0 | pass |
-| Performance | Debridio/TorBox 1080p H.264 MPEG-TS mislabeled as MP4 | KSPlayer FFmpeg, VideoToolbox requested | 4.32 s | 0.97 s | 23.1–24.6 / 24 fps | 0 | pass |
-| VLC | same 1080p HEVC source | bounded VLC callback renderer | 3.56 s | 2.95 s | about 24 fps | 0 | pass |
-| KSPlayer, synchronous | same 1080p HEVC source | FFmpeg, VideoToolbox requested | 0.82 s | 1.75 s | about 24 / 23.98 fps | 7 after forced seek | pass |
-| KSPlayer, async A/B | same 1080p HEVC source | FFmpeg async, VideoToolbox requested | 0.78 s | 1.52 s | about 24 / 23.98 fps | 7 after forced seek | pass |
-| AVPlayer | Apple BipBop adaptive HLS | AVFoundation system hardware path | n/a | 2.71 s | about 60 fps | 0 | pass |
+The verified mixed fixture was 60.021 seconds, 1280 by 720, with H.264 video,
+AAC audio, and an embedded SubRip subtitle track. The Rust path opened the
+Matroska file, fed both media tracks to Apple renderers, and displayed the
+subtitle.
 
-The KSPlayer asynchronous experiment saved about 0.23 seconds but did not
-reduce drops, so it remains off. Performance chooses the bounded VLC path for
-HEVC because that renderer won the smoothness comparison, while retaining the
-faster KSPlayer path for the relabeled transport stream.
+| Observation | Result |
+| --- | ---: |
+| Ready | 894.1 ms |
+| Observed playback position | more than 24 seconds |
+| Video cadence | about 29.8 fps |
+| Reported dropped frames | 0 |
+| Reported stalls | 0 |
+| Buffered media | about 1.2 seconds |
+| Audio | accepted and rendered |
+| Subtitle | visible |
 
-One uncached provider link returned a 24,484-byte, 30-second “Downloading to
-Provider” placeholder during all 40 readiness checks. The bridge rejected that
-placeholder as still preparing instead of reporting false playback success.
-No decoder can make that upstream file ready locally.
+An AV1 and FLAC fixture passed Rust parser, demux, and seek coverage, but the
+tested iOS Simulator did not display an AV1 frame. It is recorded as parser
+coverage, not visible playback support.
 
-## Deterministic smoothness gate
+## Network regression playback
 
-| Fixture | Startup | Seek P95 | Seeks | Pause/resume | Stalls | Drops | Result |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| native MP4 | 0.91 s | 260 ms | 5/5 | 5/5 | 0 | 0 | pass |
-| native MPEG-TS HLS | 1.22 s | 160 ms | 5/5 | 5/5 | 0 | 0 | pass |
-| AV1 + FLAC MKV | 0.55 s | 56 ms | 5/5 | 5/5 | 0 | 0 | pass |
-| AAC audio-only | 0.65 s | 766 ms | 5/5 | 5/5 | 0 | 0 | pass |
+The captured provider regression fixture contains 64 MiB of MPEG transport
+stream bytes with H.264 video and AAC audio. Bunny exposed those same bytes as
+a first-party byte-range HLS playlist without transcoding or downloading the
+whole source first.
 
-The full report is generated at `build/player-smoothness-report.json` by
-`scripts/benchmark-player-smoothness.sh`.
+| Observation | Result |
+| --- | ---: |
+| Ready | 687.6 ms |
+| Continuous observation | more than 110 seconds |
+| Video cadence | about 24 fps |
+| Reported dropped frames | 0 |
+| Reported stalls | 0 |
+| Seek | requested 90.0 s, landed at 89.8 s |
+| Seeked ready time | 1,031.6 ms |
 
-## Visual and device proof boundary
+A separate 731 MiB public remote Matroska file opened in 8,302.8 ms through
+the Rust core and VideoToolbox, then ran for two minutes with no source-read
+failure, recovery loop, dropped frame, or recorded stall. The network reader
+reused its validated HTTP session and fetched bounded 2 MiB ranges; the Rust
+core indexed later Matroska clusters only when playback or seeking needed them.
 
-Simulator recordings were fully decoded and sampled across their timelines.
-They show changing video frames, correct aspect-fit presentation, visible
-controls, the debug overlay, and successful post-seek playback. The recordings
-are under `build/player-debug-recordings/` and sampled contact sheets are under
-`build/player-debug-contact-sheets/`.
+## Audio route verification
 
-Simulator results prove routing, stream compatibility, controls, and measured
-frame delivery, but not final thermal behavior or hardware-decoder utilization
-on a physical iPhone. The arm64 IPA is packaged separately for that last gate.
+The custom audio path follows Apple's sample-buffer player architecture rather
+than running an independent PCM clock. Rust supplies packet timing and Dolby
+layout metadata; iOS handles codec decompression, route-aware output, and the
+user's Spatial Audio preference.
+
+| Fixture | Startup | Seeks | Pause/resume | Stalls | Dropped frames | Real-time ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| E-AC-3 5.1, 48 kHz | 998.6 ms | 5/5 | 5/5 | 0 | 0 | 1.00001 |
+| AAC stereo, 48 kHz | 722.2 ms | 5/5 | 5/5 | 0 | 0 | 1.00001 |
+
+The 5.1 run identified `L C R Ls Rs LFE` and recovered from the same automatic
+renderer-flush notification used to model a Bluetooth route change. The
+Simulator had no Spatial Audio route, so these numbers are not an AirPods sound
+quality result.
+
+## What remains before release
+
+- repeat direct H.264/AAC Matroska, HLS, seeking, track switching, subtitles,
+  pause/resume, rotation, PiP, and compatibility fallback on a physical iPhone
+- test HEVC, AV1, VP9, AC-3, E-AC-3, FLAC, Opus, and PCM on supported hardware
+- rerun a real provider source without storing or printing its resolved URL
+- inspect the exact IPA for removed player frameworks and linked libraries
+
+A parser microbenchmark is not a codec benchmark. A Simulator frame is not a
+physical-device pass. Keep those evidence levels separate.

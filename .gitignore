@@ -43,6 +43,13 @@ target/
 *.resultbundle
 *.profraw
 *.profdata
+*.lcov
+lcov.info
+coverage.xml
+junit.xml
+*.junit.xml
+*.testresult
+*.testlog
 *.gcda
 *.gcno
 *.trace
@@ -51,6 +58,8 @@ target/
 .pytest_cache/
 coverage/
 test-results/
+test-reports/
+benchmark-results/
 TestResults/
 UITestResults/
 .idea/

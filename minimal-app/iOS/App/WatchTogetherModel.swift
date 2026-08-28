@@ -1,10 +1,14 @@
 import Combine
+import Foundation
+
+#if WATCH_TOGETHER_ENABLED
 @preconcurrency import ConvexMobile
 import AVFoundation
-import Foundation
 import LiveKit
 import Security
+#endif
 
+#if WATCH_TOGETHER_ENABLED
 struct WatchProfile: Codable, Identifiable, Equatable {
     let id: String
     let displayName: String
@@ -111,6 +115,7 @@ final class WatchPlayerControlsModel: ObservableObject {
         )
     }
 }
+#endif
 
 @MainActor
 final class WatchPlaybackControlChannel: ObservableObject {
@@ -218,6 +223,7 @@ final class WatchPlaybackControlChannel: ObservableObject {
     }
 }
 
+#if WATCH_TOGETHER_ENABLED
 @MainActor
 final class WatchTogetherModel: ObservableObject {
     let playerControls = WatchPlayerControlsModel()
@@ -909,3 +915,37 @@ private struct WatchTogetherCredentialStore {
         return value
     }
 }
+#else
+/// The public iOS release intentionally excludes Watch Together and its
+/// Convex/LiveKit dependencies. The player keeps a no-op model so shared
+/// playback composition does not need service-specific imports.
+@MainActor
+final class WatchPlayerControlsModel: ObservableObject {}
+
+@MainActor
+final class WatchTogetherModel: ObservableObject {
+    let playerControls = WatchPlayerControlsModel()
+
+    init() {
+        UserDefaults.standard.set(false, forKey: WatchTogetherPreferences.enabledKey)
+    }
+
+    func start() async {}
+
+    func setFeatureEnabled(_ enabled: Bool) async {
+        _ = enabled
+        UserDefaults.standard.set(false, forKey: WatchTogetherPreferences.enabledKey)
+    }
+
+    func attachPlayer(_ channel: WatchPlaybackControlChannel, contentKey: String) {
+        _ = channel
+        _ = contentKey
+    }
+
+    func detachPlayer(_ channel: WatchPlaybackControlChannel) { _ = channel }
+
+    func runPlayerControlsUIAuditIfRequested(contentKey: String) async {
+        _ = contentKey
+    }
+}
+#endif

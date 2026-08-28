@@ -18,12 +18,7 @@ struct StremioSkeletonApp: App {
 
     @ViewBuilder
     private var appContent: some View {
-        if providerPlayerAuditRequested {
-            ProviderPlayerAuditScreen()
-                .environmentObject(model)
-        } else {
-            platformAppContent
-        }
+        platformAppContent
     }
 
     @ViewBuilder
@@ -49,7 +44,15 @@ struct StremioSkeletonApp: App {
                 .task { await model.start() }
             }
         } else if let playerStressURL {
-            PlayerStressScreen(url: playerStressURL)
+            if playerStressBenchmarkRequested {
+                PlayerStressScreen(url: playerStressURL)
+            } else {
+                NavigationStack {
+                    PlayerScreen(url: playerStressURL, title: "Bunny stress fixture")
+                }
+            }
+        } else if let fixture = mpegTransportBridgeFixture {
+            SimulatorMPEGTransportBridgeFixtureScreen(fixture: fixture)
         } else if let playerFixturePlan {
             if playerFixtureManualStart {
                 SimulatorPlayerFixtureScreen(
@@ -66,6 +69,9 @@ struct StremioSkeletonApp: App {
                     )
                 }
             }
+        } else if providerPlayerAuditRequested {
+            ProviderPlayerAuditScreen()
+                .environmentObject(model)
         } else {
             standardAppContent
         }
@@ -92,6 +98,16 @@ struct StremioSkeletonApp: App {
         #endif
     }
 
+    private var playerStressBenchmarkRequested: Bool {
+        #if targetEnvironment(simulator)
+        ProcessInfo.processInfo.environment[
+            "SKELETON_PLAYER_STRESS_BENCHMARK"
+        ] == "1"
+        #else
+        false
+        #endif
+    }
+
     #if targetEnvironment(simulator)
     private var recommendationPaginationFixtureRequested: Bool {
         ProcessInfo.processInfo.environment[
@@ -106,6 +122,28 @@ struct StremioSkeletonApp: App {
             return nil
         }
         return SimulatorEpisodeAutoplayFixture(url: url)
+    }
+
+    private var mpegTransportBridgeFixture: SimulatorMPEGTransportBridgeFixture? {
+        guard let rawURL = ProcessInfo.processInfo.environment[
+            "SKELETON_MPEGTS_BRIDGE_FIXTURE_URL"
+        ], let upstreamURL = URL(string: rawURL),
+              let rawLength = ProcessInfo.processInfo.environment[
+                "SKELETON_MPEGTS_BRIDGE_FIXTURE_LENGTH"
+              ], let contentLength = Int64(rawLength), contentLength > 0
+        else { return nil }
+        return SimulatorMPEGTransportBridgeFixture(
+            upstreamURL: upstreamURL,
+            contentLength: contentLength,
+            initialPosition: max(
+                TimeInterval(
+                    ProcessInfo.processInfo.environment[
+                        "SKELETON_MPEGTS_BRIDGE_FIXTURE_INITIAL_POSITION"
+                    ] ?? ""
+                ) ?? 0,
+                0
+            )
+        )
     }
     #endif
 
@@ -146,7 +184,7 @@ struct StremioSkeletonApp: App {
         #endif
     }
 
-    /// Simulator-only route used to validate the production KSPlayer surface.
+    /// Simulator-only route used to validate the production Bunny surface.
     /// It is compiled out of device builds and cannot affect shipped launches.
     private var playerFixturePlan: PlaybackPlan? {
         #if targetEnvironment(simulator)
@@ -163,7 +201,8 @@ struct StremioSkeletonApp: App {
             requiresCompatibilityPlayback: compatibilityURL != nil,
             detectedMIMEType: ProcessInfo.processInfo.environment[
                 "SKELETON_PLAYER_FIXTURE_MIME_TYPE"
-            ]
+            ],
+            trustedPrivateNetworkOrigin: primaryURL.isSimulatorLoopback
         )
         #else
         return nil
@@ -176,6 +215,71 @@ struct StremioSkeletonApp: App {
 }
 
 #if targetEnvironment(simulator)
+private struct SimulatorMPEGTransportBridgeFixture: Sendable {
+    let upstreamURL: URL
+    let contentLength: Int64
+    let initialPosition: TimeInterval
+}
+
+private struct SimulatorMPEGTransportBridgeFixtureScreen: View {
+    let fixture: SimulatorMPEGTransportBridgeFixture
+    @State private var playbackPlan: PlaybackPlan?
+    @State private var failureMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            if let playbackPlan {
+                PlayerScreen(
+                    plan: playbackPlan,
+                    title: "Captured provider MPEG-TS bridge",
+                    initialPosition: fixture.initialPosition
+                )
+            } else if let failureMessage {
+                VStack(spacing: 12) {
+                    Label("Bridge fixture failed", systemImage: "exclamationmark.triangle")
+                        .font(.headline)
+                    Text(failureMessage)
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                }
+                .padding()
+            } else {
+                ProgressView("Preparing provider stream…")
+            }
+        }
+        .task {
+            do {
+                let localURL = try await StreamTransportBridge.shared.localURL(
+                    upstream: fixture.upstreamURL,
+                    contentLength: fixture.contentLength,
+                    mimeType: "video/mp2t"
+                )
+                playbackPlan = PlaybackPlan(
+                    primaryURL: localURL,
+                    fallbackURL: nil,
+                    detectedMIMEType: "application/vnd.apple.mpegurl",
+                    trustedPrivateNetworkOrigin: localURL
+                )
+                NSLog("MPEGTS_BRIDGE_FIXTURE ready url=%@", localURL.absoluteString)
+            } catch {
+                failureMessage = error.localizedDescription
+                NSLog("MPEGTS_BRIDGE_FIXTURE failed error=%@", error.localizedDescription)
+            }
+        }
+    }
+}
+#endif
+
+#if targetEnvironment(simulator)
+private extension URL {
+    var isSimulatorLoopback: URL? {
+        guard ["127.0.0.1", "localhost", "::1"].contains(host?.lowercased() ?? "") else {
+            return nil
+        }
+        return self
+    }
+}
+
 /// A deterministic launch route for the iOS UI test. It still exercises the
 /// production ResolvingPlayerScreen autoplay flow; only its initial episode
 /// and local stream are supplied by the test process.

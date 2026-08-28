@@ -102,6 +102,7 @@ struct WatchRoomVoiceButton: View {
 
 enum PlaybackAudioSession {
     static func beginPlayback() {}
+    static func configurePlaybackContent(channelCount: Int) {}
     static func endPlayback() {}
 }
 #endif

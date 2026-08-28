@@ -12,7 +12,7 @@ TemuStremio uses one warm local cache root by default:
 ```
 
 This replaces task-named DerivedData and scratch paths. Reusing one cache keeps
-warm builds fast without duplicating LiveKit, FFmpeg, KSPlayer, and SwiftPM
+warm builds fast without duplicating LiveKit, Rust target data, and SwiftPM
 checkouts for every test or feature.
 
 ## Safety model

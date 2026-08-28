@@ -54,19 +54,17 @@ xcrun simctl install "$DEVICE_ID" "$APP_DIR"
 : > "$RESULTS"
 
 for CASE in \
-  'direct-native|native|stress.mp4' \
-  'hls-native|native|stress-ts.m3u8' \
-  'mkv-av1-flac|ffmpeg|stress-av1-flac.mkv' \
-  'audio-aac|ffmpeg|stress-audio.m4a'
+  'direct-native|stress.mp4' \
+  'hls-native|stress-ts.m3u8' \
+  'mkv-av1-flac|stress-av1-flac.mkv' \
+  'audio-aac|stress-audio.m4a'
 do
   LABEL="${CASE%%|*}"
-  REMAINDER="${CASE#*|}"
-  ENGINE="${REMAINDER%%|*}"
-  FILE="${REMAINDER#*|}"
+  FILE="${CASE#*|}"
   xcrun simctl terminate "$DEVICE_ID" "$BUNDLE_ID" 2>/dev/null || true
   LAUNCH="$(
     SIMCTL_CHILD_SKELETON_PLAYER_STRESS_URL="http://127.0.0.1:$PORT/$FILE" \
-    SIMCTL_CHILD_SKELETON_PLAYER_STRESS_ENGINE="$ENGINE" \
+    SIMCTL_CHILD_SKELETON_PLAYER_STRESS_BENCHMARK=1 \
     xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID"
   )"
   PID="${LAUNCH##*: }"
@@ -105,5 +103,5 @@ done
 
 jq -s '{generatedAt: (now | todateiso8601), tests: ., passed: (map(has("error") | not) | all)}' \
   "$RESULTS" > "$REPORT"
-jq '{passed, tests: [.tests[] | {case,startupMilliseconds,seekMedianMilliseconds,seekP95Milliseconds,successfulSeeks,seekAttempts,successfulPauseResumes,pauseResumeAttempts,stalledIntervals,bufferingTransitions,droppedVideoFrames,realTimeRatio,renderedVideoFrame,error}]}' "$REPORT"
+jq '{passed, tests: [.tests[] | {case,startupMilliseconds,seekMedianMilliseconds,seekP95Milliseconds,successfulSeeks,seekAttempts,successfulPauseResumes,pauseResumeAttempts,videoUnderflowIntervals,videoQueueStateTransitions,droppedVideoFrames,realTimeRatio,renderedVideoFrame,error}]}' "$REPORT"
 test "$(jq -r '.passed' "$REPORT")" = true

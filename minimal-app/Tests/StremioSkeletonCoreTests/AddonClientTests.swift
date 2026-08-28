@@ -24,7 +24,33 @@ private actor StubLoader: HTTPDataLoading {
     }
 }
 
+private actor OversizedLoader: HTTPDataLoading {
+    func data(from url: URL) async throws -> (Data, URLResponse) {
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        return (Data(repeating: 0x20, count: 1_048_577), response)
+    }
+}
+
 final class AddonClientTests: XCTestCase {
+    func testRejectsManifestBodyOverSafetyLimit() async throws {
+        let endpoint = try AddonEndpoint(manifestInput: "https://example.com/manifest.json")
+        let client = AddonClient(endpoint: endpoint, loader: OversizedLoader())
+
+        do {
+            _ = try await client.manifest()
+            XCTFail("Expected an oversized response error")
+        } catch let error as AddonClientError {
+            guard case .responseTooLarge(1_048_576) = error else {
+                return XCTFail("Unexpected add-on error: \(error)")
+            }
+        }
+    }
+
     func testLoadsManifestCatalogMetaAndStreams() async throws {
         let loader = StubLoader(responses: [
             "/manifest.json": #"{"id":"org.test","version":"1.0.0","name":"Test","resources":["catalog","meta","stream"],"types":["movie"],"catalogs":[{"type":"movie","id":"public","name":"Public"}]}"#,

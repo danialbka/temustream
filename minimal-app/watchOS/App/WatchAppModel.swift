@@ -110,18 +110,23 @@ private actor WatchProgressStore {
 
     func items() throws -> [WatchProgressRecord] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
-        return try decoder.decode(
+        let decoded = try decoder.decode(
             [WatchProgressRecord].self,
             from: Data(contentsOf: fileURL)
         )
-        .sorted { $0.updatedAt > $1.updatedAt }
+        let sanitized = decoded.compactMap(Self.persistenceSafe)
+        if sanitized != decoded {
+            try persist(sanitized)
+        }
+        return sanitized.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     func record(_ entry: WatchProgressRecord) throws -> [WatchProgressRecord] {
         var current = try items()
         current.removeAll { $0.contentIdentifier == entry.contentIdentifier }
-        if PlaybackProgress.shouldSave(position: entry.position, duration: entry.duration) {
-            current.append(entry)
+        if PlaybackProgress.shouldSave(position: entry.position, duration: entry.duration),
+           let safeEntry = Self.persistenceSafe(entry) {
+            current.append(safeEntry)
         }
         current.sort { $0.updatedAt > $1.updatedAt }
         try persist(current)
@@ -141,6 +146,32 @@ private actor WatchProgressStore {
             withIntermediateDirectories: true
         )
         try encoder.encode(entries).write(to: fileURL, options: .atomic)
+    }
+
+    private static func persistenceSafe(
+        _ entry: WatchProgressRecord
+    ) -> WatchProgressRecord? {
+        guard let manifestURL = WatchPlaybackPersistencePolicy
+            .sanitizedReferenceURL(entry.manifestURL)
+        else { return nil }
+        return WatchProgressRecord(
+            contentIdentifier: entry.contentIdentifier,
+            contentTitle: entry.contentTitle,
+            mediaID: entry.mediaID,
+            mediaType: entry.mediaType,
+            mediaTitle: entry.mediaTitle,
+            posterURL: WatchPlaybackPersistencePolicy
+                .sanitizedReferenceURL(entry.posterURL),
+            episodeID: entry.episodeID,
+            episodeTitle: entry.episodeTitle,
+            season: entry.season,
+            episode: entry.episode,
+            manifestURL: manifestURL,
+            providerName: entry.providerName,
+            position: entry.position,
+            duration: entry.duration,
+            updatedAt: entry.updatedAt
+        )
     }
 }
 
@@ -1302,7 +1333,8 @@ final class WatchAppModel: ObservableObject {
     ) async {
         guard let contentIdentifier = request.contentIdentifier,
               let metadata = request.mediaMetadata,
-              let manifestURL = request.manifestURL,
+              let manifestURL = WatchPlaybackPersistencePolicy
+                .sanitizedReferenceURL(request.manifestURL),
               position.isFinite,
               duration.isFinite,
               position >= PlaybackProgress.minimumResumePosition else { return }
@@ -1312,12 +1344,13 @@ final class WatchAppModel: ObservableObject {
             mediaID: metadata.mediaID,
             mediaType: metadata.mediaType,
             mediaTitle: metadata.mediaTitle,
-            posterURL: metadata.posterURL,
+            posterURL: WatchPlaybackPersistencePolicy
+                .sanitizedReferenceURL(metadata.posterURL),
             episodeID: metadata.episodeID,
             episodeTitle: metadata.episodeTitle,
             season: metadata.season,
             episode: metadata.episode,
-            manifestURL: Self.persistenceSafeURL(manifestURL),
+            manifestURL: manifestURL,
             providerName: request.providerName,
             position: position,
             duration: duration,
@@ -1866,18 +1899,6 @@ final class WatchAppModel: ObservableObject {
             "watch.selected-season.\(encoded)",
             profileID: profileID
         )
-    }
-
-    private static func persistenceSafeURL(_ url: URL) -> URL {
-        guard var components = URLComponents(
-            url: url,
-            resolvingAgainstBaseURL: false
-        ) else { return url }
-        components.user = nil
-        components.password = nil
-        components.query = nil
-        components.fragment = nil
-        return components.url ?? url
     }
 
     private static func canLoadWithoutRequiredExtra(_ catalog: AddonCatalog) -> Bool {

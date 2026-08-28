@@ -35,8 +35,9 @@ git status --short --untracked-files=all
   core, but do not pull the iOS custom-player stack into the tvOS target.
 - Put cross-player routing, stream failover, resume, autoplay, and shared player
   chrome in `iOS/App/PlayerView.swift`. Bunny-specific UI/state belongs in
-  `iOS/App/BunnyPlayerView.swift`; its FFmpeg decoder belongs in
-  `iOS/App/BunnyFFmpegDecoder.{h,m}`.
+  `iOS/App/BunnyPlayerView.swift`; its Swift range/sample-buffer bridge belongs
+  in `iOS/App/BunnyNativeDecoder.swift`. Matroska/WebM, subtitle, PGS, and ABI
+  code belongs in `rust/StremioPlaybackCore/src/media/`.
 - Keep provider URL normalization in `iOS/App/TorBoxPlaybackResolver.swift`,
   byte-range delivery in `iOS/App/StreamTransportBridge.swift`, and generic
   streaming-server contracts in
@@ -55,8 +56,7 @@ Do not hand-edit or use generated output as source:
 
 - `build/`, `.build/`, `.swiftpm/`, `rust/**/target/`,
   `Backend/watch-together/build/`, and `Backend/watch-together/node_modules/`
-- `build/dependencies/MobileVLCKit.xcframework` and
-  `build/dependencies/StremioPlaybackCore.xcframework`
+- `build/dependencies/StremioPlaybackCore.xcframework`
 - `Backend/watch-together/convex/_generated/` (regenerate with Convex tooling)
 - `StremioSkeleton.xcodeproj/` (regenerate from `project.yml`)
 - `config/WatchTogether.local.xcconfig`, `Backend/watch-together/.env.local`,

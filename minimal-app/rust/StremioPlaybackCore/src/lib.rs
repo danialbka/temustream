@@ -5,6 +5,8 @@ use std::{
     time::Instant,
 };
 
+pub mod media;
+
 const ABI_VERSION: u32 = 1;
 
 const SOURCE_UNKNOWN: u32 = 0;
@@ -15,13 +17,9 @@ const SOURCE_HIGH_RESOLUTION: u32 = 4;
 
 const DECODER_AUTOMATIC: u32 = 0;
 const DECODER_AVFOUNDATION: u32 = 1;
-const DECODER_FFMPEG_VIDEOTOOLBOX: u32 = 2;
-const DECODER_VLC_VIDEOTOOLBOX_BRIDGE: u32 = 3;
-const DECODER_BUNNY_FFMPEG: u32 = 4;
+const DECODER_BUNNY_RUST: u32 = 2;
 
 const PLAYER_PERFORMANCE: u32 = 0;
-const PLAYER_KSPLAYER: u32 = 1;
-const PLAYER_VLC: u32 = 2;
 const PLAYER_AVPLAYER: u32 = 3;
 const PLAYER_BUNNY: u32 = 4;
 
@@ -69,18 +67,7 @@ fn classify(url: &str, title: &str) -> (u32, bool, bool) {
     let direct_container = contains_any(
         &hint,
         &[
-            ".mkv",
-            " mkv",
-            "matroska",
-            ".webm",
-            ".avi",
-            "av1",
-            "video/mp2t",
-            "mpegts",
-            "transport stream",
-            "flac",
-            "truehd",
-            " dts",
+            ".mkv", " mkv", "matroska", ".webm", ".avi", "av1", "flac", "truehd", " dts",
         ],
     );
     let kind = if high_resolution {
@@ -103,14 +90,12 @@ fn classify(url: &str, title: &str) -> (u32, bool, bool) {
 
 fn policy(url: &str, title: &str, player_kind: u32) -> StremioPlaybackPolicy {
     let (source_kind, apple_native, demanding) = classify(url, title);
-    let source_hint = format!("{url} {title}").to_ascii_lowercase();
-    let hevc = contains_any(&source_hint, &["x265", "hevc"]);
     let loopback_transport_bridge = contains_any(url, &["127.0.0.1", "localhost"])
         && url.contains("/stream/")
         && url.contains(".ts");
     let (network_cache_ms, forward_buffer_ms, maximum_buffer_ms) = if loopback_transport_bridge {
         // The bridge already owns a compressed 64 MiB seek cache. Keeping a
-        // second 30-45 second decoded queue inside KSPlayer lets its audio
+        // second 30-45 second decoded queue inside a renderer lets its audio
         // prefill clock run far ahead of the displayed frame, especially
         // immediately after a transport-stream seek. A short active queue
         // preserves instant starts while keeping frame pacing clock-bound.
@@ -125,27 +110,25 @@ fn policy(url: &str, title: &str, player_kind: u32) -> StremioPlaybackPolicy {
 
     let decoder_kind = match player_kind {
         PLAYER_AVPLAYER => DECODER_AVFOUNDATION,
-        // Bunny owns its full demux/decode/render pipeline. Keep even MP4 and
-        // HLS inside Bunny so an AVFoundation capability rejection cannot
-        // bypass FFmpeg's much broader codec and container support.
-        PLAYER_BUNNY => DECODER_BUNNY_FFMPEG,
-        PLAYER_VLC => DECODER_VLC_VIDEOTOOLBOX_BRIDGE,
-        PLAYER_KSPLAYER => {
-            if apple_native {
+        // Keep Apple's optimized HLS/file pipeline for formats it owns. Bunny's
+        // dependency-free Rust demuxer handles direct containers and feeds
+        // compressed samples into Apple system decoders.
+        PLAYER_BUNNY => {
+            // Extensionless provider and torrent routes often serve ordinary
+            // MP4 bytes. Let AVFoundation sniff unknown sources first; Bunny
+            // still falls back to the Rust Matroska path if Apple's probe
+            // cannot open them.
+            if apple_native || source_kind == SOURCE_UNKNOWN {
                 DECODER_AVFOUNDATION
             } else {
-                DECODER_FFMPEG_VIDEOTOOLBOX
+                DECODER_BUNNY_RUST
             }
         }
         PLAYER_PERFORMANCE => {
-            if source_kind == SOURCE_HIGH_RESOLUTION {
-                DECODER_VLC_VIDEOTOOLBOX_BRIDGE
-            } else if apple_native {
+            if apple_native || source_kind == SOURCE_UNKNOWN {
                 DECODER_AVFOUNDATION
-            } else if hevc {
-                DECODER_VLC_VIDEOTOOLBOX_BRIDGE
             } else {
-                DECODER_FFMPEG_VIDEOTOOLBOX
+                DECODER_BUNNY_RUST
             }
         }
         _ => DECODER_AUTOMATIC,
@@ -161,12 +144,9 @@ fn policy(url: &str, title: &str, player_kind: u32) -> StremioPlaybackPolicy {
         prefer_compatibility_stream: u8::from(
             player_kind == PLAYER_AVPLAYER && !apple_native && demanding,
         ),
-        // Keep VLC on its native drawable. LibVLC's custom-memory callbacks
-        // add a CPU copy and cannot safely return a missing pixel plane while
-        // the decoder drains during teardown.
         use_bounded_renderer: 0,
         require_hardware_decode: u8::from(demanding),
-        prefer_videotoolbox_chain: u8::from(decoder_kind == DECODER_VLC_VIDEOTOOLBOX_BRIDGE),
+        prefer_videotoolbox_chain: u8::from(decoder_kind == DECODER_BUNNY_RUST && demanding),
     }
 }
 
@@ -479,28 +459,28 @@ mod tests {
     }
 
     #[test]
-    fn routes_hevc_to_vlc_native_drawable() {
+    fn routes_hevc_to_bunny_rust() {
         let result = policy(
             "https://example.test/download",
             "1080p BluRay x265 HEVC MKV",
             PLAYER_PERFORMANCE,
         );
         assert_eq!(result.source_kind, SOURCE_DIRECT_CONTAINER);
-        assert_eq!(result.decoder_kind, DECODER_VLC_VIDEOTOOLBOX_BRIDGE);
+        assert_eq!(result.decoder_kind, DECODER_BUNNY_RUST);
         assert_eq!(result.use_bounded_renderer, 0);
         assert_eq!(result.require_hardware_decode, 1);
     }
 
     #[test]
-    fn routes_relabeled_transport_stream_to_ffmpeg_videotoolbox() {
+    fn routes_relabeled_transport_stream_to_avfoundation() {
         let result = policy(
             "https://cdn.example.test/movie.mp4",
             "Movie video/mp2t",
             PLAYER_PERFORMANCE,
         );
-        assert_eq!(result.source_kind, SOURCE_DIRECT_CONTAINER);
-        assert_eq!(result.decoder_kind, DECODER_FFMPEG_VIDEOTOOLBOX);
-        assert_eq!(result.require_hardware_decode, 1);
+        assert_eq!(result.source_kind, SOURCE_NATIVE_FILE);
+        assert_eq!(result.decoder_kind, DECODER_AVFOUNDATION);
+        assert_eq!(result.require_hardware_decode, 0);
     }
 
     #[test]
@@ -510,9 +490,22 @@ mod tests {
             "Movie video/mp2t",
             PLAYER_PERFORMANCE,
         );
-        assert_eq!(result.decoder_kind, DECODER_FFMPEG_VIDEOTOOLBOX);
+        assert_eq!(result.source_kind, SOURCE_NATIVE_FILE);
+        assert_eq!(result.decoder_kind, DECODER_AVFOUNDATION);
         assert_eq!(result.forward_buffer_ms, 3_000);
         assert_eq!(result.maximum_buffer_ms, 12_000);
+    }
+
+    #[test]
+    fn routes_extensionless_transport_stream_hint_to_avfoundation() {
+        let result = policy(
+            "https://cdn.example.test/signed/provider/source",
+            "Movie video/mp2t MPEGTS transport stream",
+            PLAYER_BUNNY,
+        );
+        assert_eq!(result.source_kind, SOURCE_UNKNOWN);
+        assert_eq!(result.decoder_kind, DECODER_AVFOUNDATION);
+        assert_eq!(result.require_hardware_decode, 0);
     }
 
     fn packet_with_pcr(pid: u16, ticks: u64) -> [u8; 188] {
@@ -566,23 +559,15 @@ mod tests {
     }
 
     #[test]
-    fn keeps_native_vlc_drawable_for_demanding_sources() {
-        let result = policy("https://example.test/video.mkv", "2160p HEVC", PLAYER_VLC);
-        assert_eq!(result.source_kind, SOURCE_HIGH_RESOLUTION);
-        assert_eq!(result.decoder_kind, DECODER_VLC_VIDEOTOOLBOX_BRIDGE);
-        assert_eq!(result.use_bounded_renderer, 0);
-        assert_eq!(result.prefer_videotoolbox_chain, 1);
-    }
-
-    #[test]
-    fn routes_high_resolution_performance_sources_to_vlc_native_drawable() {
+    fn routes_high_resolution_performance_sources_to_bunny_rust() {
         let result = policy(
             "https://example.test/video.mkv",
             "2160p HEVC",
             PLAYER_PERFORMANCE,
         );
-        assert_eq!(result.decoder_kind, DECODER_VLC_VIDEOTOOLBOX_BRIDGE);
+        assert_eq!(result.decoder_kind, DECODER_BUNNY_RUST);
         assert_eq!(result.use_bounded_renderer, 0);
+        assert_eq!(result.prefer_videotoolbox_chain, 1);
     }
 
     #[test]
@@ -592,14 +577,25 @@ mod tests {
     }
 
     #[test]
-    fn routes_every_source_inside_bunny_decoder() {
+    fn routes_native_sources_to_apple_and_direct_containers_to_bunny_rust() {
         let native = policy("https://example.test/video.mp4", "H264 AAC", PLAYER_BUNNY);
         let uncommon = policy("https://example.test/video.mkv", "AV1 FLAC", PLAYER_BUNNY);
         let hls = policy("https://example.test/master.m3u8", "HLS", PLAYER_BUNNY);
-        assert_eq!(native.decoder_kind, DECODER_BUNNY_FFMPEG);
-        assert_eq!(uncommon.decoder_kind, DECODER_BUNNY_FFMPEG);
-        assert_eq!(hls.decoder_kind, DECODER_BUNNY_FFMPEG);
+        assert_eq!(native.decoder_kind, DECODER_AVFOUNDATION);
+        assert_eq!(uncommon.decoder_kind, DECODER_BUNNY_RUST);
+        assert_eq!(hls.decoder_kind, DECODER_AVFOUNDATION);
         assert_eq!(uncommon.prefer_compatibility_stream, 0);
+    }
+
+    #[test]
+    fn lets_avfoundation_sniff_extensionless_unknown_sources_first() {
+        let result = policy(
+            "https://stream.example.test/0123456789abcdef/0?token=redacted",
+            "0",
+            PLAYER_BUNNY,
+        );
+        assert_eq!(result.source_kind, SOURCE_UNKNOWN);
+        assert_eq!(result.decoder_kind, DECODER_AVFOUNDATION);
     }
 
     #[test]
@@ -611,7 +607,7 @@ mod tests {
             ("https://example.test/download", "H264 DTS Matroska"),
         ] {
             let result = policy(url, title, PLAYER_BUNNY);
-            assert_eq!(result.decoder_kind, DECODER_BUNNY_FFMPEG, "{url} {title}");
+            assert_eq!(result.decoder_kind, DECODER_BUNNY_RUST, "{url} {title}");
             assert_eq!(result.prefer_compatibility_stream, 0, "{url} {title}");
         }
     }

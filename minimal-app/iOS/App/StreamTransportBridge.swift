@@ -35,27 +35,38 @@ enum StreamTransportBridgeError: LocalizedError, Sendable {
 
 /// Presents a provider file through a loopback-only HTTP byte-range endpoint.
 ///
-/// Some debrid CDNs return raw MPEG-TS bytes from a URL named `.mp4`. FFmpeg
-/// can decode those bytes, but the relabeled remote delivery produced unstable
-/// demux clocks and aggressive frame dropping in KSPlayer. This bridge keeps
-/// the original bytes intact while giving the player a stable `.ts` identity,
-/// bounded reads, range validation, and a small seek-aware cache.
+/// Some debrid CDNs return raw MPEG-TS bytes from a URL named `.mp4`. The
+/// relabeled remote delivery can produce unstable demux clocks and aggressive
+/// frame dropping. This bridge keeps the original bytes intact while giving
+/// Bunny a stable `.ts` identity, bounded reads, range validation, and a small
+/// seek-aware cache.
 actor StreamTransportBridge {
     static let shared = StreamTransportBridge()
 
     // The provider's H.264 transport stream uses a two-second keyframe
     // interval. Starting an exact byte seek at the requested PCR can leave the
     // video decoder without an IDR frame while audio immediately advances.
-    // Resolve a little earlier and let KSPlayer's accurate-seek path discard
-    // decoded preroll frames; this keeps the tracks synchronized without a
-    // visible rewind.
+    // Resolve a little earlier so the playback path can discard decoded
+    // preroll frames; this keeps the tracks synchronized without a visible
+    // rewind.
     private static let vodSeekPrerollSeconds: TimeInterval = 3
 
     private struct Source: Sendable {
         let contentLength: Int64
         let mimeType: String
+        let hlsManifest: Data
         let store: StreamChunkStore
         let registeredAt: ContinuousClock.Instant
+    }
+
+    private enum SourceResource: Sendable {
+        case hlsManifest
+        case media
+    }
+
+    private struct SourcePath: Sendable {
+        let token: String
+        let resource: SourceResource
     }
 
     private struct Request: Sendable {
@@ -133,15 +144,18 @@ actor StreamTransportBridge {
             throw StreamTransportBridgeError.invalidSource
         }
 
-        let port = try await startListenerIfNeeded()
         let token = UUID().uuidString.lowercased()
+        let store = StreamChunkStore(
+            upstream: upstream,
+            contentLength: contentLength
+        )
+        let hlsManifest = try await store.hlsManifest()
+        let port = try await startListenerIfNeeded()
         sources[token] = Source(
             contentLength: contentLength,
             mimeType: mimeType,
-            store: StreamChunkStore(
-                upstream: upstream,
-                contentLength: contentLength
-            ),
+            hlsManifest: hlsManifest,
+            store: store,
             registeredAt: .now
         )
         // Prune after insertion so the newly registered source is included in
@@ -150,17 +164,32 @@ actor StreamTransportBridge {
         pruneExpiredSources()
 
         guard let url = URL(
-            string: "http://127.0.0.1:\(port)/stream/\(token)/media.ts"
+            string: "http://127.0.0.1:\(port)/stream/\(token)/master.m3u8"
         ) else {
             throw StreamTransportBridgeError.invalidSource
         }
+        #if DEBUG
         NSLog(
             "STREAM_BRIDGE_READY bytes=%lld mime=%@ port=%u",
             contentLength,
             mimeType,
             port
         )
+        #endif
         return url
+    }
+
+    func unregister(localURL: URL) async {
+        guard let token = Self.sourceToken(from: localURL.path),
+              let source = sources.removeValue(forKey: token)
+        else { return }
+        await source.store.shutdown()
+    }
+
+    func releaseCachedData() async {
+        for source in sources.values {
+            await source.store.releaseCachedData()
+        }
     }
 
     func resolvedByteOffset(
@@ -183,12 +212,14 @@ actor StreamTransportBridge {
             let resolved = try await source.store.correctedUpstreamOffset(
                 forVirtualOffset: virtualOffset
             )
+            #if DEBUG
             NSLog(
                 "STREAM_BRIDGE_SEEK_RESOLVED time=%.3f preroll_time=%.3f byte=%lld",
                 time,
                 indexedTime,
                 resolved
             )
+            #endif
             return resolved
         } catch {
             NSLog(
@@ -279,25 +310,33 @@ actor StreamTransportBridge {
 
     private func pruneExpiredSources() {
         let expiration = Duration.seconds(6 * 60 * 60)
-        sources = sources.filter { _, source in
-            source.registeredAt.duration(to: .now) < expiration
+        let expiredTokens = sources.compactMap { token, source in
+            source.registeredAt.duration(to: .now) >= expiration ? token : nil
         }
-        if sources.count > 12 {
+        for token in expiredTokens {
+            removeSource(token)
+        }
+        if sources.count > 4 {
             let oldest = sources.sorted {
                 $0.value.registeredAt < $1.value.registeredAt
             }
-            for (token, _) in oldest.prefix(sources.count - 12) {
-                sources[token] = nil
+            for (token, _) in oldest.prefix(sources.count - 4) {
+                removeSource(token)
             }
         }
+    }
+
+    private func removeSource(_ token: String) {
+        guard let source = sources.removeValue(forKey: token) else { return }
+        Task { await source.store.shutdown() }
     }
 
     private func serve(_ connection: NWConnection) async {
         do {
             let requestData = try await Self.receiveRequestHeader(from: connection)
             let request = try Self.parseRequest(requestData)
-            guard let token = Self.sourceToken(from: request.path),
-                  let source = sources[token]
+            guard let sourcePath = Self.sourcePath(from: request.path),
+                  let source = sources[sourcePath.token]
             else {
                 try await Self.sendError(
                     status: 404,
@@ -306,7 +345,20 @@ actor StreamTransportBridge {
                 )
                 return
             }
-            try await Self.respond(to: request, source: source, over: connection)
+            switch sourcePath.resource {
+            case .hlsManifest:
+                try await Self.respondWithManifest(
+                    to: request,
+                    source: source,
+                    over: connection
+                )
+            case .media:
+                try await Self.respondWithMedia(
+                    to: request,
+                    source: source,
+                    over: connection
+                )
+            }
         } catch {
             NSLog(
                 "STREAM_BRIDGE_REQUEST_FAILED error=%@",
@@ -393,13 +445,20 @@ actor StreamTransportBridge {
     }
 
     private nonisolated static func sourceToken(from path: String) -> String? {
+        sourcePath(from: path)?.token
+    }
+
+    private nonisolated static func sourcePath(from path: String) -> SourcePath? {
         let cleanPath = path.split(separator: "?", maxSplits: 1).first ?? ""
         let components = cleanPath.split(separator: "/")
-        guard components.count == 3,
-              components[0] == "stream",
-              components[2] == "media.ts"
-        else { return nil }
-        return String(components[1])
+        guard components.count == 3, components[0] == "stream" else { return nil }
+        let resource: SourceResource
+        switch components[2] {
+        case "master.m3u8": resource = .hlsManifest
+        case "media.ts": resource = .media
+        default: return nil
+        }
+        return SourcePath(token: String(components[1]), resource: resource)
     }
 
     private nonisolated static func responseRange(
@@ -457,7 +516,59 @@ actor StreamTransportBridge {
         )
     }
 
-    private nonisolated static func respond(
+    private nonisolated static func respondWithManifest(
+        to request: Request,
+        source: Source,
+        over connection: NWConnection
+    ) async throws {
+        let contentLength = Int64(source.hlsManifest.count)
+        let range: ResponseRange
+        do {
+            range = try responseRange(
+                header: request.headers["range"],
+                contentLength: contentLength
+            )
+        } catch {
+            try await sendError(
+                status: 416,
+                reason: "Range Not Satisfiable",
+                extraHeaders: ["Content-Range: bytes */\(contentLength)"],
+                over: connection
+            )
+            return
+        }
+
+        let status = range.isPartial ? "206 Partial Content" : "200 OK"
+        var headers = [
+            "HTTP/1.1 \(status)",
+            "Content-Type: application/vnd.apple.mpegurl",
+            "Content-Length: \(range.length)",
+            "Accept-Ranges: bytes",
+            "Cache-Control: no-store",
+            "Connection: close",
+            "X-Content-Type-Options: nosniff",
+        ]
+        if range.isPartial {
+            headers.append(
+                "Content-Range: bytes \(range.lowerBound)-\(range.upperBound)/\(contentLength)"
+            )
+        }
+        let isHead = request.method == "HEAD"
+        let headerData = Data((headers.joined(separator: "\r\n") + "\r\n\r\n").utf8)
+        try await send(headerData, isComplete: isHead, over: connection)
+        if !isHead {
+            let lower = Int(range.lowerBound)
+            let upper = Int(range.upperBound) + 1
+            try await send(
+                source.hlsManifest.subdata(in: lower..<upper),
+                isComplete: true,
+                over: connection
+            )
+        }
+        connection.cancel()
+    }
+
+    private nonisolated static func respondWithMedia(
         to request: Request,
         source: Source,
         over connection: NWConnection
@@ -481,9 +592,8 @@ actor StreamTransportBridge {
         let isTailProbe = range.upperBound == source.contentLength - 1
             && range.length <= 512 * 1_024
         let isHead = request.method == "HEAD"
-        // Preserve a one-to-one HTTP byte coordinate. Bridged MPEG-TS VOD is
-        // configured to use FFmpeg's timestamp search, so replacing the bytes
-        // behind an advertised offset would corrupt the next relative seek.
+        // Preserve a one-to-one HTTP byte coordinate. Replacing bytes behind
+        // an advertised offset would corrupt the next relative seek.
         let upstreamStart = range.lowerBound
 
         let status = range.isPartial ? "206 Partial Content" : "200 OK"
@@ -508,6 +618,7 @@ actor StreamTransportBridge {
             return
         }
 
+        #if DEBUG
         NSLog(
             "STREAM_BRIDGE_REQUEST start=%lld upstream_start=%lld end=%lld partial=%@",
             range.lowerBound,
@@ -515,6 +626,7 @@ actor StreamTransportBridge {
             range.upperBound,
             range.isPartial ? "true" : "false"
         )
+        #endif
         var virtualOffset = range.lowerBound
         var upstreamOffset = upstreamStart
         var pacer: DeliveryPacer?
@@ -559,12 +671,14 @@ actor StreamTransportBridge {
                     multiplier: multiplier,
                     burstBytes: burstBytes
                 )
+                #if DEBUG
                 NSLog(
                     "STREAM_BRIDGE_PACING source_bps=%llu multiplier=%.2f burst_bytes=%ld",
                     estimatedBitrate,
                     multiplier,
                     burstBytes
                 )
+                #endif
             }
 
             var dataOffset = 0
@@ -666,11 +780,14 @@ private actor StreamChunkStore {
     }
 
     // Timestamp seeking opens several short-lived range probes. A two-MiB
-    // fetch made every probe pay for data FFmpeg immediately discarded.
+    // fetch made every probe pay for data the demuxer immediately discarded.
     // Half-MiB chunks still span enough PCR samples for bitrate estimation,
     // while cutting cold seek transfer and latency substantially.
     private static let chunkSize: Int64 = 512 * 1_024
-    private static let maximumCachedBytes = 64 * 1_024 * 1_024
+    // Four retained bridge sources at 16 MiB each impose a 64 MiB global
+    // ceiling. Playback teardown unregisters its source, while this bounded
+    // fallback also protects interrupted setup and abandoned navigation.
+    private static let maximumCachedBytes = 16 * 1_024 * 1_024
     private static let pcrTimescale = 27_000_000.0
     private static let pcrWrap = (UInt64(1) << 33) * 300
 
@@ -696,6 +813,21 @@ private actor StreamChunkStore {
         session = URLSession(configuration: configuration)
     }
 
+    func releaseCachedData() {
+        cache.removeAll(keepingCapacity: false)
+        timingSpans.removeAll(keepingCapacity: false)
+        cachedBytes = 0
+    }
+
+    func shutdown() {
+        for task in inFlight.values {
+            task.cancel()
+        }
+        inFlight.removeAll(keepingCapacity: false)
+        releaseCachedData()
+        session.invalidateAndCancel()
+    }
+
     func bytes(at offset: Int64, maximumCount: Int) async throws -> Data {
         guard offset >= 0, offset < contentLength, maximumCount > 0 else {
             throw StreamTransportBridgeError.unsupportedRange
@@ -712,6 +844,49 @@ private actor StreamChunkStore {
 
     func pacingBitrateBPS() -> UInt64? {
         estimatedBitrateBPS
+    }
+
+    func hlsManifest() async throws -> Data {
+        _ = try await chunk(startingAt: 0)
+        let tailOffset = ((contentLength - 1) / Self.chunkSize) * Self.chunkSize
+        if tailOffset > 0 {
+            _ = try await chunk(startingAt: tailOffset)
+        }
+
+        let duration: TimeInterval
+        if let timeline = timelineEndpoints() {
+            let ticks = Self.pcrDelta(
+                from: timeline.first.ticks,
+                to: timeline.last.ticks
+            )
+            duration = Double(ticks) / Self.pcrTimescale
+        } else {
+            let bitrate = max(estimatedBitrateBPS ?? 12_000_000, 1)
+            duration = Double(contentLength) * 8 / Double(bitrate)
+        }
+        guard duration.isFinite, duration > 0 else {
+            throw StreamTransportBridgeError.invalidSource
+        }
+        let layout: MPEGTransportHLSManifest
+        do {
+            layout = try MPEGTransportHLSManifest.build(
+                contentLength: contentLength,
+                duration: duration
+            )
+        } catch {
+            throw StreamTransportBridgeError.invalidSource
+        }
+        let manifest = layout.encoded()
+        #if DEBUG
+        NSLog(
+            "STREAM_BRIDGE_HLS duration=%.3f segments=%lld segment_bytes=%lld manifest_bytes=%ld",
+            duration,
+            Int64(layout.segments.count),
+            layout.segmentByteLength,
+            manifest.count
+        )
+        #endif
+        return manifest
     }
 
     func correctedUpstreamOffset(
@@ -782,6 +957,7 @@ private actor StreamChunkStore {
             candidate = corrected
         }
 
+        #if DEBUG
         if candidate != virtualOffset {
             NSLog(
                 "STREAM_BRIDGE_SEEK_MAP virtual=%lld upstream=%lld correction_bytes=%lld residual_ms=%.1f",
@@ -791,6 +967,7 @@ private actor StreamChunkStore {
                 residualMilliseconds
             )
         }
+        #endif
         return candidate
     }
 
@@ -852,7 +1029,9 @@ private actor StreamChunkStore {
                 estimatedBitrateBPS = (current * 3 + measured) / 4
             } else {
                 estimatedBitrateBPS = measured
+                #if DEBUG
                 NSLog("STREAM_BRIDGE_PROBE bitrate_bps=%llu", measured)
+                #endif
             }
         }
         while cachedBytes > Self.maximumCachedBytes,
@@ -959,7 +1138,9 @@ private actor StreamChunkStore {
         var lastError: Error?
 
         for attempt in 1...3 {
+            #if DEBUG
             let startedAt = ContinuousClock.now
+            #endif
             do {
                 var request = URLRequest(url: upstream)
                 request.timeoutInterval = 12
@@ -968,7 +1149,18 @@ private actor StreamChunkStore {
                     forHTTPHeaderField: "Range"
                 )
                 request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-                let (data, response) = try await session.data(for: request)
+                let (data, response): (Data, URLResponse)
+                do {
+                    (data, response) = try await BoundedHTTPDataLoader.load(
+                        request: request,
+                        maximumBytes: expectedCount,
+                        configuration: session.configuration,
+                        redirectPolicy: .follow,
+                        preserveHeadersAcrossRedirects: ["Range", "Accept-Encoding"]
+                    )
+                } catch BoundedHTTPDataLoaderError.responseTooLarge {
+                    throw StreamTransportBridgeError.upstreamRangeMismatch
+                }
                 guard let http = response as? HTTPURLResponse else {
                     throw StreamTransportBridgeError.upstreamRangeMismatch
                 }
@@ -981,6 +1173,7 @@ private actor StreamChunkStore {
                     throw StreamTransportBridgeError.upstreamRangeMismatch
                 }
 
+                #if DEBUG
                 let elapsed = max(
                     startedAt.duration(to: .now).components.seconds,
                     0
@@ -999,6 +1192,7 @@ private actor StreamChunkStore {
                     megabitsPerSecond,
                     attempt
                 )
+                #endif
                 return data
             } catch is CancellationError {
                 throw CancellationError()

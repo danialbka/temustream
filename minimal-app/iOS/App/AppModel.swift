@@ -1,9 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
-#if canImport(KSPlayer)
-@preconcurrency import KSPlayer
-#endif
+import UIKit
 
 struct E2EResult: Sendable {
     let manifest: String
@@ -14,10 +12,10 @@ struct E2EResult: Sendable {
     let detail: String
     let streamCount: Int
     let providerGrouping: Bool
-    let ksDirectStartupMilliseconds: Double
-    let ksHLSStartupMilliseconds: Double
-    let ksContainerStartupMilliseconds: Double
-    let ksTorrentStartupMilliseconds: Double
+    let bunnyDirectStartupMilliseconds: Double
+    let bunnyHLSStartupMilliseconds: Double
+    let bunnyContainerStartupMilliseconds: Double
+    let bunnyTorrentStartupMilliseconds: Double
     let libraryRoundTrip: Bool
     let accountSync: Bool
     let sessionPersistenceRoundTrip: Bool
@@ -86,17 +84,20 @@ struct PlaybackPlan: Sendable {
     let fallbackURL: URL?
     let requiresCompatibilityPlayback: Bool
     let detectedMIMEType: String?
+    let trustedPrivateNetworkOrigin: URL?
 
     init(
         primaryURL: URL,
         fallbackURL: URL? = nil,
         requiresCompatibilityPlayback: Bool = false,
-        detectedMIMEType: String? = nil
+        detectedMIMEType: String? = nil,
+        trustedPrivateNetworkOrigin: URL? = nil
     ) {
         self.primaryURL = primaryURL
         self.fallbackURL = fallbackURL
         self.requiresCompatibilityPlayback = requiresCompatibilityPlayback
         self.detectedMIMEType = detectedMIMEType
+        self.trustedPrivateNetworkOrigin = trustedPrivateNetworkOrigin
     }
 }
 
@@ -171,6 +172,7 @@ final class AppModel: ObservableObject {
     private var profileActivationRevision = 0
     private let accountClient: StremioAccountClient
     private let sessionStore = SessionStore()
+    private let addonURLStore = AddonURLStore()
     private var session: StremioSession?
     private var syncedAddonDescriptors: [SyncedAddon] = []
     private var addonManifestCache: [URL: AddonManifest] = [:]
@@ -326,14 +328,13 @@ final class AppModel: ObservableObject {
                 await runE2E()
             } else {
                 try await loadHome()
-                #if canImport(KSPlayer)
+                #if os(iOS)
                 if ProcessInfo.processInfo.environment[
                     "SKELETON_SINGLE_MOVIE_PLAYBACK_AUDIT"
                 ] == "1" {
                     await runSingleMoviePlaybackAudit()
                     return
                 }
-                #endif
                 await refreshStreamingServerStatus()
                 if session != nil {
                     // The local app remains usable when Stremio account sync is
@@ -341,7 +342,6 @@ final class AppModel: ObservableObject {
                     // failure state without turning startup into a fatal error.
                     try? await syncAccount()
                 }
-                #if canImport(KSPlayer)
                 if ProcessInfo.processInfo.environment["SKELETON_OBSESSION_STREAM_STRESS"] == "1" {
                     let stressEnvironment = ProcessInfo.processInfo.environment
                     await runObsessionStreamStressBenchmark(
@@ -350,6 +350,11 @@ final class AppModel: ObservableObject {
                     )
                 } else if ProcessInfo.processInfo.environment["SKELETON_REAL_PLAYER_STRESS"] == "1" {
                     await runRealPlayerStressBenchmark()
+                }
+                #else
+                await refreshStreamingServerStatus()
+                if session != nil {
+                    try? await syncAccount()
                 }
                 #endif
             }
@@ -1218,7 +1223,8 @@ final class AppModel: ObservableObject {
         )
         let localGroup = localMatches.isEmpty ? nil : SearchCatalogGroup(
             id: "local-metadata#\(requestedType)",
-            providerName: "TemuStremio",
+            providerName: Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName")
+                as? String ?? "Bunny",
             catalogName: "Titles, People & Genres",
             manifestURL: primaryEndpoint.manifestURL,
             items: localMatches
@@ -2145,7 +2151,8 @@ final class AppModel: ObservableObject {
         let client = endpoint.map { TorrentStreamingClient(endpoint: $0) }
         var sourceURL: URL
         var compatibilitySourceURL: URL
-        let detectedMIMEType: String?
+        var detectedMIMEType: String?
+        var trustedPrivateNetworkOrigin: URL? = nil
         if let url = stream.url {
             if TorBoxPlaybackResolver.shouldResolve(
                 stream: stream,
@@ -2178,6 +2185,8 @@ final class AppModel: ObservableObject {
                         contentLength: contentLength,
                         mimeType: "video/mp2t"
                     )
+                    detectedMIMEType = "application/vnd.apple.mpegurl"
+                    trustedPrivateNetworkOrigin = sourceURL
                     #endif
                 }
             } else {
@@ -2190,16 +2199,19 @@ final class AppModel: ObservableObject {
             sourceURL = try await client.playbackURL(for: stream)
             compatibilitySourceURL = sourceURL
             detectedMIMEType = nil
+            trustedPrivateNetworkOrigin = endpoint?.baseURL
         }
 
         #if os(tvOS)
         let requiresCompatibilityPlayback = stream.prefersCompatibilityPlayback
             || detectedMIMEType == "video/mp2t"
+            || detectedMIMEType == "video/mp2t"
         #else
-        let selectedPlayer = StremioInternalPlayer.selected
-        let requiresCompatibilityPlayback = selectedPlayer == .bunny
-            ? false
-            : stream.prefersCompatibilityPlayback
+        // Bunny always tries the direct URL first. For containers/codecs that
+        // need capabilities outside Apple's decoders, prepare the configured
+        // server's HLS route as a second candidate without changing the
+        // primary clean-room Rust path.
+        let requiresCompatibilityPlayback = stream.prefersCompatibilityPlayback
         #endif
         var compatibilityURL: URL?
         if requiresCompatibilityPlayback, let client {
@@ -2229,7 +2241,8 @@ final class AppModel: ObservableObject {
             primaryURL: sourceURL,
             fallbackURL: compatibilityURL,
             requiresCompatibilityPlayback: requiresCompatibilityPlayback,
-            detectedMIMEType: detectedMIMEType
+            detectedMIMEType: detectedMIMEType,
+            trustedPrivateNetworkOrigin: trustedPrivateNetworkOrigin
         )
     }
 
@@ -2292,15 +2305,15 @@ final class AppModel: ObservableObject {
             let added = try await e2eLibrary.contains(detail)
             _ = try await e2eLibrary.toggle(detail)
             let removed = !(try await e2eLibrary.contains(detail))
-            let directStartup = try await StremioPlayerStartupBenchmark.measure(url: url)
+            let directStartup = try await AppPlayerStartupBenchmark.measure(url: url)
             let hlsURL = url.deletingLastPathComponent().appendingPathComponent("sample.m3u8")
-            let hlsStartup = try await StremioPlayerStartupBenchmark.measure(url: hlsURL)
+            let hlsStartup = try await AppPlayerStartupBenchmark.measure(url: hlsURL)
             guard let compatibilityStream = loadedStreams.first(where: {
                 $0.url != nil && $0.prefersCompatibilityPlayback
             }), let compatibilitySourceURL = compatibilityStream.url else {
                 throw E2EFailure("No incompatible direct stream")
             }
-            let containerStartup = try await StremioPlayerStartupBenchmark.measure(
+            let containerStartup = try await AppPlayerStartupBenchmark.measure(
                 url: compatibilitySourceURL,
                 timeoutSeconds: 20
             )
@@ -2308,7 +2321,7 @@ final class AppModel: ObservableObject {
                 throw E2EFailure("No torrent stream")
             }
             let torrentPlan = try await playbackPlan(for: torrent)
-            let torrentStartup = try await StremioPlayerStartupBenchmark.measure(
+            let torrentStartup = try await AppPlayerStartupBenchmark.measure(
                 url: torrentPlan.primaryURL
             )
 
@@ -2340,16 +2353,16 @@ final class AppModel: ObservableObject {
                 detail: detail.name,
                 streamCount: loadedStreams.count,
                 providerGrouping: providerGrouping,
-                ksDirectStartupMilliseconds: directStartup,
-                ksHLSStartupMilliseconds: hlsStartup,
-                ksContainerStartupMilliseconds: containerStartup,
-                ksTorrentStartupMilliseconds: torrentStartup,
+                bunnyDirectStartupMilliseconds: directStartup,
+                bunnyHLSStartupMilliseconds: hlsStartup,
+                bunnyContainerStartupMilliseconds: containerStartup,
+                bunnyTorrentStartupMilliseconds: torrentStartup,
                 libraryRoundTrip: added && removed,
                 accountSync: accountSynced,
                 sessionPersistenceRoundTrip: sessionPersistenceRoundTrip
             )
             NSLog(
-                "[SkeletonE2E:%@] PASS manifest=%@ catalog=%ld letterboxd=%ld paging=%d search=%d streams=%ld providers=%d ks_direct_ms=%.1f ks_hls_ms=%.1f ks_mkv_av1_ms=%.1f ks_torrent_ms=%.1f library=%d account=%d session=%d",
+                "[SkeletonE2E:%@] PASS manifest=%@ catalog=%ld letterboxd=%ld paging=%d search=%d streams=%ld providers=%d bunny_direct_ms=%.1f bunny_hls_ms=%.1f bunny_mkv_h264_ms=%.1f bunny_torrent_ms=%.1f library=%d account=%d session=%d",
                 runID,
                 loadedManifest.name,
                 initialCatalogCount,
@@ -2390,15 +2403,38 @@ final class AppModel: ObservableObject {
     }
 
     private func restoredAddonURLs() -> [URL] {
-        UserDefaults.standard.stringArray(forKey: "installedAddonURLs")?
+        if let stored = addonURLStore.load() {
+            return stored
+        }
+        let defaults = UserDefaults.standard
+        let legacy = defaults.stringArray(forKey: "installedAddonURLs")?
             .compactMap(URL.init(string:)) ?? []
+        do {
+            try SecureStoreMigrationPolicy.migrateIfPresent(
+                defaults.object(forKey: "installedAddonURLs") != nil,
+                save: { try addonURLStore.save(legacy) },
+                removeLegacyValue: {
+                    defaults.removeObject(forKey: "installedAddonURLs")
+                }
+            )
+        } catch {
+            // Keep the legacy value when secure persistence fails so the next
+            // launch can retry without losing configured add-ons.
+            NSLog(
+                "ADDON_URL_STORE migration_failed code=%ld",
+                (error as NSError).code
+            )
+        }
+        return legacy
     }
 
     private func persistAddonURLs() {
-        UserDefaults.standard.set(
-            installedAddons.map(\.absoluteString),
-            forKey: "installedAddonURLs"
-        )
+        do {
+            try addonURLStore.save(installedAddons)
+            UserDefaults.standard.removeObject(forKey: "installedAddonURLs")
+        } catch {
+            NSLog("ADDON_URL_STORE save_failed code=%ld", (error as NSError).code)
+        }
     }
 }
 
@@ -2441,34 +2477,77 @@ enum PlayerStartupBenchmark {
     }
 }
 
+#if os(tvOS)
+private typealias AppPlayerStartupBenchmark = PlayerStartupBenchmark
+#else
+private typealias AppPlayerStartupBenchmark = BunnyPlayerStartupBenchmark
+
 @MainActor
-enum StremioPlayerStartupBenchmark {
+enum BunnyPlayerStartupBenchmark {
     static func measure(url: URL, timeoutSeconds: Double = 10) async throws -> Double {
-        #if canImport(KSPlayer)
-        let options = KSOptions()
-        options.preferredForwardBufferDuration = 0.5
-        let player = KSMEPlayer(url: url, options: options)
+        let policy = PlaybackPerformanceCore.policy(
+            url: url,
+            title: url.lastPathComponent,
+            player: .bunny
+        )
+        guard policy.decoder != .avFoundation else {
+            return try await PlayerStartupBenchmark.measure(
+                url: url,
+                timeoutSeconds: timeoutSeconds
+            )
+        }
+
+        let trustedOrigin: URL?
+        #if targetEnvironment(simulator)
+        trustedOrigin = ["127.0.0.1", "localhost", "::1"]
+            .contains(url.host?.lowercased() ?? "") ? url : nil
+        #else
+        trustedOrigin = nil
+        #endif
+
+        let decoder = BunnyNativeDecoder(
+            url: url,
+            trustedPrivateNetworkOrigin: trustedOrigin
+        )
+        let host = UIView(frame: CGRect(x: -4, y: -4, width: 2, height: 2))
+        host.alpha = 0.01
+        decoder.videoLayer.frame = host.bounds
+        host.layer.addSublayer(decoder.videoLayer)
+
+        var mediaInfo: BunnyNativeMediaInfo?
+        var visibleFrame = false
+        var renderedAudioSamples = 0
+        var failure: Error?
+        decoder.onOpen = { info in mediaInfo = info }
+        decoder.onFirstFrame = { visibleFrame = true }
+        decoder.onMetrics = { _, _, audio, _, _, _ in
+            renderedAudioSamples = audio
+        }
+        decoder.onFailure = { error in failure = error }
+
         let started = CFAbsoluteTimeGetCurrent()
-        player.prepareToPlay()
-        player.play()
+        decoder.start()
+        defer {
+            decoder.stop()
+            decoder.videoLayer.removeFromSuperlayer()
+        }
 
         let attempts = Int(timeoutSeconds / 0.05)
         for _ in 0..<attempts {
-            if player.isReadyToPlay && player.loadState == .playable {
-                player.pause()
-                player.shutdown()
-                return (CFAbsoluteTimeGetCurrent() - started) * 1_000
+            if let failure { throw failure }
+            if let mediaInfo {
+                decoder.play(atRate: 1)
+                let hasRenderedMedia = mediaInfo.hasVideo
+                    ? visibleFrame
+                    : renderedAudioSamples > 0
+                if hasRenderedMedia {
+                    decoder.pause()
+                    return (CFAbsoluteTimeGetCurrent() - started) * 1_000
+                }
             }
             try await Task.sleep(for: .milliseconds(50))
         }
-        player.pause()
-        player.shutdown()
-        throw E2EFailure("Stremio KSPlayer startup timed out")
-        #else
-        return try await PlayerStartupBenchmark.measure(
-            url: url,
-            timeoutSeconds: timeoutSeconds
-        )
-        #endif
+        throw E2EFailure("Bunny player startup timed out")
     }
 }
+#endif

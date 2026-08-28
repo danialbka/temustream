@@ -2,136 +2,57 @@
 
 # TemuStremio
 
-TemuStremio is an independent SwiftUI client for the public Stremio add-on
-protocol. It brings catalogs, search, details, episode browsing, add-on stream
-selection, a local library, and playback progress to iPhone, iPad, Apple TV,
-and Apple Watch.
+TemuStremio is an unofficial SwiftUI client for Stremio accounts and add-ons.
+The iPhone and iPad build is installed as **Bunny**, so it can sit beside another
+Stremio app on the same device.
 
-The Apple Watch app stands on its own. It talks to add-ons directly, can sign
-in and sync an account's library and installed add-ons, keeps watch-local
-playback progress, and plays HTTPS or HLS sources supported by AVPlayer. A
-streaming server you configure can resolve torrents or convert incompatible
-HTTP(S) video to HLS. It does not need the iPhone app and does not include
-Watch Together.
+Bunny includes catalogs, search, library sync, profiles, stream selection, and
+its own media player. It does not provide media or paid-service access. Use only
+add-ons and streams you are allowed to access.
 
-TemuStremio is unofficial and is not affiliated with or endorsed by Stremio or
-Temu. It does not provide media, paid-service access, or a DRM bypass. Use only
-add-ons and streams you are legally allowed to access.
+<p align="center">
+  <img src="docs/screenshots/home.png" width="30%" alt="Bunny home screen">
+  <img src="docs/screenshots/streams.png" width="30%" alt="Bunny stream picker">
+  <img src="docs/screenshots/account.png" width="30%" alt="Bunny Stremio sign-in screen">
+</p>
 
-## What is here
+## Connect your Stremio account
 
-| Platform | Main experience |
-| --- | --- |
-| iOS and iPadOS 16+ | Catalogs, account and add-on sync, profiles, library, resume state, several playback engines, and optional Watch Together rooms |
-| tvOS 18+ | A remote-first television interface with shelves, search, details, episodes, profiles, stream failover, and native transport controls |
-| watchOS 10+ | A standalone, watch-sized catalog, account/add-on sync, search, details, streams, library, progress, settings, manual URL entry, and native or server-assisted HLS playback |
+1. Open Bunny and tap **More**, then **Account**.
+2. Enter the email and password for your existing Stremio account.
+3. Tap **Sign in and sync**. Wait for the status to say **Synced now**.
+4. Use **Sync now** after changing your library or add-ons on another device.
 
-The iOS player can route media through the custom Bunny player, KSPlayer, or
-MobileVLCKit. Apple-native HLS uses AVFoundation where appropriate. Torrent and
-magnet sources need a compatible streaming server; no torrent engine is
-embedded in the app.
+Your library, removals, and installed add-ons are synchronized. On iPhone and
+iPad, the session token is kept in Keychain. Bunny does not save your password.
 
-There is no advertising, analytics SDK, or first-party tracking. The default
-build also leaves the optional Watch Together backend endpoints empty. Read
-[PRIVACY.md](PRIVACY.md) before connecting an account, add-on, streaming
-server, or self-hosted backend.
+If an add-on does not appear, open **Add-ons**, paste its complete HTTPS
+`manifest.json` URL, and tap **Validate and install**.
 
-## Build it
+## Build and install
 
-You need a Mac with Xcode, XcodeGen 2.42 or newer, Rust, and FFmpeg. The
-simulator and device scripts download the checksum-pinned MobileVLCKit build on
-first use.
+You need a Mac with Xcode, XcodeGen 2.42 or newer, and Rust 1.95.0.
 
 ```sh
 git clone https://github.com/danialbka/temustream.git
 cd temustream/minimal-app
-brew install xcodegen rust ffmpeg
+brew install xcodegen rust
 ./scripts/test.sh
-./scripts/build-simulator.sh
-open StremioSkeleton.xcodeproj
+SKELETON_PUBLIC_RELEASE=1 ./scripts/dev-workflow.sh build-bunny-device
 ```
 
-`project.yml` is the source of truth for the generated Xcode project. Run
-`xcodegen generate --spec project.yml` after changing targets or build
-settings.
+The IPA is written to
+`/private/tmp/stremio-dev-workflow/workspace/build/Bunny-device.ipa`. It has an
+ad hoc signature, so open it in Sideloadly and sign it with your own Apple ID
+before installing it on an iPhone or iPad.
 
-For a local sideloading handoff IPA:
+For App Store or TestFlight packaging, see [the release guide](docs/RELEASING.md).
+Player details and supported containers are in
+[the media-core notes](minimal-app/docs/RUST_MEDIA_CORE.md).
 
-```sh
-cd minimal-app
-SKELETON_PUBLIC_RELEASE=1 ./scripts/build-device.sh
-```
+## License
 
-That produces `minimal-app/build/StremioSkeleton-device.ipa`. It has no Apple
-distribution identity or provisioning profile and must be signed for your own
-device before installation. Public-release mode performs a clean app build and
-keeps the optional Watch Together endpoints empty even when this Mac has a
-local development configuration. TestFlight, App Store, and registered-device
-exports use a different signing flow. The complete checklist is in
-[docs/RELEASING.md](docs/RELEASING.md).
+The project is available under the [MIT License](LICENSE). See
+[third-party notices](THIRD_PARTY_NOTICES.md) for the exact release bundle.
 
-If Xcode stalls while reading an iCloud or File Provider checkout, use the
-repository's verified local-scratch path instead:
-
-```sh
-SKELETON_PUBLIC_RELEASE=1 ./scripts/dev-workflow.sh build-device
-```
-
-## Configure the app
-
-The default catalog works without a local backend. Add other manifest URLs from
-the Add-ons screen. Remote account, manifest, and API traffic must use HTTPS.
-Plain HTTP is limited to loopback and private-network streaming servers.
-
-If a selected add-on returns a torrent or magnet source, configure a compatible
-streaming server in Settings. Treat stream URLs as secrets when they contain
-temporary tokens or account identifiers.
-
-Watch Together is an optional iOS feature backed by Convex and LiveKit. Its
-local configuration files are ignored by Git, and its server credentials must
-stay in the provider environment. Setup details remain in
-[minimal-app/README.md](minimal-app/README.md). The sample backend is intended
-for development and needs rate limits, retention controls, monitoring, and an
-abuse policy before a public deployment.
-
-## Verify a change
-
-Start with the focused checks, then use the full gate before a release:
-
-```sh
-./scripts/public-release-check.sh
-./minimal-app/scripts/test.sh
-SKELETON_PUBLIC_RELEASE=1 ./minimal-app/scripts/verify.sh
-```
-
-The full gate builds the simulator and device handoff packages and runs the
-catalog, playback, E2E, and UI-state checks. A successful build is not proof of
-an App Store upload or a physical-device playback pass; those are separate
-release checks.
-
-## Repository map
-
-- `minimal-app/` contains the iOS, tvOS, and watchOS apps, shared Swift code,
-  Rust playback policy, tests, and build scripts.
-- `minimal-app/Backend/watch-together/` contains the optional Convex and
-  LiveKit development backend.
-- `enhancer/` is the older, separate Stremio IPA enhancer kept for historical
-  compatibility. Its install guide is [INSTALL.md](INSTALL.md).
-- `docs/` contains release guidance and generated-art provenance.
-
-## Contributing and security
-
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-Report suspected vulnerabilities through the private route described in
-[SECURITY.md](SECURITY.md), never in a public issue with credentials or private
-stream URLs attached.
-
-Original code in this repository is licensed under the [MIT License](LICENSE).
-Player and networking dependencies keep their own licenses. In particular,
-KSPlayer and the selected FFmpegKit package are GPL-3.0, which affects binary
-distribution. Review [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before
-shipping an IPA. This repository is not legal advice.
-
-The banner, app icon, and profile artwork were created for this project. Their
-generation briefs and checksums are recorded in
-[docs/ASSET_PROVENANCE.md](docs/ASSET_PROVENANCE.md).
+TemuStremio and Bunny are not affiliated with or endorsed by Stremio or Temu.

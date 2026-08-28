@@ -118,6 +118,36 @@ final class WatchStreamCompatibilityTests: XCTestCase {
         )
     }
 
+    func testPlaybackPersistencePolicyRemovesCredentialsAndTransientURLFields() throws {
+        let input = try XCTUnwrap(
+            URL(
+                string: "https://user:password@media.example.test/poster.jpg"
+                    + "?token=secret&expires=123#preview"
+            )
+        )
+
+        let sanitized = try XCTUnwrap(
+            WatchPlaybackPersistencePolicy.sanitizedReferenceURL(input)
+        )
+
+        XCTAssertEqual(sanitized.absoluteString, "https://media.example.test/poster.jpg")
+        XCTAssertNil(URLComponents(url: sanitized, resolvingAgainstBaseURL: false)?.user)
+        XCTAssertNil(URLComponents(url: sanitized, resolvingAgainstBaseURL: false)?.query)
+    }
+
+    func testPlaybackPersistencePolicyRejectsNonNetworkReferences() throws {
+        XCTAssertNil(
+            WatchPlaybackPersistencePolicy.sanitizedReferenceURL(
+                URL(fileURLWithPath: "/private/tmp/source.m3u8")
+            )
+        )
+        XCTAssertNil(
+            WatchPlaybackPersistencePolicy.sanitizedReferenceURL(
+                URL(string: "data:video/mp4;base64,AAAA")
+            )
+        )
+    }
+
     private func directStream(_ value: String) -> StremioSkeletonCore.Stream {
         StremioSkeletonCore.Stream(
             url: URL(string: value),

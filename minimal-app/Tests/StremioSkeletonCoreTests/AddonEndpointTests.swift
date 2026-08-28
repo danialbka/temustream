@@ -12,6 +12,12 @@ final class AddonEndpointTests: XCTestCase {
         XCTAssertThrowsError(try AddonEndpoint(manifestInput: "http://example.com/manifest.json"))
     }
 
+    func testRejectsManifestCredentialsInAuthority() {
+        XCTAssertThrowsError(
+            try AddonEndpoint(manifestInput: "https://user:password@example.com/manifest.json")
+        )
+    }
+
     func testAllowsLoopbackHTTPForDevelopment() throws {
         let endpoint = try AddonEndpoint(manifestInput: "http://127.0.0.1:8765/manifest.json")
         XCTAssertEqual(endpoint.manifestURL.host, "127.0.0.1")

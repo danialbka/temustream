@@ -1,6 +1,5 @@
 @preconcurrency import AVFoundation
 import Foundation
-import LiveKit
 
 extension Notification.Name {
     static let playbackVoiceCaptureDidChange = Notification.Name(
@@ -11,63 +10,67 @@ extension Notification.Name {
     )
 }
 
-/// Keeps movie playout and LiveKit capture under one AVAudioSession owner.
-///
-/// LiveKit already serializes AVAudioSession changes for its WebRTC engine.
-/// Registering the player as an external playout requirement lets the SDK
-/// transition between playback and play-and-record without deactivating the
-/// movie's audio renderer in between.
+/// Owns the movie playback audio session for the iOS release target.
 @MainActor
 enum PlaybackAudioSession {
-    private static var playbackRequirement: SessionRequirementHandle?
-    private static var fallbackPlaybackActive = false
+    private static var playbackActive = false
+    private static var contentChannelCount = 2
     private static var routeChangeObserver: NSObjectProtocol?
+    private static var spatialCapabilityObserver: NSObjectProtocol?
 
-    static var isPlaybackActive: Bool {
-        playbackRequirement != nil || fallbackPlaybackActive
-    }
+    static var isPlaybackActive: Bool { playbackActive }
 
     static func beginPlayback() {
         observeOutputRouteChangesIfNeeded()
         guard !isPlaybackActive else { return }
+        let session = AVAudioSession.sharedInstance()
         do {
-            playbackRequirement = try AudioManager.shared.acquireSessionRequirement(.playout)
-            NSLog("PLAYBACK_AUDIO_SESSION state=playout category=%@", currentCategory)
+            // Match the system TV/AVPlayer route. The long-form video policy is
+            // also the path Apple documents for reliable AirPlay buffering.
+            try session.setCategory(
+                .playback,
+                mode: .moviePlayback,
+                policy: .longFormVideo
+            )
+            // AirPods expose two hardware channels but can render a
+            // multichannel movie bed. Without this declaration iOS treats the
+            // app as stereo-only and doesn't offer the same Spatial Audio
+            // path as AVPlayer.
+            try session.setSupportsMultichannelContent(true)
+            try session.setActive(true)
+            playbackActive = true
+            applyPreferredOutputConfiguration(session: session)
+            NSLog(
+                "PLAYBACK_AUDIO_SESSION state=playout category=%@ policy=%lu route=%@ channels=%ld sample_rate=%.0f multichannel=%@",
+                currentCategory,
+                session.routeSharingPolicy.rawValue,
+                currentOutputTypes,
+                session.outputNumberOfChannels,
+                session.sampleRate,
+                session.supportsMultichannelContent ? "yes" : "no"
+            )
         } catch {
-            // Keep playback usable if LiveKit cannot acquire its requirement.
-            // This fallback is intentionally used only when the shared owner
-            // failed, so it cannot race normal microphone configuration.
-            let session = AVAudioSession.sharedInstance()
-            do {
-                try session.setCategory(.playback, mode: .moviePlayback)
-                try session.setActive(true)
-                fallbackPlaybackActive = true
-                NSLog(
-                    "PLAYBACK_AUDIO_SESSION state=fallback_playout error=%@",
-                    error.localizedDescription
-                )
-            } catch {
-                NSLog("PLAYBACK_AUDIO_SESSION state=failed error=%@", error.localizedDescription)
-            }
+            NSLog("PLAYBACK_AUDIO_SESSION state=failed error=%@", error.localizedDescription)
         }
     }
 
+    /// Supplies the channel count of the selected movie track. The source
+    /// remains correctly tagged at its native layout; this preference only
+    /// chooses the best hardware width supported by the current route.
+    static func configurePlaybackContent(channelCount: Int) {
+        contentChannelCount = min(max(channelCount, 1), 32)
+        guard isPlaybackActive else { return }
+        applyPreferredOutputConfiguration(session: AVAudioSession.sharedInstance())
+    }
+
     static func endPlayback() {
-        if let playbackRequirement {
-            self.playbackRequirement = nil
-            do {
-                try playbackRequirement.release()
-            } catch {
-                NSLog("PLAYBACK_AUDIO_SESSION state=release_failed error=%@", error.localizedDescription)
-            }
-        }
-        if fallbackPlaybackActive {
-            fallbackPlaybackActive = false
-            try? AVAudioSession.sharedInstance().setActive(
-                false,
-                options: .notifyOthersOnDeactivation
-            )
-        }
+        guard playbackActive else { return }
+        playbackActive = false
+        contentChannelCount = 2
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
     }
 
     static func reactivatePlayback() {
@@ -76,7 +79,9 @@ enum PlaybackAudioSession {
             return
         }
         do {
-            try AVAudioSession.sharedInstance().setActive(true)
+            let session = AVAudioSession.sharedInstance()
+            try session.setActive(true)
+            applyPreferredOutputConfiguration(session: session)
         } catch {
             NSLog("PLAYBACK_AUDIO_SESSION state=reactivate_failed error=%@", error.localizedDescription)
         }
@@ -111,7 +116,7 @@ enum PlaybackAudioSession {
         case .newDeviceAvailable:
             true
         // Do not force playback onto the speaker after headphones disappear.
-        // AVPlayer/LiveKit retain ownership of their normal privacy pause.
+        // AVPlayer retains ownership of its normal privacy pause.
         case .unknown, .oldDeviceUnavailable, .categoryChange, .override,
              .wakeFromSleep, .noSuitableRouteForCategory,
              .routeConfigurationChange:
@@ -136,6 +141,9 @@ enum PlaybackAudioSession {
                 guard let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason)
                 else { return }
                 if reason == .oldDeviceUnavailable {
+                    applyPreferredOutputConfiguration(
+                        session: AVAudioSession.sharedInstance()
+                    )
                     // Preserve Apple's headphones-unplug privacy behavior for
                     // custom renderers that do not pause automatically.
                     NotificationCenter.default.post(
@@ -146,8 +154,53 @@ enum PlaybackAudioSession {
                     return
                 }
                 _ = recoverPlaybackAfterRouteChange(reasonRawValue: rawReason)
+                applyPreferredOutputConfiguration(
+                    session: AVAudioSession.sharedInstance()
+                )
             }
         }
+        spatialCapabilityObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.spatialPlaybackCapabilitiesChangedNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                guard isPlaybackActive else { return }
+                applyPreferredOutputConfiguration(
+                    session: AVAudioSession.sharedInstance()
+                )
+            }
+        }
+    }
+
+    private static func applyPreferredOutputConfiguration(session: AVAudioSession) {
+        let maximumChannels = max(session.maximumOutputNumberOfChannels, 1)
+        let preferredChannels = min(contentChannelCount, maximumChannels)
+        if session.preferredOutputNumberOfChannels != preferredChannels {
+            do {
+                try session.setPreferredOutputNumberOfChannels(preferredChannels)
+            } catch {
+                NSLog(
+                    "PLAYBACK_AUDIO_SESSION output_configuration=failed source_channels=%ld preferred_channels=%ld maximum_channels=%ld error=%@",
+                    contentChannelCount,
+                    preferredChannels,
+                    maximumChannels,
+                    error.localizedDescription
+                )
+                return
+            }
+        }
+        let spatialAudioEnabled = session.currentRoute.outputs.contains {
+            $0.isSpatialAudioEnabled
+        }
+        NSLog(
+            "PLAYBACK_AUDIO_SESSION output_configuration=ready source_channels=%ld preferred_channels=%ld actual_channels=%ld maximum_channels=%ld spatial=%@",
+            contentChannelCount,
+            preferredChannels,
+            session.outputNumberOfChannels,
+            maximumChannels,
+            spatialAudioEnabled ? "enabled" : "disabled"
+        )
     }
 
     static func voiceCaptureDidChange(isEnabled: Bool) {
@@ -168,79 +221,14 @@ enum PlaybackAudioSession {
         return "\(session.category.rawValue)/\(session.mode.rawValue)"
     }
 
+    private static var currentOutputTypes: String {
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+            .map { $0.portType.rawValue }
+        return outputs.isEmpty ? "none" : outputs.joined(separator: ",")
+    }
+
     #if targetEnvironment(simulator)
-    private static var microphoneAuditRunning = false
-
-    /// Starts WebRTC's actual microphone engine without joining a room. This
-    /// simulator-only hook exercises the same playout + recording transition
-    /// while a real Bunny stream is running.
-    static func startMicrophoneAuditIfRequested() async {
-        guard ProcessInfo.processInfo.environment["SKELETON_MICROPHONE_AUDIT"] == "1",
-              !microphoneAuditRunning
-        else { return }
-        guard await MicrophonePermissionRequester.request() else {
-            NSLog("MICROPHONE_AUDIT permission=denied")
-            return
-        }
-        NSLog("MICROPHONE_AUDIT permission=granted state=starting")
-        // WebRTC may synchronously rebuild its AVAudioEngine while changing
-        // from playout to playout + recording. Keep that work off MainActor so
-        // accepting the system permission alert cannot freeze player UI.
-        let startError = await Task.detached(priority: .userInitiated) {
-            do {
-                try AudioManager.shared.startLocalRecording()
-                return nil as String?
-            } catch {
-                return error.localizedDescription
-            }
-        }.value
-        if let startError {
-            NSLog("MICROPHONE_AUDIT state=failed error=%@", startError)
-        } else {
-            microphoneAuditRunning = true
-            voiceCaptureDidChange(isEnabled: true)
-            NSLog("MICROPHONE_AUDIT state=recording category=%@", currentCategory)
-        }
-    }
-
-    static func stopMicrophoneAuditIfNeeded() {
-        guard microphoneAuditRunning else { return }
-        Task.detached(priority: .userInitiated) {
-            do {
-                try AudioManager.shared.stopLocalRecording()
-            } catch {
-                NSLog(
-                    "MICROPHONE_AUDIT state=stop_failed error=%@",
-                    error.localizedDescription
-                )
-            }
-        }
-        microphoneAuditRunning = false
-        voiceCaptureDidChange(isEnabled: false)
-    }
+    static func startMicrophoneAuditIfRequested() async {}
+    static func stopMicrophoneAuditIfNeeded() {}
     #endif
-}
-
-/// AVAudioSession invokes its legacy permission callback on a private TCC
-/// queue. Keeping this helper explicitly nonisolated prevents Swift 6 from
-/// asserting that the callback already runs on MainActor before it resumes the
-/// awaiting UI task.
-enum MicrophonePermissionRequester {
-    nonisolated static func request() async -> Bool {
-        let session = AVAudioSession.sharedInstance()
-        switch session.recordPermission {
-        case .granted:
-            return true
-        case .denied:
-            return false
-        case .undetermined:
-            return await withCheckedContinuation { continuation in
-                session.requestRecordPermission { granted in
-                    continuation.resume(returning: granted)
-                }
-            }
-        @unknown default:
-            return false
-        }
-    }
 }

@@ -1,5 +1,9 @@
 # Install Stremio iOS Enhancer V7
 
+> **Legacy enhancer only:** this guide modifies an old official Stremio IPA.
+> It does not build, sign, or install the Bunny app in `minimal-app/`, and none
+> of its KSPlayer or VLCKit notes apply to the Bunny release target.
+
 This guide installs the enhancer into Stremio's official unsigned IPA on your
 own Mac. No Stremio application binary, Apple credential, signing certificate,
 or provisioning profile is distributed by this project.
