@@ -39,6 +39,7 @@ final class WatchPlayerController: ObservableObject {
     @Published private(set) var subtitleOptions: [WatchPlayerMediaOption] = []
     @Published private(set) var subtitlesAreOff = true
     @Published private(set) var playbackEndedCount = 0
+    @Published private(set) var debugSnapshot: NativePlaybackPerformanceSnapshot?
 
     private let url: URL
     private let preferredAudioLanguage: String
@@ -49,11 +50,16 @@ final class WatchPlayerController: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var failureObserver: NSObjectProtocol?
     private var mediaSelectionObserver: NSObjectProtocol?
+    private var stallObserver: NSObjectProtocol?
     private var audioGroup: AVMediaSelectionGroup?
     private var subtitleGroup: AVMediaSelectionGroup?
     private var audioByID: [String: AVMediaSelectionOption] = [:]
     private var subtitleByID: [String: AVMediaSelectionOption] = [:]
     private var mediaSelectionLoaded = false
+    private var performanceTracker: NativePlaybackPerformanceTracker?
+    private var nextPerformanceLogAt: TimeInterval = 0
+    private var lastPerformancePublishAt: TimeInterval = -.infinity
+    private var notificationStallCount = 0
 
     init(
         url: URL,
@@ -76,6 +82,14 @@ final class WatchPlayerController: ObservableObject {
         guard player.currentItem == nil else { return }
         status = .loading
         mediaSelectionLoaded = false
+        debugSnapshot = nil
+        nextPerformanceLogAt = 0
+        lastPerformancePublishAt = -.infinity
+        notificationStallCount = 0
+        performanceTracker = NativePlaybackPerformanceTracker(
+            startedAt: ProcessInfo.processInfo.systemUptime,
+            initialPosition: resumePosition
+        )
         let item = AVPlayerItem(url: url)
         player.replaceCurrentItem(with: item)
         installObservers(for: item)
@@ -219,6 +233,17 @@ final class WatchPlayerController: ObservableObject {
                 refreshPublishedMediaSelection(for: item)
             }
         }
+        stallObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                notificationStallCount += 1
+                updatePerformanceDiagnostics()
+            }
+        }
     }
 
     private func removeObservers() {
@@ -237,6 +262,10 @@ final class WatchPlayerController: ObservableObject {
         if let mediaSelectionObserver {
             NotificationCenter.default.removeObserver(mediaSelectionObserver)
             self.mediaSelectionObserver = nil
+        }
+        if let stallObserver {
+            NotificationCenter.default.removeObserver(stallObserver)
+            self.stallObserver = nil
         }
     }
 
@@ -267,6 +296,54 @@ final class WatchPlayerController: ObservableObject {
         @unknown default:
             status = .loading
         }
+        updatePerformanceDiagnostics()
+    }
+
+    private func updatePerformanceDiagnostics() {
+        guard NativePlaybackDiagnostics.isEnabled,
+              var tracker = performanceTracker,
+              let item = player.currentItem
+        else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let event = item.accessLog()?.events.last
+        let eventStalls = event.flatMap { $0.numberOfStalls >= 0 ? $0.numberOfStalls : nil }
+        let snapshot = tracker.observe(
+            at: now,
+            position: position,
+            isPlaying: player.timeControlStatus == .playing,
+            bufferSeconds: bufferedSeconds(for: item),
+            stalls: max(eventStalls ?? 0, notificationStallCount),
+            droppedVideoFrames: event.flatMap {
+                $0.numberOfDroppedVideoFrames >= 0 ? $0.numberOfDroppedVideoFrames : nil
+            },
+            observedBitrate: event.flatMap { $0.observedBitrate > 0 ? $0.observedBitrate : nil },
+            indicatedBitrate: event.flatMap {
+                $0.indicatedBitrate > 0 ? $0.indicatedBitrate : nil
+            }
+        )
+        performanceTracker = tracker
+        if now - lastPerformancePublishAt >= 1 {
+            debugSnapshot = snapshot
+            lastPerformancePublishAt = now
+        }
+        if snapshot.startupMilliseconds != nil,
+           snapshot.wallDuration >= nextPerformanceLogAt {
+            NSLog("WATCH_PLAYBACK_METRIC %@", snapshot.logDescription)
+            nextPerformanceLogAt += 5
+        }
+    }
+
+    private func bufferedSeconds(for item: AVPlayerItem) -> TimeInterval? {
+        for value in item.loadedTimeRanges {
+            let range = value.timeRangeValue
+            let start = range.start.seconds
+            let end = range.end.seconds
+            guard start.isFinite, end.isFinite else { continue }
+            if position >= start - 0.05, position <= end + 0.05 {
+                return max(end - position, 0)
+            }
+        }
+        return 0
     }
 
     private func loadMediaSelectionIfNeeded() {
@@ -529,6 +606,14 @@ struct WatchPlayerView: View {
                 expandedVideo
             } else {
                 playerControls
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if NativePlaybackDiagnostics.isEnabled,
+               let snapshot = controller.debugSnapshot {
+                WatchPlaybackDebugOverlay(snapshot: snapshot)
+                    .padding(.top, 2)
+                    .padding(.leading, 2)
             }
         }
         .sheet(isPresented: $showsTracks) {
@@ -794,6 +879,53 @@ struct WatchPlayerView: View {
         .buttonStyle(.bordered)
         .buttonBorderShape(.circle)
         .accessibilityLabel(label)
+    }
+}
+
+private struct WatchPlaybackDebugOverlay: View {
+    let snapshot: NativePlaybackPerformanceSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 3) {
+                Circle().fill(healthColor).frame(width: 5, height: 5)
+                Text(snapshot.health == .good ? "GOOD" : "PERF")
+            }
+            Text("start \(milliseconds(snapshot.startupMilliseconds))")
+            Text("clock \(ratio(snapshot.clockRatio))")
+            Text("stall \(snapshot.stalls) · buf \(seconds(snapshot.bufferSeconds))")
+        }
+        .font(.system(size: 7, weight: .semibold, design: .monospaced))
+        .foregroundStyle(.white)
+        .padding(4)
+        .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 5))
+        .overlay {
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(healthColor.opacity(0.9), lineWidth: 0.5)
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("watch-player-debug-overlay")
+    }
+
+    private var healthColor: Color {
+        switch snapshot.health {
+        case .warmingUp: .yellow
+        case .good: .green
+        case .attention: .orange
+        }
+    }
+
+    private func milliseconds(_ value: Double?) -> String {
+        value.map { String(format: "%.0fms", $0) } ?? "—"
+    }
+
+    private func seconds(_ value: Double?) -> String {
+        value.map { String(format: "%.1fs", $0) } ?? "—"
+    }
+
+    private func ratio(_ value: Double?) -> String {
+        value.map { String(format: "%.2fx", $0) } ?? "—"
     }
 }
 

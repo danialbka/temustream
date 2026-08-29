@@ -72,7 +72,7 @@ struct TVMediaLink: View {
         preferredManifestURL: preferredManifestURL
       )
     } label: {
-      VStack(alignment: .leading, spacing: 12) {
+      VStack(alignment: .leading, spacing: 0) {
         ZStack(alignment: .bottom) {
           TVRemoteImage(url: item.poster)
             .frame(width: TVTheme.posterWidth, height: TVTheme.posterHeight)
@@ -90,17 +90,31 @@ struct TVMediaLink: View {
             .frame(height: 7)
           }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .frame(width: TVTheme.posterWidth, height: TVTheme.posterHeight)
 
-        Text(item.name)
-          .font(.headline)
-          .lineLimit(1)
-        Text(progress.map(resumeLabel) ?? secondaryLabel)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
+        VStack(alignment: .leading, spacing: 5) {
+          Text(item.name)
+            .font(.headline)
+            .lineLimit(2)
+            .minimumScaleFactor(0.82)
+            .frame(height: 48, alignment: .topLeading)
+          Text(progress.map(resumeLabel) ?? secondaryLabel)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(width: TVTheme.posterWidth, height: 102, alignment: .topLeading)
       }
-      .frame(width: TVTheme.posterWidth, alignment: .leading)
+      .frame(width: TVTheme.posterWidth, height: TVTheme.posterHeight + 102, alignment: .topLeading)
+      .background(TVTheme.surface)
+      .clipShape(
+        RoundedRectangle(cornerRadius: TVTheme.cardCornerRadius, style: .continuous)
+      )
+      .contentShape(
+        RoundedRectangle(cornerRadius: TVTheme.cardCornerRadius, style: .continuous)
+      )
     }
     .buttonStyle(.card)
     .accessibilityIdentifier("tv-media-\(item.type)-\(item.id)")

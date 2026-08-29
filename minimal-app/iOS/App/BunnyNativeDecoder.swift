@@ -2672,6 +2672,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             let playableAudioTracks = audioTracks.filter(Self.isApplePlayable)
             let video = Self.defaultTrack(in: playableVideoTracks)
             let selectedAudio = Self.defaultTrack(in: playableAudioTracks)
+            var selectedAudioStreamIndex = selectedAudio.map { Int($0.raw.index) }
             if !videoTracks.isEmpty, video == nil {
                 throw BunnyNativeDecoderError.unsupportedCodec(
                     videoTracks.map(\.codecID).joined(separator: ", ")
@@ -2916,7 +2917,8 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                     selectionChanges = applyPendingSelections(
                         session: session,
                         pgsDecoder: pgsDecoder,
-                        descriptors: descriptors
+                        descriptors: descriptors,
+                        selectedAudioStreamIndex: &selectedAudioStreamIndex
                     )
                     if case let .packet(raw)? = completedReadResult,
                        let descriptor = descriptors[safe: raw.trackIndex],
@@ -2936,6 +2938,20 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 if selectionChanges.audio {
                     packetReservoir.removeAll(kind: UInt32(STREMIO_MEDIA_TRACK_AUDIO))
                     isRefillingPacketReservoir = true
+                    let reprimeTime = currentTime
+                    stateLock.withLock {
+                        pendingSeek = max(reprimeTime, 0)
+                        activeReader?.interruptForSeek()
+                    }
+                    NSLog(
+                        "BUNNY_AUDIO_SWITCH action=reprime position=%.3f stream=%@",
+                        reprimeTime,
+                        selectedAudioStreamIndex.map(String.init) ?? "none"
+                    )
+                    // Do not let the shared clock consume the stale audio
+                    // queue bookkeeping for even one iteration. The pending
+                    // seek rebuilds both renderers at this exact playhead.
+                    continue
                 }
                 if selectionChanges.subtitle {
                     packetReservoir.removeAll(kind: UInt32(STREMIO_MEDIA_TRACK_SUBTITLE))
@@ -3362,10 +3378,33 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                     }
                 case UInt32(STREMIO_MEDIA_TRACK_SUBTITLE):
                     if descriptor.raw.codec == UInt32(STREMIO_MEDIA_CODEC_PGS) {
-                        try publishPgsPacket(
-                            packet,
-                            decoder: pgsDecoder
-                        )
+                        do {
+                            try publishPgsPacket(
+                                packet,
+                                decoder: pgsDecoder
+                            )
+                        } catch {
+                            // A corrupt or non-conforming bitmap-subtitle
+                            // block must not tear down otherwise healthy
+                            // video and audio. Matroska stores each HDMV PGS
+                            // segment in its own Block, so discard this Block
+                            // and reset only subtitle assembly state. A later
+                            // complete epoch can resume subtitle rendering.
+                            stremio_pgs_decoder_reset(pgsDecoder)
+                            publish { [weak self] in
+                                self?.onBitmapSubtitle?(
+                                    nil,
+                                    packet.presentationTime.seconds,
+                                    0
+                                )
+                            }
+                            NSLog(
+                                "BUNNY_SUBTITLE_DROP codec=PGS pts=%.3f bytes=%ld error=%@",
+                                packet.presentationTime.seconds,
+                                packet.data.count,
+                                error.localizedDescription
+                            )
+                        }
                     } else {
                         let text = Self.normalizedSubtitleText(
                             packet.data,
@@ -3707,7 +3746,8 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     private func applyPendingSelections(
         session: OpaquePointer,
         pgsDecoder: OpaquePointer,
-        descriptors: [BunnyNativeTrackDescriptor]
+        descriptors: [BunnyNativeTrackDescriptor],
+        selectedAudioStreamIndex: inout Int?
     ) -> (audio: Bool, subtitle: Bool) {
         let selections = stateLock.withLock { () -> (Int?, Int?) in
             defer {
@@ -3722,7 +3762,12 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         var audioChanged = false
         var subtitleChanged = false
         if let audio = selections.0 {
-            if let descriptor = descriptors.first(where: {
+            if !PlaybackTrackSelectionPacketPolicy.requiresAudioTimelineReprime(
+                currentStreamIndex: selectedAudioStreamIndex,
+                requestedStreamIndex: audio
+            ) {
+                NSLog("BUNNY_AUDIO_SWITCH action=noop stream=%ld", audio)
+            } else if let descriptor = descriptors.first(where: {
                 Int($0.raw.index) == audio && Self.isApplePlayable($0)
             }), stremio_media_select_track(
                 session,
@@ -3730,6 +3775,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 Int32(audio)
             ) == 1 {
                 audioChanged = true
+                selectedAudioStreamIndex = audio
                 audioRenderer.flush()
                 configureAudioRenderer(for: descriptor)
                 publish {

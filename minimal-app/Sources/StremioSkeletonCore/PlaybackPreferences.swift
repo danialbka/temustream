@@ -166,3 +166,55 @@ enum StreamFailoverPolicy {
         Array(stride(from: countdownSeconds, through: 1, by: -1))
     }
 }
+
+enum CustomPlaybackStartupPhase: String, Equatable, Sendable {
+    case opening
+    case firstFrame = "first-frame"
+}
+
+struct CustomPlaybackStartupTimeout: Equatable, Sendable {
+    let phase: CustomPlaybackStartupPhase
+    let limit: TimeInterval
+}
+
+/// Keeps source failover bounded without treating a slow remote container probe
+/// as a dead stream. Remote media gets an opening budget first, then a fresh
+/// first-frame budget after the demuxer has positively identified its tracks.
+enum CustomPlaybackStartupPolicy {
+    static let localAttemptTimeout: TimeInterval = 20
+    static let remoteOpeningTimeout: TimeInterval = 60
+    static let remoteFirstFrameTimeout: TimeInterval = 20
+    static let remoteUltraHDFirstFrameTimeout: TimeInterval = 35
+
+    static func expiredTimeout(
+        attemptElapsed: TimeInterval,
+        openElapsed: TimeInterval?,
+        isRemote: Bool,
+        isUltraHD: Bool
+    ) -> CustomPlaybackStartupTimeout? {
+        if !isRemote {
+            guard attemptElapsed >= localAttemptTimeout else { return nil }
+            return CustomPlaybackStartupTimeout(
+                phase: openElapsed == nil ? .opening : .firstFrame,
+                limit: localAttemptTimeout
+            )
+        }
+
+        guard let openElapsed else {
+            guard attemptElapsed >= remoteOpeningTimeout else { return nil }
+            return CustomPlaybackStartupTimeout(
+                phase: .opening,
+                limit: remoteOpeningTimeout
+            )
+        }
+
+        let firstFrameTimeout = isUltraHD
+            ? remoteUltraHDFirstFrameTimeout
+            : remoteFirstFrameTimeout
+        guard openElapsed >= firstFrameTimeout else { return nil }
+        return CustomPlaybackStartupTimeout(
+            phase: .firstFrame,
+            limit: firstFrameTimeout
+        )
+    }
+}

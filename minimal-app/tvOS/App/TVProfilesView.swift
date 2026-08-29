@@ -10,13 +10,10 @@ struct TVProfilesView: View {
   var body: some View {
     ScrollView(.vertical, showsIndicators: false) {
       VStack(alignment: .leading, spacing: 48) {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("Who’s Watching?")
-            .font(.system(size: 54, weight: .bold))
-          Text("Each profile keeps separate recommendations, My List, searches, and progress")
-            .font(.title3)
-            .foregroundStyle(.secondary)
-        }
+        TVScreenHeader(
+          title: "Who’s Watching?",
+          subtitle: "Each profile keeps separate recommendations, My List, searches, and progress"
+        )
 
         if let snapshot = model.viewingProfileSnapshot {
           ScrollView(.horizontal, showsIndicators: false) {

@@ -54,8 +54,8 @@ selects either Apple's native asset path or the Rust direct-container path.
 | App entry and test routes | `iOS/App/StremioSkeletonApp.swift` | App composition plus Simulator-only fixture/stress entry points |
 | App state | `iOS/App/AppModel.swift` | Catalog/search/details/streams, library/account state, progress, and playback-plan orchestration |
 | Main SwiftUI | `iOS/App/Views.swift` | Tabs, home grid, continue watching, details, episode streams, library, add-ons, settings, account |
-| Apple TV SwiftUI | `tvOS/App/` | Sidebar navigation, focus shelves/cards, cinematic details, episode and stream selection, profiles, settings, and native AVKit playback |
-| Apple Watch SwiftUI | `watchOS/App/` | Standalone catalogs, search, secure Stremio sign-in, account-isolated library/progress and add-on sync, configurable streaming-server conversion, Digital Crown seeking, and native AVKit playback |
+| Apple TV SwiftUI | `tvOS/App/` | Sidebar navigation, focus shelves/cards, cinematic details, cached-first Current/Big files stream ordering, profiles, settings, and native AVKit playback |
+| Apple Watch SwiftUI | `watchOS/App/` | Standalone catalogs, search, secure Stremio sign-in, account-isolated library/progress and add-on sync, compact cached-first stream ordering, configurable streaming-server conversion, Digital Crown seeking, and native AVKit playback |
 | Apple Watch compatibility | `Sources/StremioSkeletonCore/WatchStreamCompatibility.swift` | Allows native HTTPS HLS/video plus HLS from the exact configured server origin; unsupported sources receive an actionable reason instead of being forced through AVPlayer |
 | Apple Watch distribution | `project.yml`, `watchOS/Container/Info.plist` | Single executable watchOS app target plus the nonlaunchable `application.watchapp2-container` root stub Apple requires to package a watch-only App Store archive |
 | Theme | `iOS/App/AppTheme.swift`, `Sources/StremioSkeletonCore/AppearancePreferences.swift` | Light/dark and accent preferences |

@@ -299,7 +299,9 @@ struct HomeView: View {
                 LazyHStack(spacing: 12) {
                     ForEach(model.continueWatching) { entry in
                         ContinueWatchingCard(entry: entry)
-                            .gesture(continueWatchingGesture(for: entry))
+                            .highPriorityGesture(
+                                continueWatchingGesture(for: entry)
+                            )
                             .accessibilityAction(named: Text("Resume playback")) {
                                 resumeContinueWatching(entry)
                             }

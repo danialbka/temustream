@@ -19,7 +19,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.3</string>
 	<key>CFBundleVersion</key>
-	<string>21</string>
+	<string>32</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -27,9 +27,9 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Bunny connects to a streaming server on your local network only when you configure one for playback.</string>
-	<key>WKPrefersNetworkUponForeground</key>
-	<true/>
 	<key>WKApplication</key>
+	<true/>
+	<key>WKPrefersNetworkUponForeground</key>
 	<true/>
 	<key>WKWatchOnly</key>
 	<true/>

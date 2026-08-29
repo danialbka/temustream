@@ -113,6 +113,7 @@ AVPlayer after conversion to HLS.
 | Library and progress | Implemented | Per-profile My Library, continue watching, 15-second checkpoints, completion state, and removal. Resolved URLs are never stored. |
 | Ratings and For You | Implemented | Per-profile dislike/like/love signals, local explainable ranking, visible-only impression recording, and reset controls. |
 | Catalog source ranking | Implemented | A proven source is promoted using only hashed, stable metadata after AVPlayer reaches ready state. |
+| Stream ordering | Implemented | Current and Big files modes share the iPhone ranking policy; cached sources stay at the top in both modes and no provider result is hidden. |
 | Direct playback | Implemented | Native AVPlayer path for compatible HTTPS HLS and direct/negotiated HTTPS video. |
 | Audio and captions | Implemented for embedded tracks | AVPlayer audible/legible selection, per-profile language preference, captions off/on, and system caption rendering. |
 | External subtitle files | Platform-native limit | watchOS AVPlayer does not attach a loose Stremio WebVTT/SRT URL as a selectable track. It must already be embedded/muxed or included by an authorized HLS server. Custom subtitle renderers are intentionally not bundled. |

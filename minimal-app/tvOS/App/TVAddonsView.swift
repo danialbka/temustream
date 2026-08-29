@@ -10,13 +10,10 @@ struct TVAddonsView: View {
   var body: some View {
     ScrollView(.vertical, showsIndicators: false) {
       VStack(alignment: .leading, spacing: 44) {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("Add-ons")
-            .font(.system(size: 54, weight: .bold))
-          Text("Connect Stremio-compatible catalogs and stream providers")
-            .font(.title3)
-            .foregroundStyle(.secondary)
-        }
+        TVScreenHeader(
+          title: "Add-ons",
+          subtitle: "Connect Stremio-compatible catalogs and stream providers"
+        )
 
         VStack(alignment: .leading, spacing: 20) {
           TVSectionTitle(
@@ -84,7 +81,7 @@ struct TVAddonsView: View {
         }
       }
       .padding(.horizontal, TVTheme.horizontalInset)
-      .padding(.top, 125)
+      .padding(.top, TVTheme.screenTopInset)
       .padding(.bottom, 90)
     }
     .background(TVTheme.background)

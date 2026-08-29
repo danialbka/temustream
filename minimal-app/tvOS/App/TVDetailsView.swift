@@ -1,10 +1,16 @@
 import SwiftUI
 
+private enum TVDetailsActionFocus: Hashable {
+  case library
+}
+
 struct TVDetailsView: View {
   @EnvironmentObject private var model: AppModel
   let seed: MetaItem
   let preferredManifestURL: URL?
 
+  @AppStorage("stream-ranking-mode") private var streamRankingMode =
+    StreamRankingMode.current
   @State private var item: MetaItem
   @State private var movieProviders: [StreamProviderGroup] = []
   @State private var selectedSeason: Int?
@@ -14,6 +20,7 @@ struct TVDetailsView: View {
   @State private var isQuickPlaying = false
   @State private var playbackRequest: TVPlaybackRequest?
   @State private var actionError: String?
+  @FocusState private var focusedAction: TVDetailsActionFocus?
 
   init(seed: MetaItem, preferredManifestURL: URL? = nil) {
     self.seed = seed
@@ -23,7 +30,7 @@ struct TVDetailsView: View {
 
   var body: some View {
     ScrollView(.vertical, showsIndicators: false) {
-      LazyVStack(alignment: .leading, spacing: 52) {
+      LazyVStack(alignment: .leading, spacing: 44) {
         hero
 
         if item.type == "series" {
@@ -63,11 +70,11 @@ struct TVDetailsView: View {
 
   private var hero: some View {
     TVBackdrop(item: item)
-      .frame(height: 760)
+      .frame(height: 700)
       .overlay(alignment: .bottomLeading) {
-        HStack(alignment: .bottom, spacing: 50) {
+        HStack(alignment: .bottom, spacing: 46) {
           TVRemoteImage(url: item.poster)
-            .frame(width: 290, height: 425)
+            .frame(width: 270, height: 396)
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             .shadow(color: .black.opacity(0.55), radius: 24, y: 14)
 
@@ -78,7 +85,7 @@ struct TVDetailsView: View {
             }
 
             Text(item.name)
-              .font(.system(size: 64, weight: .bold))
+              .font(.system(size: 60, weight: .bold))
               .lineLimit(2)
 
             metadataLine
@@ -87,7 +94,7 @@ struct TVDetailsView: View {
               Text(description)
                 .font(.title3)
                 .foregroundStyle(Color.white.opacity(0.82))
-                .lineLimit(4)
+                .lineLimit(3)
                 .frame(maxWidth: 1_050, alignment: .leading)
             }
 
@@ -103,7 +110,7 @@ struct TVDetailsView: View {
           .frame(maxWidth: 1_160, alignment: .leading)
         }
         .padding(.horizontal, TVTheme.horizontalInset)
-        .padding(.bottom, 56)
+        .padding(.bottom, 46)
       }
   }
 
@@ -161,8 +168,10 @@ struct TVDetailsView: View {
             : model.isInLibrary(item) ? "In My List" : "Add to My List",
           systemImage: model.isInLibrary(item) ? "checkmark" : "plus"
         )
+        .foregroundStyle(focusedAction == .library ? Color.black : Color.white)
       }
       .buttonStyle(.bordered)
+      .focused($focusedAction, equals: .library)
       .disabled(isUpdatingLibrary)
       .accessibilityIdentifier("tvos-library-toggle")
 
@@ -254,6 +263,9 @@ struct TVDetailsView: View {
           systemImage: "play.slash"
         )
       } else {
+        TVStreamRankingControl(selection: $streamRankingMode)
+          .padding(.horizontal, TVTheme.horizontalInset)
+
         TVStreamShelf(streams: Array(rankedMovieStreams.prefix(30))) { selected in
           playbackRequest = TVPlaybackRequest.selected(
             selected.id,
@@ -328,7 +340,7 @@ struct TVDetailsView: View {
   }
 
   private var rankedMovieStreams: [TVPresentedStream] {
-    tvRankedStreams(from: movieProviders)
+    tvRankedStreams(from: movieProviders, mode: streamRankingMode)
   }
 
   private var allEpisodes: [Video] {
@@ -409,7 +421,7 @@ struct TVDetailsView: View {
         return
       }
       let providers = await model.streamProviders(for: item, videoID: episode.id)
-      let streams = tvRankedStreams(from: providers)
+      let streams = tvRankedStreams(from: providers, mode: streamRankingMode)
       let progress = model.episodeProgress(episode, in: item)
       playbackRequest = TVPlaybackRequest.oneTap(
         streams: streams,

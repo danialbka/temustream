@@ -42,9 +42,11 @@ typecheck() {
     Sources/StremioSkeletonCore/TitleTrivia.swift \
     Sources/StremioSkeletonCore/WikipediaTrivia.swift \
     Sources/StremioSkeletonCore/MediaContainerSniffer.swift \
+    Sources/StremioSkeletonCore/StreamPresentationPolicy.swift \
     Sources/StremioSkeletonCore/TorBoxStreamSelection.swift \
     Sources/StremioSkeletonCore/WatchStreamCompatibility.swift \
     Sources/StremioSkeletonCore/WatchPlaybackFallback.swift \
+    Sources/StremioSkeletonCore/NativePlaybackPerformance.swift \
     iOS/App/TorBoxPlaybackResolver.swift
   set -- "$@" $(rg --files watchOS/App | LC_ALL=C sort)
   xcrun --sdk watchsimulator swiftc \

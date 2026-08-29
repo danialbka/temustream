@@ -146,10 +146,6 @@ struct BunnyPlayerScreen: View {
         .onChange(of: viewportMode) { mode in
             NSLog("PLAYER_VIEWPORT engine=Bunny mode=%@", mode.rawValue)
         }
-        .onChange(of: model.noticeMessage) { message in
-            guard let message else { return }
-            showToast(message, duration: 4)
-        }
         .task(id: retryRevision) { await runPlayback() }
         .onAppear {
             onControlsVisibilityChanged?(controlsVisible)
@@ -487,7 +483,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     @Published private(set) var pictureInPictureSupported = false
     @Published private(set) var debugSnapshot = BunnyDebugSnapshot.waiting
     @Published private(set) var usesCustomDecoder = false
-    @Published private(set) var noticeMessage: String?
 
     private let plan: PlaybackPlan
     private let title: String
@@ -530,14 +525,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private var applicationIsActive = true
     private var applicationLifecycleRevision = 0
     private var resumeAfterCancelledScrub = false
-    private var pendingPlaybackNotice: String?
-
-    // Rust range reads are bounded at the transport edge. Resume receives a
-    // separate window in which an actual post-seek frame must arrive.
-    private static let customResumeSeekTimeout: TimeInterval = 21
-    private static let customPostSeekMediaTimeout: TimeInterval = 8
-    private static let resumeFallbackNotice =
-        "Resume took too long, so Bunny started this stream from the beginning."
 
     init(
         plan: PlaybackPlan,
@@ -735,7 +722,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                     let restored = await performSeek(to: target, resume: true)
                     if !restored {
                         resumePosition = 0
-                        pendingPlaybackNotice = Self.resumeFallbackNotice
                         _ = await seekCompletion(to: 0, tolerance: .zero)
                         resumePlayback()
                     }
@@ -754,7 +740,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                     isPreparing = false
                     statusMessage = ""
                     configurePictureInPicture()
-                    publishPendingPlaybackNotice()
                     if !url.isFileURL {
                         item.preferredForwardBufferDuration = 8
                     }
@@ -795,7 +780,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                 didRestartAfterResumeFailure = true
                 let failedPosition = resumePosition
                 resumePosition = 0
-                pendingPlaybackNotice = Self.resumeFallbackNotice
                 cleanupCurrentEngineForNextAttempt()
                 didRestorePosition = true
                 statusMessage = "Starting this stream from the beginning…"
@@ -805,9 +789,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                     url.host ?? "local"
                 )
             } catch {
-                if didRestartAfterResumeFailure {
-                    pendingPlaybackNotice = nil
-                }
                 throw error
             }
         }
@@ -816,6 +797,8 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
 
     private func prepareCustomDecoder(_ url: URL) async throws {
         let startedAt = ProcessInfo.processInfo.systemUptime
+        var openedAt: TimeInterval?
+        var didReportExtendedOpening = false
         activeEngine = .customRust
         tearDownPictureInPicture()
         player.pause()
@@ -966,6 +949,15 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             if let customFailure {
                 throw customFailure
             }
+            let now = ProcessInfo.processInfo.systemUptime
+            if customOpenComplete, openedAt == nil {
+                openedAt = now
+                NSLog(
+                    "BUNNY_PLAYER startup_phase=opened elapsed_ms=%.1f source=%@",
+                    (now - startedAt) * 1_000,
+                    url.host ?? "local"
+                )
+            }
             if customOpenComplete, customFirstFrame {
                 if duration > 0, duration < minimumVideoDuration {
                     throw BunnyPlaybackError.unexpectedShortVideo(duration)
@@ -979,8 +971,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                     guard await performCustomSeek(
                         to: target,
                         resume: true,
-                        timeout: Self.customResumeSeekTimeout,
-                        postSeekMediaTimeout: Self.customPostSeekMediaTimeout,
                         requestRevision: requestRevision
                     ) else {
                         throw BunnyPlaybackError.seekFailed
@@ -996,7 +986,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                 wantsPlayback = true
                 isPreparing = false
                 statusMessage = ""
-                publishPendingPlaybackNotice()
                 refreshPlaybackState()
                 NSLog(
                     "BUNNY_PLAYER ready_ms=%.1f engine=custom_rust decoder=%@ container=%@ source=%@",
@@ -1007,18 +996,44 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                 )
                 return
             }
-            let sourceIs4K = max(
+            let sourceIsUltraHD = max(
                 customMediaInfo?.presentationSize.width ?? 0,
                 customMediaInfo?.presentationSize.height ?? 0
             ) >= 3_000
-            // Some large provider files spend most of the normal startup
-            // budget probing and reaching their first interleaved keyframe.
-            // Once Bunny has positively opened a 4K source, give its hardware
-            // path enough time to produce media instead of misreporting an
-            // otherwise playable stream as unsupported.
-            let startupTimeout: TimeInterval = !url.isFileURL && sourceIs4K ? 35 : 20
-            if ProcessInfo.processInfo.systemUptime - startedAt >= startupTimeout {
-                throw BunnyPlaybackError.startupTimedOut(startupTimeout)
+            let attemptElapsed = now - startedAt
+            let openElapsed = openedAt.map { now - $0 }
+
+            // The old single 20-second deadline ran before container metadata
+            // was available, so large remote MKVs could be skipped while their
+            // demuxer was still opening. Treat opening and first-frame delivery
+            // as separate bounded phases; transport failures still surface
+            // immediately through customFailure.
+            if !url.isFileURL,
+               openedAt == nil,
+               attemptElapsed >= 20,
+               !didReportExtendedOpening {
+                didReportExtendedOpening = true
+                statusMessage = "Still opening this stream…"
+                NSLog(
+                    "BUNNY_PLAYER startup_phase=opening extended_wait=1 elapsed_ms=%.1f source=%@",
+                    attemptElapsed * 1_000,
+                    url.host ?? "local"
+                )
+            }
+            if let expired = CustomPlaybackStartupPolicy.expiredTimeout(
+                attemptElapsed: attemptElapsed,
+                openElapsed: openElapsed,
+                isRemote: !url.isFileURL,
+                isUltraHD: sourceIsUltraHD
+            ) {
+                NSLog(
+                    "BUNNY_PLAYER startup_timeout phase=%@ limit_s=%.0f elapsed_ms=%.1f source=%@",
+                    expired.phase.rawValue,
+                    expired.limit,
+                    attemptElapsed * 1_000,
+                    url.host ?? "local"
+                )
+                throw BunnyPlaybackError.startupTimedOut(expired.limit)
             }
             try await Task.sleep(for: .milliseconds(25))
         }
@@ -1368,8 +1383,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private func performCustomSeek(
         to requestedTarget: TimeInterval,
         resume: Bool,
-        timeout: TimeInterval = 6,
-        postSeekMediaTimeout: TimeInterval? = nil,
         requestRevision: Int
     ) async -> Bool {
         guard let customDecoder else {
@@ -1384,14 +1397,11 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         let completionRevision = customSeekRevision
         customDecoder.seek(to: target)
 
-        let videoFramesBeforeSeek = customDecodedFrames
-        let audioFramesBeforeSeek = customRenderedAudioFrames
-        let deadline = ProcessInfo.processInfo.systemUptime + timeout
         while isCurrentSeekRequest(requestRevision),
               !customSeekCompleted(
                   after: completionRevision,
                   target: target
-              ), ProcessInfo.processInfo.systemUptime < deadline,
+              ), customFailure == nil,
               !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(25))
         }
@@ -1399,39 +1409,17 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             logSupersededSeek(engine: "custom_rust", target: target)
             return true
         }
-        var finished = customSeekCompleted(
+        if Task.isCancelled {
+            finishSeekRequest(requestRevision)
+            return true
+        }
+        let completionObserved = customSeekCompleted(
             after: completionRevision,
             target: target
-        ) && customSeekSucceeded
+        )
+        let finished = completionObserved && customSeekSucceeded && customFailure == nil
         wantsPlayback = resume
         if resume, finished {
-            customDecoder.play(atRate: playbackRate)
-        }
-        if finished, let postSeekMediaTimeout {
-            let mediaDeadline = ProcessInfo.processInfo.systemUptime + postSeekMediaTimeout
-            while !hasCustomMediaAdvanced(
-                videoFramesBeforeSeek: videoFramesBeforeSeek,
-                audioFramesBeforeSeek: audioFramesBeforeSeek
-            ), ProcessInfo.processInfo.systemUptime < mediaDeadline,
-                  customFailure == nil,
-                  isCurrentSeekRequest(requestRevision),
-                  !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(25))
-            }
-            guard isCurrentSeekRequest(requestRevision) else {
-                logSupersededSeek(engine: "custom_rust", target: target)
-                return true
-            }
-            finished = customFailure == nil && hasCustomMediaAdvanced(
-                videoFramesBeforeSeek: videoFramesBeforeSeek,
-                audioFramesBeforeSeek: audioFramesBeforeSeek
-            )
-        }
-        // If the UI deadline expires while the range reader is still moving
-        // to the target, preserve the user's play intent. A late successful
-        // seek then resumes automatically instead of leaving a black, paused
-        // renderer indefinitely.
-        if resume, !finished, customFailure == nil {
             customDecoder.play(atRate: playbackRate)
         }
         if finished {
@@ -1446,12 +1434,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         finishSeekRequest(requestRevision)
         refreshPlaybackState()
         NSLog(
-            "BUNNY_PLAYER seek engine=custom_rust target=%.2f resume=%@ timeout=%.1f post_frame=%@ finished=%@",
+            "BUNNY_PLAYER seek engine=custom_rust target=%.2f resume=%@ result=%@",
             target,
             resume ? "yes" : "no",
-            timeout,
-            postSeekMediaTimeout == nil ? "not-required" : "required",
-            finished ? "yes" : "no"
+            finished ? "completed" : "failed"
         )
         return finished
     }
@@ -1498,19 +1484,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             engine,
             target
         )
-    }
-
-    private func hasCustomMediaAdvanced(
-        videoFramesBeforeSeek: Int,
-        audioFramesBeforeSeek: Int
-    ) -> Bool {
-        if customMediaInfo?.hasVideo == true {
-            return customDecodedFrames > videoFramesBeforeSeek
-        }
-        if customMediaInfo?.hasAudio == true {
-            return customRenderedAudioFrames > audioFramesBeforeSeek
-        }
-        return false
     }
 
     private func seekCompletion(to seconds: TimeInterval, tolerance: CMTime) async -> Bool {
@@ -1785,8 +1758,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         usesCustomDecoder = false
         activeEngine = .native
         resumeAfterCancelledScrub = false
-        noticeMessage = nil
-        pendingPlaybackNotice = nil
         customMediaInfo = nil
         customOpenComplete = false
         customFirstFrame = false
@@ -1805,12 +1776,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         stallCount = 0
         didRestorePosition = resumePosition <= 0
         debugSnapshot = .waiting
-    }
-
-    private func publishPendingPlaybackNotice() {
-        guard let pendingPlaybackNotice else { return }
-        self.pendingPlaybackNotice = nil
-        noticeMessage = pendingPlaybackNotice
     }
 
     private func clearMediaOutputs() {
@@ -3044,6 +3009,7 @@ private struct BunnyTimeline: View {
     @State private var scrubPosition = 0.0
     @State private var isEditing = false
     @State private var shouldResumeAfterScrub = false
+    @State private var seekSubmissionPending = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -3051,7 +3017,9 @@ private struct BunnyTimeline: View {
             Slider(
                 value: Binding(
                     get: { isEditing ? scrubPosition : min(model.currentTime, upperBound) },
-                    set: { scrubPosition = $0 }
+                    set: { position in
+                        updateScrubPosition(position)
+                    }
                 ),
                 in: 0...upperBound,
                 onEditingChanged: editingChanged
@@ -3063,10 +3031,6 @@ private struct BunnyTimeline: View {
         }
         .font(.caption.monospacedDigit())
         .foregroundStyle(.white.opacity(0.92))
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onEnded { _ in finishScrubbingIfNeeded() }
-        )
         .onChange(of: model.isScrubbing) { isScrubbing in
             if !isScrubbing {
                 isEditing = false
@@ -3080,14 +3044,24 @@ private struct BunnyTimeline: View {
 
     private func editingChanged(_ editing: Bool) {
         onInteraction()
-        if editing {
-            guard !isEditing else { return }
+        if !editing {
+            finishScrubbingIfNeeded()
+        }
+    }
+
+    private func updateScrubPosition(_ position: TimeInterval) {
+        onInteraction()
+        guard !seekSubmissionPending, !model.isSeeking else { return }
+        if !isEditing {
+            // Slider can report a delayed editing-began callback after a seek
+            // has already completed. A value change is the reliable evidence
+            // that a new finger drag actually started, so only it may enter
+            // the local scrubbing state.
             isEditing = true
             scrubPosition = model.currentTime
             shouldResumeAfterScrub = model.pauseForScrubbing()
-        } else {
-            finishScrubbingIfNeeded()
         }
+        scrubPosition = min(max(position, 0), upperBound)
     }
 
     private func finishScrubbingIfNeeded() {
@@ -3095,8 +3069,18 @@ private struct BunnyTimeline: View {
         let target = scrubPosition
         let shouldResume = shouldResumeAfterScrub
         isEditing = false
+        seekSubmissionPending = true
         Task { @MainActor in
-            if !(await model.finishScrubbing(to: target, resume: shouldResume)) {
+            let succeeded = await model.finishScrubbing(
+                to: target,
+                resume: shouldResume
+            )
+            // Swallow any final value callback still queued by Slider for the
+            // gesture that just ended. A subsequent user drag arrives well
+            // after this short UI-only handoff window.
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            seekSubmissionPending = false
+            if !succeeded {
                 onSeekFailure()
             }
         }

@@ -576,6 +576,8 @@ struct WatchStreamSelectionView: View {
     let route: WatchMediaRoute
     var video: Video?
 
+    @AppStorage("stream-ranking-mode") private var streamRankingMode =
+        StreamRankingMode.current
     @State private var groups: [WatchStreamGroup] = []
     @State private var selectedPlayback: WatchPlaybackRequest?
     @State private var isLoading = true
@@ -596,11 +598,20 @@ struct WatchStreamSelectionView: View {
                     WatchManualStreamView()
                 }
             } else {
-                ForEach(groups) { group in
-                    Section(group.providerName) {
-                        ForEach(group.streams) { stream in
-                            streamRow(stream, providerName: group.providerName)
+                Section("Order") {
+                    Picker("Stream order", selection: $streamRankingMode) {
+                        ForEach(StreamRankingMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
                         }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.navigationLink)
+                    .accessibilityIdentifier("watch-stream-order")
+                }
+
+                Section("Streams") {
+                    ForEach(rankedStreams) { presented in
+                        streamRow(presented)
                     }
                 }
                 if let resolutionError {
@@ -624,8 +635,23 @@ struct WatchStreamSelectionView: View {
         }
     }
 
+    private var rankedStreams: [PresentedStream] {
+        let presented = groups.flatMap { group in
+            group.streams.enumerated().map { index, stream in
+                PresentedStream(
+                    id: "\(group.id)#\(index)#\(stream.id)",
+                    providerID: group.id,
+                    providerName: group.providerName,
+                    stream: stream
+                )
+            }
+        }
+        return StreamPresentationPolicy.ranked(presented, mode: streamRankingMode)
+    }
+
     @ViewBuilder
-    private func streamRow(_ stream: Stream, providerName: String) -> some View {
+    private func streamRow(_ presented: PresentedStream) -> some View {
+        let stream = presented.stream
         let assessment = WatchStreamCompatibility.assess(stream)
         let canUseServer = model.canResolveWithStreamingServer(stream)
         if assessment.isPlayable || canUseServer {
@@ -633,25 +659,40 @@ struct WatchStreamSelectionView: View {
                 Task {
                     await open(
                         stream,
-                        providerName: providerName
+                        providerName: presented.providerName
                     )
                 }
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(stream.displayName)
-                        .font(.headline)
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(2)
                     if resolvingStreamID == stream.id {
                         ProgressView("Preparing")
                             .font(.caption2)
                     } else {
-                        WatchStatusPill(
-                            symbol: canUseServer ? "server.rack" : "applewatch",
-                            text: canUseServer
-                                ? "Server HLS"
-                                : assessment.kind?.displayName ?? "Playable",
-                            color: WatchTheme.playable
-                        )
+                        HStack(spacing: 5) {
+                            Text(presented.providerName)
+                                .foregroundStyle(WatchTheme.accent)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            Spacer(minLength: 2)
+                            if presented.isCached {
+                                Image(systemName: "bolt.fill")
+                                    .foregroundStyle(WatchTheme.accent)
+                            }
+                            Label(
+                                presented.fileSizeBadge
+                                    ?? presented.qualityBadge
+                                    ?? (canUseServer
+                                        ? "HLS"
+                                        : assessment.kind?.displayName ?? "Play"),
+                                systemImage: canUseServer ? "server.rack" : "play.fill"
+                            )
+                            .foregroundStyle(WatchTheme.playable)
+                            .lineLimit(1)
+                        }
+                        .font(.caption2.weight(.semibold))
                     }
                 }
             }
@@ -662,6 +703,10 @@ struct WatchStreamSelectionView: View {
                     .font(.headline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                Text(presented.providerName)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Label(
                     assessment.incompatibility?.message ?? "Unavailable on Apple Watch",
                     systemImage: "exclamationmark.triangle"
@@ -682,13 +727,11 @@ struct WatchStreamSelectionView: View {
                 providerName: providerName,
                 route: route,
                 video: video,
-                fallbackSources: groups.flatMap { group in
-                    group.streams.map {
-                        WatchPlaybackSource(
-                            providerName: group.providerName,
-                            stream: $0
-                        )
-                    }
+                fallbackSources: rankedStreams.map { presented in
+                    WatchPlaybackSource(
+                        providerName: presented.providerName,
+                        stream: presented.stream
+                    )
                 }
             )
         } catch {

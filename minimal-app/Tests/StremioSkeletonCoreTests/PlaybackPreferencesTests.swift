@@ -78,4 +78,84 @@ final class PlaybackPreferencesTests: XCTestCase {
         XCTAssertNil(StreamFailoverPolicy.nextSourceIndex(after: -1, sourceCount: 3))
     }
 
+    func testRemoteCustomPlaybackDoesNotExpireAtOldTwentySecondOpeningLimit() {
+        XCTAssertNil(
+            CustomPlaybackStartupPolicy.expiredTimeout(
+                attemptElapsed: 20,
+                openElapsed: nil,
+                isRemote: true,
+                isUltraHD: false
+            )
+        )
+        XCTAssertEqual(
+            CustomPlaybackStartupPolicy.expiredTimeout(
+                attemptElapsed: 60,
+                openElapsed: nil,
+                isRemote: true,
+                isUltraHD: false
+            ),
+            CustomPlaybackStartupTimeout(phase: .opening, limit: 60)
+        )
+    }
+
+    func testRemoteCustomPlaybackGetsFreshFirstFrameBudgetAfterOpening() {
+        XCTAssertNil(
+            CustomPlaybackStartupPolicy.expiredTimeout(
+                attemptElapsed: 79,
+                openElapsed: 19,
+                isRemote: true,
+                isUltraHD: false
+            )
+        )
+        XCTAssertEqual(
+            CustomPlaybackStartupPolicy.expiredTimeout(
+                attemptElapsed: 80,
+                openElapsed: 20,
+                isRemote: true,
+                isUltraHD: false
+            ),
+            CustomPlaybackStartupTimeout(phase: .firstFrame, limit: 20)
+        )
+    }
+
+    func testRemoteUltraHDPlaybackGetsExtendedFirstFrameBudget() {
+        XCTAssertNil(
+            CustomPlaybackStartupPolicy.expiredTimeout(
+                attemptElapsed: 94,
+                openElapsed: 34.9,
+                isRemote: true,
+                isUltraHD: true
+            )
+        )
+        XCTAssertEqual(
+            CustomPlaybackStartupPolicy.expiredTimeout(
+                attemptElapsed: 95,
+                openElapsed: 35,
+                isRemote: true,
+                isUltraHD: true
+            ),
+            CustomPlaybackStartupTimeout(phase: .firstFrame, limit: 35)
+        )
+    }
+
+    func testLocalCustomPlaybackKeepsOriginalBoundedAttempt() {
+        XCTAssertNil(
+            CustomPlaybackStartupPolicy.expiredTimeout(
+                attemptElapsed: 19.9,
+                openElapsed: 10,
+                isRemote: false,
+                isUltraHD: true
+            )
+        )
+        XCTAssertEqual(
+            CustomPlaybackStartupPolicy.expiredTimeout(
+                attemptElapsed: 20,
+                openElapsed: 10,
+                isRemote: false,
+                isUltraHD: true
+            ),
+            CustomPlaybackStartupTimeout(phase: .firstFrame, limit: 20)
+        )
+    }
+
 }

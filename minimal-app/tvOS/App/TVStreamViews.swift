@@ -6,7 +6,7 @@ struct TVStreamShelf: View {
 
   var body: some View {
     ScrollView(.horizontal, showsIndicators: false) {
-      LazyHStack(alignment: .top, spacing: 28) {
+      LazyHStack(alignment: .top, spacing: 32) {
         ForEach(streams) { stream in
           Button {
             onSelect(stream)
@@ -18,7 +18,7 @@ struct TVStreamShelf: View {
         }
       }
       .padding(.horizontal, TVTheme.horizontalInset)
-      .padding(.vertical, 20)
+      .padding(.vertical, 30)
     }
     .focusSection()
   }
@@ -28,26 +28,43 @@ struct TVStreamCard: View {
   let stream: TVPresentedStream
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 14) {
+    VStack(alignment: .leading, spacing: 12) {
       HStack(spacing: 10) {
-        if let quality = stream.quality {
+        Image(systemName: "play.fill")
+          .font(.caption.weight(.black))
+          .foregroundStyle(.black)
+          .frame(width: 28, height: 28)
+          .background(TVTheme.accent, in: Circle())
+        if stream.isCached {
+          badge("Cached", systemImage: "bolt.fill")
+        }
+        if let quality = stream.qualityBadge {
           badge(quality, systemImage: "tv")
         }
-        if let size = stream.size {
+        if let size = stream.fileSizeBadge {
           badge(size, systemImage: "externaldrive")
         }
-        if stream.stream.isTorrent {
-          badge("Torrent", systemImage: "arrow.down.circle")
-        }
       }
+      .frame(height: 32)
 
       Text(stream.stream.displayName.firstLine)
         .font(.title3.weight(.semibold))
         .lineLimit(2)
-      Text(stream.providerName)
-        .font(.headline)
-        .foregroundStyle(TVTheme.accent)
-        .lineLimit(1)
+        .fixedSize(horizontal: false, vertical: true)
+
+      HStack(spacing: 10) {
+        Text(stream.providerName)
+          .font(.headline)
+          .foregroundStyle(TVTheme.accent)
+          .lineLimit(1)
+        Spacer(minLength: 8)
+        if stream.stream.isTorrent {
+          Label("Torrent", systemImage: "arrow.down.circle")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+        }
+      }
+
       if let description = stream.stream.description?.firstLine,
         description != stream.stream.displayName.firstLine
       {
@@ -55,17 +72,34 @@ struct TVStreamCard: View {
           .font(.callout)
           .foregroundStyle(.secondary)
           .lineLimit(2)
+          .fixedSize(horizontal: false, vertical: true)
+          .frame(minHeight: 44, alignment: .topLeading)
+      } else {
+        Spacer(minLength: 44)
       }
     }
-    .frame(width: 420, height: 170, alignment: .topLeading)
-    .padding(24)
-    .background(TVTheme.elevated, in: RoundedRectangle(cornerRadius: 20))
+    .padding(28)
+    .frame(width: 520, alignment: .topLeading)
+    .frame(minHeight: 304, alignment: .topLeading)
+    .background(
+      LinearGradient(
+        colors: [TVTheme.surface, TVTheme.elevated],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      ),
+      in: RoundedRectangle(cornerRadius: TVTheme.cardCornerRadius, style: .continuous)
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: TVTheme.cardCornerRadius, style: .continuous)
+        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+    }
   }
 
   private func badge(_ text: String, systemImage: String) -> some View {
     Label(text, systemImage: systemImage)
       .font(.caption.weight(.bold))
-      .padding(.horizontal, 10)
+      .lineLimit(1)
+      .padding(.horizontal, 9)
       .padding(.vertical, 5)
       .background(TVTheme.accent.opacity(0.18), in: Capsule())
       .foregroundStyle(TVTheme.accent)
@@ -77,6 +111,8 @@ struct TVEpisodeStreamsView: View {
   let series: MetaItem
   let episode: Video
 
+  @AppStorage("stream-ranking-mode") private var streamRankingMode =
+    StreamRankingMode.current
   @State private var providers: [StreamProviderGroup] = []
   @State private var isLoading = true
   @State private var playbackRequest: TVPlaybackRequest?
@@ -135,6 +171,8 @@ struct TVEpisodeStreamsView: View {
             systemImage: "play.slash"
           )
         } else {
+          TVStreamRankingControl(selection: $streamRankingMode)
+
           TVStreamShelf(streams: Array(rankedStreams.prefix(40))) { selected in
             playbackRequest = makeRequest(selectedID: selected.id)
           }
@@ -160,7 +198,7 @@ struct TVEpisodeStreamsView: View {
   }
 
   private var rankedStreams: [TVPresentedStream] {
-    tvRankedStreams(from: providers)
+    tvRankedStreams(from: providers, mode: streamRankingMode)
   }
 
   private var location: String {
@@ -179,6 +217,27 @@ struct TVEpisodeStreamsView: View {
       initialPosition: model.episodeProgress(episode, in: series)?.position ?? 0,
       mediaMetadata: .episode(series: series, episode: episode)
     )
+  }
+}
+
+struct TVStreamRankingControl: View {
+  @Binding var selection: StreamRankingMode
+
+  var body: some View {
+    HStack(spacing: 24) {
+      Label("Order", systemImage: "arrow.up.arrow.down")
+        .font(.headline)
+        .foregroundStyle(.secondary)
+
+      Picker("Stream order", selection: $selection) {
+        ForEach(StreamRankingMode.allCases) { mode in
+          Text(mode.title).tag(mode)
+        }
+      }
+      .pickerStyle(.segmented)
+      .frame(width: 520)
+    }
+    .accessibilityIdentifier("tvos-stream-order")
   }
 }
 

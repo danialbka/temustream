@@ -2388,6 +2388,22 @@ struct ResolvingPlayerScreen: View {
                 RoundedRectangle(cornerRadius: 22)
                     .stroke(Color.appAccent.opacity(0.32), lineWidth: 1)
             }
+            .overlay(alignment: .topLeading) {
+                Button {
+                    cancelSourceFailover(pending)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.subheadline.weight(.bold))
+                        .frame(width: 34, height: 34)
+                        .background(Color.white.opacity(0.12), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .padding(12)
+                .accessibilityLabel("Cancel automatic stream change")
+                .accessibilityIdentifier("stream-failover-cancel")
+            }
             .padding()
         }
     }
@@ -2786,6 +2802,18 @@ struct ResolvingPlayerScreen: View {
         }
         guard pendingFailover?.id == pending.id, !Task.isCancelled else { return }
         completeSourceFailover(pending)
+    }
+
+    @MainActor
+    private func cancelSourceFailover(_ pending: PendingStreamFailover) {
+        guard pendingFailover?.id == pending.id else { return }
+        pendingFailover = nil
+        error = "This stream did not open. Go back and choose another stream."
+        NSLog(
+            "STREAM_PLAYBACK failover_cancelled source=%ld/%ld",
+            activeCandidateIndex + 1,
+            candidates.count
+        )
     }
 
     @MainActor

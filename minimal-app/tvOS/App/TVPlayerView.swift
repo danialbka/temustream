@@ -162,10 +162,18 @@ private struct TVNativePlaybackView: View {
   @State private var didReportReady = false
   @State private var didReportFinal = false
   @State private var lastCheckpointPosition: TimeInterval = 0
+  @State private var diagnosticSnapshot: NativePlaybackPerformanceSnapshot?
 
   var body: some View {
-    TVPlayerControllerRepresentable(player: player)
-      .ignoresSafeArea()
+    ZStack(alignment: .topLeading) {
+      TVPlayerControllerRepresentable(player: player)
+        .ignoresSafeArea()
+
+      if NativePlaybackDiagnostics.isEnabled, let diagnosticSnapshot {
+        TVPlaybackDebugOverlay(snapshot: diagnosticSnapshot)
+          .padding(44)
+      }
+    }
       .task(id: activeURLIndex) {
         guard playbackURLs.indices.contains(activeURLIndex) else { return }
         await play(playbackURLs[activeURLIndex])
@@ -185,8 +193,17 @@ private struct TVNativePlaybackView: View {
   @MainActor
   private func play(_ url: URL) async {
     didReportFinal = false
+    diagnosticSnapshot = nil
+    let diagnosticStartedAt = ProcessInfo.processInfo.systemUptime
+    var diagnosticTracker = NativePlaybackPerformanceTracker(
+      startedAt: diagnosticStartedAt,
+      initialPosition: initialPosition
+    )
+    var nextDiagnosticLogAt: TimeInterval = 0
+    var lastDiagnosticPublishAt: TimeInterval = -.infinity
     let item = AVPlayerItem(url: url)
     player.pause()
+    player.automaticallyWaitsToMinimizeStalling = true
     player.replaceCurrentItem(with: item)
     player.actionAtItemEnd = .pause
 
@@ -227,6 +244,39 @@ private struct TVNativePlaybackView: View {
 
       let position = currentPosition
       let duration = currentDuration
+      let timestamp = ProcessInfo.processInfo.systemUptime
+      let accessEvent = item.accessLog()?.events.last
+      let snapshot = diagnosticTracker.observe(
+        at: timestamp,
+        position: position,
+        isPlaying: player.timeControlStatus == .playing,
+        bufferSeconds: bufferedSeconds(for: item),
+        stalls: accessEvent.flatMap { $0.numberOfStalls >= 0 ? $0.numberOfStalls : nil },
+        droppedVideoFrames: accessEvent.flatMap {
+          $0.numberOfDroppedVideoFrames >= 0 ? $0.numberOfDroppedVideoFrames : nil
+        },
+        observedBitrate: accessEvent.flatMap { $0.observedBitrate > 0 ? $0.observedBitrate : nil },
+        indicatedBitrate: accessEvent.flatMap {
+          $0.indicatedBitrate > 0 ? $0.indicatedBitrate : nil
+        }
+      )
+      if NativePlaybackDiagnostics.isEnabled,
+        timestamp - lastDiagnosticPublishAt >= 1
+      {
+        diagnosticSnapshot = snapshot
+        lastDiagnosticPublishAt = timestamp
+      }
+      if NativePlaybackDiagnostics.isEnabled,
+        snapshot.startupMilliseconds != nil,
+        snapshot.wallDuration >= nextDiagnosticLogAt
+      {
+        NSLog(
+          "TV_PLAYBACK_METRIC url_index=%ld %@",
+          activeURLIndex + 1,
+          snapshot.logDescription
+        )
+        nextDiagnosticLogAt += 5
+      }
       if !didReportReady,
         player.timeControlStatus == .playing || player.rate > 0,
         position >= max(initialPosition - 1, 0)
@@ -292,6 +342,89 @@ private struct TVNativePlaybackView: View {
     guard let item = player.currentItem else { return 0 }
     let value = CMTimeGetSeconds(item.duration)
     return value.isFinite ? max(value, 0) : 0
+  }
+
+  private func bufferedSeconds(for item: AVPlayerItem) -> TimeInterval? {
+    let position = currentPosition
+    for value in item.loadedTimeRanges {
+      let range = value.timeRangeValue
+      let start = range.start.seconds
+      let end = range.end.seconds
+      guard start.isFinite, end.isFinite else { continue }
+      if position >= start - 0.05, position <= end + 0.05 {
+        return max(end - position, 0)
+      }
+    }
+    return 0
+  }
+}
+
+private struct TVPlaybackDebugOverlay: View {
+  let snapshot: NativePlaybackPerformanceSnapshot
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(spacing: 9) {
+        Circle()
+          .fill(healthColor)
+          .frame(width: 12, height: 12)
+        Text("Bunny AVKit")
+          .fontWeight(.bold)
+        Text(snapshot.health.rawValue.replacingOccurrences(of: "_", with: " ").uppercased())
+          .foregroundStyle(.secondary)
+      }
+      metric("Startup", milliseconds(snapshot.startupMilliseconds))
+      metric("Clock", ratio(snapshot.clockRatio))
+      metric("Buffer", seconds(snapshot.bufferSeconds))
+      metric("Stalls", String(snapshot.stalls))
+      metric("Dropped", snapshot.droppedVideoFrames.map(String.init) ?? "—")
+      metric("Bitrate", bitrate(snapshot.observedBitrate))
+    }
+    .font(.headline.monospacedDigit())
+    .foregroundStyle(.white)
+    .padding(.horizontal, 22)
+    .padding(.vertical, 18)
+    .frame(width: 420, alignment: .leading)
+    .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 18))
+    .overlay {
+      RoundedRectangle(cornerRadius: 18)
+        .stroke(healthColor.opacity(0.9), lineWidth: 2)
+    }
+    .allowsHitTesting(false)
+    .accessibilityElement(children: .combine)
+    .accessibilityIdentifier("tvos-player-debug-overlay")
+  }
+
+  private var healthColor: Color {
+    switch snapshot.health {
+    case .warmingUp: .yellow
+    case .good: .green
+    case .attention: .orange
+    }
+  }
+
+  private func metric(_ label: String, _ value: String) -> some View {
+    HStack {
+      Text(label).foregroundStyle(.secondary)
+      Spacer()
+      Text(value)
+    }
+  }
+
+  private func milliseconds(_ value: Double?) -> String {
+    value.map { String(format: "%.0f ms", $0) } ?? "—"
+  }
+
+  private func seconds(_ value: Double?) -> String {
+    value.map { String(format: "%.1f s", $0) } ?? "—"
+  }
+
+  private func ratio(_ value: Double?) -> String {
+    value.map { String(format: "%.3fx", $0) } ?? "—"
+  }
+
+  private func bitrate(_ value: Double?) -> String {
+    value.map { String(format: "%.1f Mbps", $0 / 1_000_000) } ?? "—"
   }
 }
 

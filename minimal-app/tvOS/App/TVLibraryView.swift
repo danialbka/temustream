@@ -9,13 +9,7 @@ struct TVLibraryView: View {
   var body: some View {
     ScrollView(.vertical, showsIndicators: false) {
       VStack(alignment: .leading, spacing: 38) {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("My List")
-            .font(.system(size: 54, weight: .bold))
-          Text(activeProfileSubtitle)
-            .font(.title3)
-            .foregroundStyle(.secondary)
-        }
+        TVScreenHeader(title: "My List", subtitle: activeProfileSubtitle)
 
         if model.library.isEmpty {
           TVEmptyState(
@@ -34,7 +28,7 @@ struct TVLibraryView: View {
         }
       }
       .padding(.horizontal, TVTheme.horizontalInset)
-      .padding(.top, 125)
+      .padding(.top, TVTheme.screenTopInset)
       .padding(.bottom, 90)
     }
     .background(TVTheme.background)

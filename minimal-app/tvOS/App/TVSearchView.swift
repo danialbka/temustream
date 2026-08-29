@@ -4,17 +4,15 @@ struct TVSearchView: View {
   @EnvironmentObject private var model: AppModel
   @State private var query = ""
   @State private var mediaType = "movie"
+  @FocusState private var focusedRecentSearch: String?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 46) {
       HStack {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("Search")
-            .font(.system(size: 54, weight: .bold))
-          Text("Titles, actors, directors, writers, and genres")
-            .font(.title3)
-            .foregroundStyle(.secondary)
-        }
+        TVScreenHeader(
+          title: "Search",
+          subtitle: "Titles, actors, directors, writers, and genres"
+        )
         Spacer()
         Picker("Type", selection: $mediaType) {
           Text("Movies").tag("movie")
@@ -25,6 +23,10 @@ struct TVSearchView: View {
       }
 
       TextField("Search Bunny", text: $query)
+        .font(.title3)
+        .textFieldStyle(.plain)
+        .padding(.horizontal, 24)
+        .frame(height: 72)
         .submitLabel(.search)
         .onSubmit { runSearch(query) }
         .accessibilityIdentifier("tvos-search-field")
@@ -72,7 +74,7 @@ struct TVSearchView: View {
       }
     }
     .padding(.horizontal, TVTheme.horizontalInset)
-    .padding(.top, 125)
+    .padding(.top, TVTheme.screenTopInset)
     .onChange(of: mediaType) { _, _ in
       if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         runSearch(query)
@@ -93,11 +95,21 @@ struct TVSearchView: View {
       ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 18) {
           ForEach(model.recentSearches, id: \.self) { recent in
-            Button(recent) {
+            Button {
               query = recent
               runSearch(recent)
+            } label: {
+              Label(recent, systemImage: "clock.arrow.circlepath")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(
+                  focusedRecentSearch == recent ? Color.black : Color.white
+                )
+                .frame(height: 62)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .tint(focusedRecentSearch == recent ? TVTheme.accent : TVTheme.surface)
+            .focused($focusedRecentSearch, equals: recent)
           }
         }
         .padding(.vertical, 16)

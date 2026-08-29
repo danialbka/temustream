@@ -80,7 +80,7 @@ targets:
       path: iOS/Resources/BunnyInfo.plist
       properties:
         CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "32"
+        CFBundleVersion: "33"
         CFBundleDisplayName: Bunny
         AVInitialRouteSharingPolicy: LongFormVideo
         CADisableMinimumFrameDurationOnPhone: true
@@ -147,7 +147,7 @@ targets:
       properties:
         CFBundleDisplayName: Bunny
         CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "18"
+        CFBundleVersion: "32"
         StremioSourceIdentity: $(STREMIO_SOURCE_ID)
         NSLocalNetworkUsageDescription: Bunny connects to streaming servers on your local network when you configure one for playback.
         UIBackgroundModes:
@@ -205,9 +205,11 @@ targets:
       - Sources/StremioSkeletonCore/TitleTrivia.swift
       - Sources/StremioSkeletonCore/WikipediaTrivia.swift
       - Sources/StremioSkeletonCore/MediaContainerSniffer.swift
+      - Sources/StremioSkeletonCore/StreamPresentationPolicy.swift
       - Sources/StremioSkeletonCore/TorBoxStreamSelection.swift
       - Sources/StremioSkeletonCore/WatchStreamCompatibility.swift
       - Sources/StremioSkeletonCore/WatchPlaybackFallback.swift
+      - Sources/StremioSkeletonCore/NativePlaybackPerformance.swift
       - iOS/App/TorBoxPlaybackResolver.swift
       - watchOS/App
       - path: iOS/Resources/PrivacyInfo.xcprivacy
@@ -219,7 +221,7 @@ targets:
       properties:
         CFBundleDisplayName: Bunny
         CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "21"
+        CFBundleVersion: "32"
         WKApplication: true
         WKWatchOnly: true
         WKPrefersNetworkUponForeground: true
@@ -247,7 +249,7 @@ targets:
       properties:
         CFBundleDisplayName: Bunny
         CFBundleShortVersionString: "1.3"
-        CFBundleVersion: "21"
+        CFBundleVersion: "32"
         LSApplicationLaunchProhibited: true
     dependencies:
       - target: TemuStremioWatch

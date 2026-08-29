@@ -301,6 +301,15 @@ private enum BunnyPlayerStressBenchmark {
                 info: info
             )
         }
+        if ProcessInfo.processInfo.environment[
+            "SKELETON_BUNNY_AUDIO_TRACK_SWITCH_AUDIT"
+        ] == "1" {
+            try await auditAudioTrackSwitch(
+                decoder: decoder,
+                probe: probe,
+                info: info
+            )
+        }
         #endif
 
         var seekLatencies = [Double]()
@@ -632,6 +641,41 @@ private enum BunnyPlayerStressBenchmark {
             probe.renderedAudioFrames
         )
     }
+
+    /// Switches to a different audio stream and verifies that Bunny resumes
+    /// audio samples at the same timeline position without a user scrub.
+    private static func auditAudioTrackSwitch(
+        decoder: BunnyNativeDecoder,
+        probe: BunnyStressProbe,
+        info: BunnyNativeMediaInfo
+    ) async throws {
+        guard let alternate = info.audioTracks.first(where: {
+            $0.streamIndex != info.selectedAudioStreamIndex
+        }) else {
+            throw PlayerStressError.missingAlternateAudioTrack
+        }
+        let revision = probe.seekRevision
+        let position = decoder.currentTime
+        let renderedAudioFrames = probe.renderedAudioFrames
+
+        decoder.selectAudioStreamIndex(alternate.streamIndex)
+        try await waitUntil(timeout: 8, probe: probe) {
+            probe.seekRevision > revision && probe.seekSucceeded
+        }
+        decoder.play(atRate: 1)
+        try await waitUntil(timeout: 8, probe: probe) {
+            decoder.currentTime >= position + 0.20
+                && probe.renderedAudioFrames > renderedAudioFrames
+        }
+        NSLog(
+            "BUNNY_AUDIO_TRACK_SWITCH_AUDIT PASS from=%ld to=%ld position=%.3f recovered=%.3f audio_frames=%ld",
+            info.selectedAudioStreamIndex,
+            alternate.streamIndex,
+            position,
+            decoder.currentTime,
+            probe.renderedAudioFrames
+        )
+    }
     #endif
 
     private static func percentile(
@@ -680,6 +724,7 @@ private enum PlayerStressError: LocalizedError {
     case timedOut
     case missingPresentationHost
     case missingAudioOutput
+    case missingAlternateAudioTrack
     case prefixCaptureRequiresByteRanges
     case invalidPrefixCaptureSize(Int64)
 
@@ -693,6 +738,8 @@ private enum PlayerStressError: LocalizedError {
             "Player stress could not attach the video renderer to a window"
         case .missingAudioOutput:
             "Bunny discovered an audio track but rendered no audio samples"
+        case .missingAlternateAudioTrack:
+            "Bunny audio-track switching audit requires at least two playable audio tracks"
         case .prefixCaptureRequiresByteRanges:
             "Provider did not honor the bounded byte-range capture request"
         case let .invalidPrefixCaptureSize(bytes):

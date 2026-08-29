@@ -13,13 +13,10 @@ struct TVSettingsView: View {
   var body: some View {
     ScrollView(.vertical, showsIndicators: false) {
       VStack(alignment: .leading, spacing: 44) {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("Settings")
-            .font(.system(size: 54, weight: .bold))
-          Text("Profiles, account sync, and playback connectivity")
-            .font(.title3)
-            .foregroundStyle(.secondary)
-        }
+        TVScreenHeader(
+          title: "Settings",
+          subtitle: "Profiles, account sync, and playback connectivity"
+        )
 
         if let statusMessage {
           Label(statusMessage, systemImage: "checkmark.circle.fill")
@@ -37,7 +34,7 @@ struct TVSettingsView: View {
         aboutSection
       }
       .padding(.horizontal, TVTheme.horizontalInset)
-      .padding(.top, 125)
+      .padding(.top, TVTheme.screenTopInset)
       .padding(.bottom, 90)
     }
     .background(TVTheme.background)

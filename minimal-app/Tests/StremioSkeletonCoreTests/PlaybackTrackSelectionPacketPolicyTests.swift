@@ -2,6 +2,30 @@ import XCTest
 @testable import StremioSkeletonCore
 
 final class PlaybackTrackSelectionPacketPolicyTests: XCTestCase {
+    func testSelectingCurrentAudioTrackDoesNotReprimeTimeline() {
+        XCTAssertFalse(
+            PlaybackTrackSelectionPacketPolicy.requiresAudioTimelineReprime(
+                currentStreamIndex: 2,
+                requestedStreamIndex: 2
+            )
+        )
+    }
+
+    func testChangingAudioTrackReprimesTimeline() {
+        XCTAssertTrue(
+            PlaybackTrackSelectionPacketPolicy.requiresAudioTimelineReprime(
+                currentStreamIndex: 2,
+                requestedStreamIndex: 5
+            )
+        )
+        XCTAssertTrue(
+            PlaybackTrackSelectionPacketPolicy.requiresAudioTimelineReprime(
+                currentStreamIndex: nil,
+                requestedStreamIndex: 0
+            )
+        )
+    }
+
     func testAudioSelectionPreservesCompletedVideoKeyframe() {
         XCTAssertTrue(
             PlaybackTrackSelectionPacketPolicy.preservesCompletedPacket(
