@@ -46,7 +46,13 @@ public struct NativePlaybackPerformanceTracker: Sendable {
     private let startedAt: TimeInterval
     private let initialPosition: TimeInterval
     private var firstPlaybackAt: TimeInterval?
-    private var firstPlaybackPosition: TimeInterval?
+    private var lastObservationAt: TimeInterval?
+    private var lastPosition: TimeInterval?
+    private var lastWasPlaying = false
+    private var lastPlaybackRate: Double = 1
+    private var activeWallDuration: TimeInterval = 0
+    private var observedMediaDuration: TimeInterval = 0
+    private var expectedMediaDuration: TimeInterval = 0
     private var maximumStalls = 0
     private var maximumDroppedVideoFrames: Int?
 
@@ -63,13 +69,17 @@ public struct NativePlaybackPerformanceTracker: Sendable {
         stalls: Int?,
         droppedVideoFrames: Int?,
         observedBitrate: Double?,
-        indicatedBitrate: Double?
+        indicatedBitrate: Double?,
+        playbackRate: Double = 1,
+        discontinuity: Bool = false
     ) -> NativePlaybackPerformanceSnapshot {
         let safeTimestamp = max(timestamp, startedAt)
         let safePosition = position.isFinite ? max(position, 0) : initialPosition
+        let safePlaybackRate = playbackRate.isFinite
+            ? min(max(abs(playbackRate), 0.25), 4)
+            : 1
         if isPlaying, firstPlaybackAt == nil {
             firstPlaybackAt = safeTimestamp
-            firstPlaybackPosition = safePosition
         }
         if let stalls { maximumStalls = max(maximumStalls, max(stalls, 0)) }
         if let droppedVideoFrames {
@@ -79,14 +89,32 @@ public struct NativePlaybackPerformanceTracker: Sendable {
             )
         }
 
+        if let lastObservationAt, let lastPosition {
+            let interval = max(safeTimestamp - lastObservationAt, 0)
+            let mediaAdvance = safePosition - lastPosition
+            let expectedAdvance = interval * lastPlaybackRate
+            let detectedDiscontinuity = discontinuity
+                || mediaAdvance < -0.25
+                || mediaAdvance - expectedAdvance > max(2, expectedAdvance * 0.5)
+            if lastWasPlaying, isPlaying, !detectedDiscontinuity {
+                activeWallDuration += interval
+                expectedMediaDuration += expectedAdvance
+                observedMediaDuration += max(mediaAdvance, 0)
+            }
+        }
+        lastObservationAt = safeTimestamp
+        lastPosition = safePosition
+        lastWasPlaying = isPlaying
+        lastPlaybackRate = safePlaybackRate
+
         let startupMilliseconds = firstPlaybackAt.map {
             max(($0 - startedAt) * 1_000, 0)
         }
-        let wallDuration = firstPlaybackAt.map { max(safeTimestamp - $0, 0) } ?? 0
-        let mediaDuration = firstPlaybackPosition.map {
-            max(safePosition - $0, 0)
-        } ?? 0
-        let clockRatio = wallDuration >= 2 ? mediaDuration / wallDuration : nil
+        let wallDuration = activeWallDuration
+        let mediaDuration = observedMediaDuration
+        let clockRatio = wallDuration >= 2 && expectedMediaDuration > 0
+            ? mediaDuration / expectedMediaDuration
+            : nil
         let snapshot = NativePlaybackPerformanceSnapshot(
             startupMilliseconds: startupMilliseconds,
             wallDuration: wallDuration,

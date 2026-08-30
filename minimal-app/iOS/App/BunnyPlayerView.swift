@@ -110,7 +110,9 @@ struct BunnyPlayerScreen: View {
                             viewportMode = mode
                             showToast(mode.notice)
                         },
-                        onSeekFailure: {}
+                        onSeekFailure: {
+                            showToast("Couldn’t seek. Returned to the previous position.")
+                        }
                     )
                     .transition(.opacity)
                 } else if model.failureMessage == nil {
@@ -221,7 +223,10 @@ struct BunnyPlayerScreen: View {
             model.handleMemoryPressure()
         }
         .onDisappear {
-            if let watchRegistrationID { watchChannel?.unregister(watchRegistrationID) }
+            if let watchRegistrationID {
+                watchChannel?.unregister(watchRegistrationID)
+                self.watchRegistrationID = nil
+            }
             reportProgress(updateKind: .final)
             model.stop()
             #if targetEnvironment(simulator)
@@ -304,6 +309,13 @@ struct BunnyPlayerScreen: View {
     @MainActor
     private func runPlayback() async {
         do {
+            #if targetEnvironment(simulator)
+            if let rawDelay = ProcessInfo.processInfo.environment[
+                "SKELETON_PLAYER_FIXTURE_PREPARE_DELAY_SECONDS"
+            ], let requestedDelay = TimeInterval(rawDelay), requestedDelay > 0 {
+                try await Task.sleep(for: .seconds(min(requestedDelay, 30)))
+            }
+            #endif
             try await model.prepare()
             guard !Task.isCancelled else { return }
             onPlaybackReady?()
@@ -506,11 +518,11 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private var customFirstFrame = false
     private var customEnded = false
     private var customFailure: Error?
-    private var seekRequestRevision = 0
+    private var seekRequestRevision: UInt64 = 0
     private var pendingSeekTarget: TimeInterval?
-    private var customSeekRevision = 0
-    private var customSeekSucceeded = false
-    private var customSeekCompletedTarget: TimeInterval?
+    private var customSeekCoordinator: PlaybackSeekCoordinator?
+    private var customRecoverySeekCoordinator: PlaybackSeekCoordinator?
+    private var customProgressPin: TimeInterval?
     private var customBufferedSeconds: TimeInterval = 0
     private var customVideoQueueEnd: TimeInterval = 0
     private var customDecodedFrames = 0
@@ -525,6 +537,11 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private var applicationIsActive = true
     private var applicationLifecycleRevision = 0
     private var resumeAfterCancelledScrub = false
+
+    // A range request is bounded to 31 seconds at the transport edge. This
+    // adds a short A/V transition allowance while guaranteeing that UI state
+    // cannot remain in `isSeeking` forever.
+    private static let customSeekTimeout: TimeInterval = 35
 
     init(
         plan: PlaybackPlan,
@@ -561,7 +578,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
 
     var progressSnapshot: (position: TimeInterval, duration: TimeInterval)? {
         let position = activeEngine == .customRust
-            ? customDecoder?.currentTime ?? currentTime
+            ? customProgressPin ?? customDecoder?.currentTime ?? currentTime
             : player.currentTime().seconds
         let itemDuration = activeEngine == .customRust
             ? duration
@@ -810,7 +827,11 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             trustedPrivateNetworkOrigin: plan.trustedPrivateNetworkOrigin,
             diagnosticsEnabled: debugOverlayEnabled
         )
+        let seekCoordinator = PlaybackSeekCoordinator()
+        let recoverySeekCoordinator = PlaybackSeekCoordinator()
         customDecoder = decoder
+        customSeekCoordinator = seekCoordinator
+        customRecoverySeekCoordinator = recoverySeekCoordinator
         // Publish the mode only after the decoder exists so SwiftUI receives
         // the actual sample-buffer layer in the same update.
         usesCustomDecoder = true
@@ -818,6 +839,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         customFirstFrame = false
         customEnded = false
         customFailure = nil
+        customProgressPin = nil
         customBufferedSeconds = 0
         customVideoQueueEnd = 0
         customDecodedFrames = 0
@@ -892,20 +914,39 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             guard let self, let decoder, self.customDecoder === decoder else { return }
             self.scheduleCustomBitmapSubtitle(cue, start: start, duration: duration)
         }
-        decoder.onSeekCompleted = { [weak self, weak decoder] position, succeeded in
+        decoder.onSeekCompleted = {
+            [weak self, weak decoder] requestID, position, succeeded in
             guard let self, let decoder, self.customDecoder === decoder else { return }
             if succeeded {
                 self.customEnded = false
-                self.currentTime = max(position, 0)
                 self.customVideoQueueEnd = max(position, 0)
             }
-            self.customSeekCompletedTarget = position
-            self.customSeekSucceeded = succeeded
-            self.customSeekRevision += 1
             self.customMetricsSampleFrames = self.customDecodedFrames
             self.customMetricsSampleTime = ProcessInfo.processInfo.systemUptime
             if let frameRate = self.customMediaInfo?.nominalFrameRate, frameRate > 0 {
                 self.customDisplayFPS = frameRate
+            }
+            Task {
+                await seekCoordinator.complete(
+                    requestID: requestID,
+                    target: position,
+                    succeeded: succeeded
+                )
+            }
+        }
+        decoder.onRecoverySeekCompleted = {
+            [weak self, weak decoder] requestID, _, position, succeeded in
+            guard let self,
+                  let decoder,
+                  self.customDecoder === decoder,
+                  let requestID
+            else { return }
+            Task {
+                await recoverySeekCoordinator.complete(
+                    requestID: requestID,
+                    target: position,
+                    succeeded: succeeded
+                )
             }
         }
         decoder.onMetrics = { [weak self, weak decoder] decoded, dropped, renderedAudio, buffered, videoEnd, _ in
@@ -934,6 +975,8 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         decoder.onFailure = { [weak self, weak decoder] error in
             guard let self, let decoder, self.customDecoder === decoder else { return }
             self.customFailure = error
+            Task { await seekCoordinator.cancelAll() }
+            Task { await recoverySeekCoordinator.cancelAll() }
         }
         try await waitForCustomVideoSurface(decoder)
         // Record autoplay intent before opening the source. The decoder's
@@ -1302,9 +1345,24 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     }
 
     func seek(by interval: TimeInterval) async -> Bool {
-        let upperBound = duration > 0 ? max(duration - 0.25, 0) : .greatestFiniteMagnitude
-        let base = pendingSeekTarget ?? currentTime
-        let target = min(max(base + interval, 0), upperBound)
+        let pendingInitialResume = isPreparing
+            && !didRestorePosition
+            && pendingSeekTarget == nil
+        let target = PlaybackContinuityPolicy.relativeSeekTarget(
+            by: interval,
+            currentPosition: currentTime,
+            pendingPosition: pendingSeekTarget,
+            initialResumePosition: pendingInitialResume ? resumePosition : nil,
+            duration: duration
+        )
+        if pendingInitialResume {
+            // The playback item/decoder may not exist yet. Preserve the tap as
+            // the new initial restore target instead of seeking its temporary
+            // zero clock and accidentally replacing the saved resume point.
+            resumePosition = target
+            currentTime = target
+            return true
+        }
         return await performSeek(to: target, resume: wantsPlayback)
     }
 
@@ -1377,15 +1435,24 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             resume ? "yes" : "no",
             finished ? "yes" : "no"
         )
-        return finished && abs(currentTime - target) <= 2.5
+        let succeeded = finished && abs(currentTime - target) <= 2.5
+        if succeeded {
+            // Keep a possible engine retry aligned with the user's newest
+            // target, just as the custom decoder path already does.
+            resumePosition = currentTime
+        }
+        return succeeded
     }
 
     private func performCustomSeek(
         to requestedTarget: TimeInterval,
         resume: Bool,
-        requestRevision: Int
+        requestRevision: UInt64
     ) async -> Bool {
-        guard let customDecoder else {
+        guard let customDecoder,
+              let customSeekCoordinator,
+              let customRecoverySeekCoordinator
+        else {
             finishSeekRequest(requestRevision)
             return false
         }
@@ -1393,18 +1460,30 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             ? min(max(requestedTarget, 0), max(duration - 0.25, 0))
             : max(requestedTarget, 0)
         invalidateCustomSubtitles()
+        let sampledRecoveryPosition = customProgressPin ?? customDecoder.currentTime
+        let recoveryPosition = sampledRecoveryPosition.isFinite
+            ? max(sampledRecoveryPosition, 0)
+            : max(currentTime, 0)
+        // `performSeek` moves the decoder clock before the demux seek is known
+        // to have succeeded. Keep persistence and progress reporting on the
+        // last known-good playhead until the requested transition—or its
+        // recovery transition—has actually completed.
+        customProgressPin = recoveryPosition
         customDecoder.pause()
-        let completionRevision = customSeekRevision
-        customDecoder.seek(to: target)
-
-        while isCurrentSeekRequest(requestRevision),
-              !customSeekCompleted(
-                  after: completionRevision,
-                  target: target
-              ), customFailure == nil,
-              !Task.isCancelled {
-            try? await Task.sleep(for: .milliseconds(25))
+        let seekRequest = await customSeekCoordinator.begin(
+            requestID: requestRevision,
+            target: target
+        )
+        guard isCurrentSeekRequest(requestRevision) else {
+            await customSeekCoordinator.discard(seekRequest)
+            logSupersededSeek(engine: "custom_rust", target: target)
+            return true
         }
+        customDecoder.seek(to: target, requestID: seekRequest.id)
+        let outcome = await customSeekCoordinator.wait(
+            for: seekRequest,
+            timeout: Self.customSeekTimeout
+        )
         guard isCurrentSeekRequest(requestRevision) else {
             logSupersededSeek(engine: "custom_rust", target: target)
             return true
@@ -1413,36 +1492,111 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             finishSeekRequest(requestRevision)
             return true
         }
-        let completionObserved = customSeekCompleted(
-            after: completionRevision,
-            target: target
-        )
-        let finished = completionObserved && customSeekSucceeded && customFailure == nil
-        wantsPlayback = resume
-        if resume, finished {
-            customDecoder.play(atRate: playbackRate)
+        let finished = outcome == .completed && customFailure == nil
+        let recoveryOutcome: PlaybackSeekOutcome?
+        if finished || customFailure != nil {
+            recoveryOutcome = nil
+        } else {
+            recoveryOutcome = await recoverCustomSeekIfNeeded(
+                decoder: customDecoder,
+                coordinator: customRecoverySeekCoordinator,
+                userRequest: seekRequest,
+                userOutcome: outcome,
+                recoveryPosition: recoveryPosition,
+                requestRevision: requestRevision
+            )
         }
+        guard isCurrentSeekRequest(requestRevision) else {
+            logSupersededSeek(engine: "custom_rust", target: target)
+            return true
+        }
+
+        let recovered = recoveryOutcome == .completed
         if finished {
+            customProgressPin = nil
             currentTime = max(customDecoder.currentTime, target)
             resumePosition = target
         } else {
-            let decoderTime = customDecoder.currentTime
-            if decoderTime.isFinite {
-                currentTime = max(decoderTime, 0)
+            currentTime = recoveryPosition
+            resumePosition = recoveryPosition
+            if recovered {
+                customProgressPin = nil
+            } else if recoveryOutcome != nil, customFailure == nil {
+                // Recovery failing is no longer a routine seek failure: the
+                // decoder clock cannot be trusted for progress persistence.
+                // Keep it paused and let the existing bounded runtime restart
+                // recreate the pipeline from the pinned safe playhead.
+                customFailure = BunnyPlaybackError.seekFailed
             }
         }
+        wantsPlayback = resume && customFailure == nil
+        if wantsPlayback, finished || recovered {
+            customDecoder.play(atRate: playbackRate)
+        }
         finishSeekRequest(requestRevision)
-        refreshPlaybackState()
+        if finished || recovered {
+            refreshPlaybackState()
+        }
+        let recoveryDescription = recoveryOutcome.map { String(describing: $0) }
+            ?? "not_needed"
         NSLog(
-            "BUNNY_PLAYER seek engine=custom_rust target=%.2f resume=%@ result=%@",
+            "BUNNY_PLAYER seek engine=custom_rust target=%.2f resume=%@ result=%@ outcome=%@ recovery=%@",
             target,
             resume ? "yes" : "no",
-            finished ? "completed" : "failed"
+            finished ? "completed" : "failed",
+            String(describing: outcome),
+            recoveryDescription
         )
         return finished
     }
 
-    private func beginSeekRequest(target: TimeInterval) -> Int {
+    private func recoverCustomSeekIfNeeded(
+        decoder: BunnyNativeDecoder,
+        coordinator: PlaybackSeekCoordinator,
+        userRequest: PlaybackSeekRequest,
+        userOutcome: PlaybackSeekOutcome,
+        recoveryPosition: TimeInterval,
+        requestRevision: UInt64
+    ) async -> PlaybackSeekOutcome? {
+        guard userOutcome == .timedOut || userOutcome == .failed else { return nil }
+        let recoveryRequest = await coordinator.begin(target: recoveryPosition)
+        guard isCurrentSeekRequest(requestRevision) else {
+            await coordinator.discard(recoveryRequest)
+            return .superseded
+        }
+
+        let scheduled: Bool
+        switch userOutcome {
+        case .timedOut:
+            let replacedTimedOutRequest = decoder.recoverFromTimedOutSeek(
+                to: recoveryPosition,
+                userRequestID: userRequest.id,
+                recoveryRequestID: recoveryRequest.id
+            )
+            scheduled = replacedTimedOutRequest || decoder.recoverFromFailedSeek(
+                to: recoveryPosition,
+                recoveryRequestID: recoveryRequest.id
+            )
+        case .failed:
+            scheduled = decoder.recoverFromFailedSeek(
+                to: recoveryPosition,
+                recoveryRequestID: recoveryRequest.id
+            )
+        default:
+            scheduled = false
+        }
+
+        guard scheduled else {
+            await coordinator.discard(recoveryRequest)
+            return .failed
+        }
+        return await coordinator.wait(
+            for: recoveryRequest,
+            timeout: Self.customSeekTimeout
+        )
+    }
+
+    private func beginSeekRequest(target: TimeInterval) -> UInt64 {
         seekRequestRevision &+= 1
         pendingSeekTarget = target
         if activeEngine == .customRust {
@@ -1452,11 +1606,11 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         return seekRequestRevision
     }
 
-    private func isCurrentSeekRequest(_ revision: Int) -> Bool {
+    private func isCurrentSeekRequest(_ revision: UInt64) -> Bool {
         revision == seekRequestRevision
     }
 
-    private func finishSeekRequest(_ revision: Int) {
+    private func finishSeekRequest(_ revision: UInt64) {
         guard isCurrentSeekRequest(revision) else { return }
         pendingSeekTarget = nil
         isSeeking = false
@@ -1466,16 +1620,12 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         seekRequestRevision &+= 1
         pendingSeekTarget = nil
         isSeeking = false
-    }
-
-    private func customSeekCompleted(
-        after revision: Int,
-        target: TimeInterval
-    ) -> Bool {
-        guard customSeekRevision > revision,
-              let customSeekCompletedTarget
-        else { return false }
-        return abs(customSeekCompletedTarget - target) <= 0.01
+        if let customSeekCoordinator {
+            Task { await customSeekCoordinator.cancelAll() }
+        }
+        if let customRecoverySeekCoordinator {
+            Task { await customRecoverySeekCoordinator.cancelAll() }
+        }
     }
 
     private func logSupersededSeek(engine: String, target: TimeInterval) {
@@ -1637,6 +1787,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     }
 
     func handleMemoryPressure() {
+        customDecoder?.handleMemoryPressure()
         Task {
             await StreamTransportBridge.shared.releaseCachedData()
         }
@@ -1725,6 +1876,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         player.replaceCurrentItem(with: nil)
         customDecoder?.stop()
         customDecoder = nil
+        discardCustomSeekCoordinator()
         clearMediaOutputs()
         let sourceURL = plan.primaryURL
         Task {
@@ -1739,6 +1891,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         player.replaceCurrentItem(with: nil)
         customDecoder?.stop()
         customDecoder = nil
+        discardCustomSeekCoordinator()
         clearMediaOutputs()
         isPreparing = true
         failureMessage = nil
@@ -1763,9 +1916,6 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         customFirstFrame = false
         customEnded = false
         customFailure = nil
-        customSeekRevision = 0
-        customSeekSucceeded = false
-        customSeekCompletedTarget = nil
         customBufferedSeconds = 0
         customVideoQueueEnd = 0
         customDecodedFrames = 0
@@ -1796,10 +1946,23 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         player.replaceCurrentItem(with: nil)
         customDecoder?.stop()
         customDecoder = nil
+        discardCustomSeekCoordinator()
         customMediaInfo = nil
         usesCustomDecoder = false
         clearMediaOutputs()
         invalidateCustomSubtitles()
+    }
+
+    private func discardCustomSeekCoordinator() {
+        let seekCoordinator = customSeekCoordinator
+        let recoveryCoordinator = customRecoverySeekCoordinator
+        customSeekCoordinator = nil
+        customRecoverySeekCoordinator = nil
+        customProgressPin = nil
+        Task {
+            await seekCoordinator?.cancelAll()
+            await recoveryCoordinator?.cancelAll()
+        }
     }
 
     private var hasActivePlayback: Bool {
@@ -2074,10 +2237,15 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                 isBuffering = false
                 return
             }
-            let decoderTime = customDecoder.currentTime
-            if decoderTime.isFinite {
-                currentTime = max(decoderTime, 0)
-                resumePosition = currentTime
+            if let customProgressPin {
+                currentTime = customProgressPin
+                resumePosition = customProgressPin
+            } else {
+                let decoderTime = customDecoder.currentTime
+                if decoderTime.isFinite {
+                    currentTime = max(decoderTime, 0)
+                    resumePosition = currentTime
+                }
             }
             isPlaying = wantsPlayback && customDecoder.rate > 0
             let nominalFrameRate = customMediaInfo?.nominalFrameRate ?? 0

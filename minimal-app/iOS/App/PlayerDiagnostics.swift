@@ -21,6 +21,7 @@ struct PlayerStressMetrics: Codable, Sendable {
     let nominalFPS: Double
     let enqueuedVideoFPS: Double
     let presentedVideoFPS: Double?
+    let presentedCadenceStatus: PlaybackPresentedCadenceStatus
     let droppedVideoFrames: UInt32
     let corruptedVideoFrames: UInt32?
     let averageFrameDelayMilliseconds: Double?
@@ -73,18 +74,27 @@ struct PlayerStressMetrics: Codable, Sendable {
             || corruptedVideoFrames == 0
         let displayCadenceIsStable = displayMissedRefreshes == nil
             || displayMissedRefreshes! <= 3
+        let interactionDropsAreBounded = PlaybackStressPassPolicy
+            .interactionDropsAreWithinBudget(
+                droppedFrames: preSampleDroppedVideoFrames,
+                seekAttempts: seekAttempts,
+                pauseResumeAttempts: pauseResumeAttempts
+            )
         return startupMilliseconds <= 12_000
             && seeksPassed
             && pauseResumesPassed
             && pausedSeekPreserved
-            && realTimeRatio >= 0.95
+            && PlaybackStressPassPolicy.realTimeRatioIsPlausible(realTimeRatio)
             && rendererUnderflowSkewP95Milliseconds <= 150
             && rendererUnderflowSkewMaxMilliseconds <= 300
             && longestVideoUnderflowMilliseconds <= 350
             && videoUnderflowIntervals == 0
             && videoQueueStateTransitions <= 2
             && droppedVideoFrames <= 5
+            && interactionDropsAreBounded
             && packetCadenceIsPlausible
+            && (presentedCadenceStatus == .verified
+                || presentedCadenceStatus == .notApplicable)
             && rendererDelayIsPlausible
             && rendererCorruptionIsAbsent
             && displayCadenceIsStable
@@ -157,6 +167,9 @@ private final class BunnyStressProbe {
     var ended = false
     var seekRevision = 0
     var seekSucceeded = false
+    var recoveryRevision = 0
+    var recoverySucceeded = false
+    var lastRecoveryReason: BunnyNativeRecoverySeekReason?
     var decodedVideoFrames = 0
     var droppedVideoFrames = 0
     var renderedAudioFrames = 0
@@ -184,10 +197,16 @@ private final class BunnyStressProbe {
         decoder.onFirstFrame = { [weak self] in
             self?.firstFrameRendered = true
         }
-        decoder.onSeekCompleted = { [weak self] _, succeeded in
+        decoder.onSeekCompleted = { [weak self] _, _, succeeded in
             guard let self else { return }
             seekSucceeded = succeeded
             seekRevision += 1
+        }
+        decoder.onRecoverySeekCompleted = { [weak self] _, reason, _, succeeded in
+            guard let self else { return }
+            recoverySucceeded = succeeded
+            lastRecoveryReason = reason
+            recoveryRevision += 1
         }
         decoder.onMetrics = { [weak self] decoded, dropped, audio, buffered, videoEnd, audioEnd in
             guard let self else { return }
@@ -322,7 +341,10 @@ private enum BunnyPlayerStressBenchmark {
             let decodedBeforeSeek = decoder.metricsSnapshot.decodedVideoFrames
             let seekStartedAt = ProcessInfo.processInfo.systemUptime
             NSLog("PLAYER_STRESS_STEP seek_begin title=%@ index=%ld", title, seekIndex + 1)
-            decoder.seek(to: target)
+            decoder.seek(
+                to: target,
+                requestID: UInt64(probe.seekRevision + 1)
+            )
             try await waitUntil(timeout: 15, probe: probe) {
                 probe.seekRevision > revision
             }
@@ -379,7 +401,10 @@ private enum BunnyPlayerStressBenchmark {
             let pausedSeekTarget = min(max(duration * 0.48, 0.5), duration - 1)
             decoder.pause()
             let pausedSeekRevision = probe.seekRevision
-            decoder.seek(to: pausedSeekTarget)
+            decoder.seek(
+                to: pausedSeekTarget,
+                requestID: UInt64(probe.seekRevision + 1)
+            )
             try await waitUntil(timeout: 15, probe: probe) {
                 probe.seekRevision > pausedSeekRevision
             }
@@ -526,6 +551,12 @@ private enum BunnyPlayerStressBenchmark {
             rendererMetricsEndedAt.videoQueueEnd,
             rendererMetricsEndedAt.audioQueueEnd
         )
+        let presentedVideoFPS = presentationMetrics.rendererFramesPerSecond
+        let presentedCadenceStatus = PlaybackStressPassPolicy.presentedCadenceStatus(
+            hasVideo: info.hasVideo,
+            nominalFPS: info.nominalFrameRate,
+            presentedFPS: presentedVideoFPS
+        )
         return PlayerStressMetrics(
             title: title,
             startupMilliseconds: startupMilliseconds,
@@ -545,7 +576,8 @@ private enum BunnyPlayerStressBenchmark {
             videoQueueStateTransitions: videoQueueStateTransitions,
             nominalFPS: info.nominalFrameRate,
             enqueuedVideoFPS: enqueuedVideoFPS,
-            presentedVideoFPS: presentationMetrics.rendererFramesPerSecond,
+            presentedVideoFPS: presentedVideoFPS,
+            presentedCadenceStatus: presentedCadenceStatus,
             droppedVideoFrames: UInt32(clamping: rendererDropsDuringSample),
             corruptedVideoFrames: presentationMetrics.rendererCorruptedFrames.map {
                 UInt32(clamping: $0)
@@ -618,7 +650,7 @@ private enum BunnyPlayerStressBenchmark {
         info: BunnyNativeMediaInfo
     ) async throws {
         guard info.hasAudio else { throw PlayerStressError.missingAudioOutput }
-        let revision = probe.seekRevision
+        let revision = probe.recoveryRevision
         let position = decoder.currentTime
         let renderedAudioFrames = probe.renderedAudioFrames
 
@@ -627,7 +659,9 @@ private enum BunnyPlayerStressBenchmark {
             object: decoder.audioRenderer
         )
         try await waitUntil(timeout: 8, probe: probe) {
-            probe.seekRevision > revision && probe.seekSucceeded
+            probe.recoveryRevision > revision
+                && probe.recoverySucceeded
+                && probe.lastRecoveryReason == .automaticAudioRendererFlush
         }
         decoder.play(atRate: 1)
         try await waitUntil(timeout: 8, probe: probe) {
@@ -654,13 +688,15 @@ private enum BunnyPlayerStressBenchmark {
         }) else {
             throw PlayerStressError.missingAlternateAudioTrack
         }
-        let revision = probe.seekRevision
+        let revision = probe.recoveryRevision
         let position = decoder.currentTime
         let renderedAudioFrames = probe.renderedAudioFrames
 
         decoder.selectAudioStreamIndex(alternate.streamIndex)
         try await waitUntil(timeout: 8, probe: probe) {
-            probe.seekRevision > revision && probe.seekSucceeded
+            probe.recoveryRevision > revision
+                && probe.recoverySucceeded
+                && probe.lastRecoveryReason == .audioTrackSelection
         }
         decoder.play(atRate: 1)
         try await waitUntil(timeout: 8, probe: probe) {

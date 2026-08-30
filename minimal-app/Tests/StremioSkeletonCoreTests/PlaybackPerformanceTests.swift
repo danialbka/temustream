@@ -123,6 +123,140 @@ final class PlaybackPerformanceTests: XCTestCase {
         XCTAssertEqual(snapshot.health, .attention)
     }
 
+    func testNativePlaybackTrackerNormalizesNonStandardPlaybackRate() throws {
+        var tracker = NativePlaybackPerformanceTracker(
+            startedAt: 0,
+            initialPosition: 0
+        )
+        _ = tracker.observe(
+            at: 1,
+            position: 0,
+            isPlaying: true,
+            bufferSeconds: 4,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil,
+            playbackRate: 1.5
+        )
+        let snapshot = tracker.observe(
+            at: 11,
+            position: 15,
+            isPlaying: true,
+            bufferSeconds: 4,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil,
+            playbackRate: 1.5
+        )
+
+        XCTAssertEqual(try XCTUnwrap(snapshot.clockRatio), 1, accuracy: 0.001)
+        XCTAssertEqual(snapshot.health, .good)
+    }
+
+    func testNativePlaybackTrackerExcludesSeekDiscontinuity() throws {
+        var tracker = NativePlaybackPerformanceTracker(
+            startedAt: 0,
+            initialPosition: 0
+        )
+        _ = tracker.observe(
+            at: 1,
+            position: 0,
+            isPlaying: true,
+            bufferSeconds: 4,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil
+        )
+        _ = tracker.observe(
+            at: 6,
+            position: 5,
+            isPlaying: true,
+            bufferSeconds: 4,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil
+        )
+        _ = tracker.observe(
+            at: 6.5,
+            position: 300,
+            isPlaying: true,
+            bufferSeconds: 4,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil,
+            discontinuity: true
+        )
+        let snapshot = tracker.observe(
+            at: 11.5,
+            position: 305,
+            isPlaying: true,
+            bufferSeconds: 4,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil
+        )
+
+        XCTAssertEqual(try XCTUnwrap(snapshot.clockRatio), 1, accuracy: 0.001)
+        XCTAssertEqual(snapshot.health, .good)
+    }
+
+    func testNativePlaybackTrackerExcludesPausedWallTime() throws {
+        var tracker = NativePlaybackPerformanceTracker(
+            startedAt: 0,
+            initialPosition: 0
+        )
+        _ = tracker.observe(
+            at: 1,
+            position: 0,
+            isPlaying: true,
+            bufferSeconds: nil,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil
+        )
+        _ = tracker.observe(
+            at: 5,
+            position: 4,
+            isPlaying: false,
+            bufferSeconds: nil,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil
+        )
+        _ = tracker.observe(
+            at: 65,
+            position: 4,
+            isPlaying: true,
+            bufferSeconds: nil,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil
+        )
+        let snapshot = tracker.observe(
+            at: 73,
+            position: 12,
+            isPlaying: true,
+            bufferSeconds: nil,
+            stalls: 0,
+            droppedVideoFrames: 0,
+            observedBitrate: nil,
+            indicatedBitrate: nil
+        )
+
+        XCTAssertEqual(try XCTUnwrap(snapshot.clockRatio), 1, accuracy: 0.001)
+        XCTAssertEqual(snapshot.wallDuration, 8, accuracy: 0.001)
+        XCTAssertEqual(snapshot.health, .good)
+    }
+
     func testInFlightGateCoalescesIdenticalRequests() async throws {
         let gate = InFlightRequestGate<String, Int>()
         let counter = InvocationCounter()

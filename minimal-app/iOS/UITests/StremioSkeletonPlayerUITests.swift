@@ -188,6 +188,49 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
         attachScreenshot(named: "mobile-interrupted-range-seek-recovered")
     }
 
+    func testBackFifteenFromResumedPlaybackDoesNotJumpToStart() throws {
+        let fixtureDuration: CGFloat = 1_201
+        let expectedPosition: CGFloat = 585 / fixtureDuration
+        let app = launchApp(
+            environment: [
+                "SKELETON_PLAYER_FIXTURE_URL":
+                    "\(fixtureBaseURL)/sample-content.mp4",
+                "SKELETON_PLAYER_FIXTURE_INITIAL_POSITION": "600",
+                "SKELETON_PLAYER_FIXTURE_PREPARE_DELAY_SECONDS": "15",
+                "SKELETON_PLAYER_CONTROLS_LOCKED": "1",
+                "SKELETON_PLAYER_DEBUG_OVERLAY": "1",
+            ]
+        )
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["player-startup-status"]
+                .waitForExistence(timeout: 10),
+            "The tap must occur while the initial resume is still pending"
+        )
+        let back = app.buttons["Back 15 seconds"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.tap()
+
+        XCTAssertTrue(
+            waitForDebugState("Playing", in: app, timeout: 25),
+            "Resumed playback should settle after the relative seek"
+        )
+        let timeline = app.descendants(matching: .any)["player-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            waitForSliderPosition(
+                timeline,
+                near: expectedPosition,
+                tolerance: 0.025,
+                timeout: 8
+            ),
+            "Back 15 from 10:00 should settle near 9:45, not the beginning; value=\(String(describing: timeline.value))"
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["bunny-player-toast"].exists)
+        XCTAssertFalse(app.otherElements["player-error"].exists)
+        attachScreenshot(named: "mobile-resume-back-fifteen-continues-at-nine-forty-five")
+    }
+
     func testDebugOverlayReportsDecodedDynamicRange() throws {
         let app = launchApp(
             environment: [

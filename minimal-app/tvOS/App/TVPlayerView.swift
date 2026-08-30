@@ -162,6 +162,7 @@ private struct TVNativePlaybackView: View {
   @State private var didReportReady = false
   @State private var didReportFinal = false
   @State private var lastCheckpointPosition: TimeInterval = 0
+  @State private var fallbackResumePosition: TimeInterval?
   @State private var diagnosticSnapshot: NativePlaybackPerformanceSnapshot?
 
   var body: some View {
@@ -194,10 +195,15 @@ private struct TVNativePlaybackView: View {
   private func play(_ url: URL) async {
     didReportFinal = false
     diagnosticSnapshot = nil
+    let attemptInitialPosition = activeURLIndex == 0
+      ? initialPosition
+      : fallbackResumePosition ?? initialPosition
+    var attemptDidBecomeReady = false
+    lastCheckpointPosition = attemptInitialPosition
     let diagnosticStartedAt = ProcessInfo.processInfo.systemUptime
     var diagnosticTracker = NativePlaybackPerformanceTracker(
       startedAt: diagnosticStartedAt,
-      initialPosition: initialPosition
+      initialPosition: attemptInitialPosition
     )
     var nextDiagnosticLogAt: TimeInterval = 0
     var lastDiagnosticPublishAt: TimeInterval = -.infinity
@@ -211,7 +217,11 @@ private struct TVNativePlaybackView: View {
     for _ in 0..<180 {
       guard !Task.isCancelled, player.currentItem === item else { return }
       if item.status == .failed {
-        failURL(item.error?.localizedDescription ?? "The player rejected this source.")
+        failURL(
+          item.error?.localizedDescription ?? "The player rejected this source.",
+          attemptDidBecomeReady: attemptDidBecomeReady,
+          attemptedResumePosition: attemptInitialPosition
+        )
         return
       }
       if item.status == .readyToPlay {
@@ -222,13 +232,17 @@ private struct TVNativePlaybackView: View {
     }
 
     guard becameReady else {
-      failURL("The stream did not become ready in time.")
+      failURL(
+        "The stream did not become ready in time.",
+        attemptDidBecomeReady: attemptDidBecomeReady,
+        attemptedResumePosition: attemptInitialPosition
+      )
       return
     }
 
-    if initialPosition >= PlaybackProgress.minimumResumePosition {
+    if attemptInitialPosition >= PlaybackProgress.minimumResumePosition {
       await player.seek(
-        to: CMTime(seconds: initialPosition, preferredTimescale: 600),
+        to: CMTime(seconds: attemptInitialPosition, preferredTimescale: 600),
         toleranceBefore: .zero,
         toleranceAfter: .zero
       )
@@ -238,7 +252,11 @@ private struct TVNativePlaybackView: View {
     var startupTicks = 0
     while !Task.isCancelled, player.currentItem === item {
       if item.status == .failed {
-        failURL(item.error?.localizedDescription ?? "The stream stopped unexpectedly.")
+        failURL(
+          item.error?.localizedDescription ?? "The stream stopped unexpectedly.",
+          attemptDidBecomeReady: attemptDidBecomeReady,
+          attemptedResumePosition: attemptInitialPosition
+        )
         return
       }
 
@@ -258,7 +276,8 @@ private struct TVNativePlaybackView: View {
         observedBitrate: accessEvent.flatMap { $0.observedBitrate > 0 ? $0.observedBitrate : nil },
         indicatedBitrate: accessEvent.flatMap {
           $0.indicatedBitrate > 0 ? $0.indicatedBitrate : nil
-        }
+        },
+        playbackRate: player.rate > 0 ? Double(player.rate) : 1
       )
       if NativePlaybackDiagnostics.isEnabled,
         timestamp - lastDiagnosticPublishAt >= 1
@@ -277,15 +296,18 @@ private struct TVNativePlaybackView: View {
         )
         nextDiagnosticLogAt += 5
       }
-      if !didReportReady,
+      if !attemptDidBecomeReady,
         player.timeControlStatus == .playing || player.rate > 0,
-        position >= max(initialPosition - 1, 0)
+        position >= max(attemptInitialPosition - 1, 0)
       {
-        didReportReady = true
-        onReady()
+        attemptDidBecomeReady = true
+        if !didReportReady {
+          didReportReady = true
+          onReady()
+        }
       }
 
-      if didReportReady,
+      if attemptDidBecomeReady,
         position >= PlaybackProgress.minimumResumePosition,
         position - lastCheckpointPosition >= 15
       {
@@ -298,10 +320,14 @@ private struct TVNativePlaybackView: View {
         return
       }
 
-      if !didReportReady {
+      if !attemptDidBecomeReady {
         startupTicks += 1
         if startupTicks >= 180 {
-          failURL("The stream remained buffered for too long.")
+          failURL(
+            "The stream remained buffered for too long.",
+            attemptDidBecomeReady: attemptDidBecomeReady,
+            attemptedResumePosition: attemptInitialPosition
+          )
           return
         }
       }
@@ -310,9 +336,17 @@ private struct TVNativePlaybackView: View {
   }
 
   @MainActor
-  private func failURL(_ message: String) {
+  private func failURL(
+    _ message: String,
+    attemptDidBecomeReady: Bool,
+    attemptedResumePosition: TimeInterval
+  ) {
+    let failedPosition = currentPosition
     player.pause()
     if playbackURLs.indices.contains(activeURLIndex + 1) {
+      fallbackResumePosition = attemptDidBecomeReady && failedPosition.isFinite
+        ? max(failedPosition, 0)
+        : max(attemptedResumePosition, 0)
       activeURLIndex += 1
     } else {
       onFailure(message)

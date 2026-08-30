@@ -60,6 +60,7 @@ final class WatchPlayerController: ObservableObject {
     private var nextPerformanceLogAt: TimeInterval = 0
     private var lastPerformancePublishAt: TimeInterval = -.infinity
     private var notificationStallCount = 0
+    private var performanceDiscontinuityPending = false
 
     init(
         url: URL,
@@ -86,6 +87,7 @@ final class WatchPlayerController: ObservableObject {
         nextPerformanceLogAt = 0
         lastPerformancePublishAt = -.infinity
         notificationStallCount = 0
+        performanceDiscontinuityPending = false
         performanceTracker = NativePlaybackPerformanceTracker(
             startedAt: ProcessInfo.processInfo.systemUptime,
             initialPosition: resumePosition
@@ -136,6 +138,7 @@ final class WatchPlayerController: ObservableObject {
         let upperBound = duration > 0 ? duration : max(requestedPosition, 0)
         let bounded = min(max(requestedPosition, 0), upperBound)
         position = bounded
+        performanceDiscontinuityPending = true
         player.seek(
             to: CMTime(seconds: bounded, preferredTimescale: 600),
             toleranceBefore: .zero,
@@ -307,6 +310,8 @@ final class WatchPlayerController: ObservableObject {
         let now = ProcessInfo.processInfo.systemUptime
         let event = item.accessLog()?.events.last
         let eventStalls = event.flatMap { $0.numberOfStalls >= 0 ? $0.numberOfStalls : nil }
+        let discontinuity = performanceDiscontinuityPending
+        performanceDiscontinuityPending = false
         let snapshot = tracker.observe(
             at: now,
             position: position,
@@ -319,7 +324,9 @@ final class WatchPlayerController: ObservableObject {
             observedBitrate: event.flatMap { $0.observedBitrate > 0 ? $0.observedBitrate : nil },
             indicatedBitrate: event.flatMap {
                 $0.indicatedBitrate > 0 ? $0.indicatedBitrate : nil
-            }
+            },
+            playbackRate: playbackRate,
+            discontinuity: discontinuity
         )
         performanceTracker = tracker
         if now - lastPerformancePublishAt >= 1 {

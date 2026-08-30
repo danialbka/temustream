@@ -1050,7 +1050,10 @@ struct AVPlayerScreen: View {
             }
         }
         .onDisappear {
-            if let watchRegistrationID { watchChannel?.unregister(watchRegistrationID) }
+            if let watchRegistrationID {
+                watchChannel?.unregister(watchRegistrationID)
+                self.watchRegistrationID = nil
+            }
             reportCurrentProgress(updateKind: .final)
             player.pause()
             player.replaceCurrentItem(with: nil)

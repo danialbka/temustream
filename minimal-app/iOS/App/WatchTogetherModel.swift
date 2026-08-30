@@ -143,15 +143,20 @@ final class WatchPlaybackControlChannel: ObservableObject {
     @discardableResult
     func register(sample: @escaping SampleProvider, apply: @escaping AdjustmentApplier) -> UUID {
         let id = UUID()
+        suppressionGeneration += 1
+        suppressUntil = 0
         adapter = Adapter(id: id, sample: sample, apply: apply)
         lastSample = sample()
         lastSampleAt = ProcessInfo.processInfo.systemUptime
+        lastHeartbeatAt = lastSampleAt
         ensureMonitor()
         return id
     }
 
     func unregister(_ id: UUID) {
         guard adapter?.id == id else { return }
+        suppressionGeneration += 1
+        suppressUntil = 0
         adapter = nil
         lastSample = nil
     }
