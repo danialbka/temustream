@@ -139,6 +139,31 @@ public struct RecommendationImpression: Codable, Equatable, Identifiable, Sendab
         self.lastShownAt = lastShownAt
         self.showCount = max(showCount, 1)
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case mediaID
+        case firstShownAt
+        case lastShownAt
+        case showCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            mediaID: try container.decode(LocalMediaIdentity.self, forKey: .mediaID),
+            firstShownAt: try container.decode(Date.self, forKey: .firstShownAt),
+            lastShownAt: try container.decode(Date.self, forKey: .lastShownAt),
+            showCount: try container.decode(Int.self, forKey: .showCount)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(mediaID, forKey: .mediaID)
+        try container.encode(firstShownAt, forKey: .firstShownAt)
+        try container.encode(lastShownAt, forKey: .lastShownAt)
+        try container.encode(showCount, forKey: .showCount)
+    }
 }
 
 public struct LocalRecommendation: Equatable, Identifiable, Sendable {
@@ -373,7 +398,7 @@ public actor RecommendationHistoryStore {
                     mediaID: identity,
                     firstShownAt: existing.firstShownAt,
                     lastShownAt: shownAt,
-                    showCount: existing.showCount + 1
+                    showCount: Self.saturatedShowCountSum(existing.showCount, 1)
                 )
             } else {
                 current.append(
@@ -416,13 +441,21 @@ public actor RecommendationHistoryStore {
                     mediaID: impression.id,
                     firstShownAt: min(existing.firstShownAt, impression.firstShownAt),
                     lastShownAt: max(existing.lastShownAt, impression.lastShownAt),
-                    showCount: existing.showCount + impression.showCount
+                    showCount: saturatedShowCountSum(
+                        existing.showCount,
+                        impression.showCount
+                    )
                 )
             } else {
                 merged[impression.id] = impression
             }
         }
         return merged.values.sorted(by: impressionOrder)
+    }
+
+    private static func saturatedShowCountSum(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = max(lhs, 1).addingReportingOverflow(max(rhs, 1))
+        return overflow ? .max : sum
     }
 
     private static func impressionOrder(

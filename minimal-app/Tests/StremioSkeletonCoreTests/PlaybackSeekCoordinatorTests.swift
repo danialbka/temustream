@@ -92,4 +92,66 @@ final class PlaybackSeekCoordinatorTests: XCTestCase {
         let currentOutcome = await coordinator.wait(for: current, timeout: 1)
         XCTAssertEqual(currentOutcome, .completed)
     }
+
+    func testImplicitIdentifierStartsNewNonzeroEpochAfterMaximum() async {
+        let coordinator = PlaybackSeekCoordinator()
+        let maximum = await coordinator.begin(requestID: .max, target: 10)
+        await coordinator.complete(
+            requestID: maximum.id,
+            target: maximum.target,
+            succeeded: true
+        )
+        let maximumOutcome = await coordinator.wait(for: maximum, timeout: 1)
+        XCTAssertEqual(maximumOutcome, .completed)
+
+        let next = await coordinator.begin(target: 20)
+        XCTAssertEqual(next.id, 1)
+        await coordinator.complete(
+            requestID: next.id,
+            target: next.target,
+            succeeded: true
+        )
+        let nextOutcome = await coordinator.wait(for: next, timeout: 1)
+        XCTAssertEqual(nextOutcome, .completed)
+    }
+
+    func testExplicitIdentifierCanStartNewEpochAfterMaximum() async {
+        let coordinator = PlaybackSeekCoordinator()
+        let maximum = await coordinator.begin(requestID: .max, target: 10)
+        await coordinator.complete(
+            requestID: maximum.id,
+            target: maximum.target,
+            succeeded: true
+        )
+        let maximumOutcome = await coordinator.wait(for: maximum, timeout: 1)
+        XCTAssertEqual(maximumOutcome, .completed)
+
+        let next = await coordinator.begin(requestID: 1, target: 20)
+        await coordinator.complete(
+            requestID: next.id,
+            target: next.target,
+            succeeded: true
+        )
+        let nextOutcome = await coordinator.wait(for: next, timeout: 1)
+        XCTAssertEqual(nextOutcome, .completed)
+    }
+
+    func testNewEpochDoesNotConsumeResolvedOutcomeFromReusedIdentifier() async {
+        let coordinator = PlaybackSeekCoordinator()
+        let oldFirst = await coordinator.begin(target: 10)
+        _ = await coordinator.begin(target: 20)
+        let maximum = await coordinator.begin(requestID: .max, target: 30)
+        await coordinator.complete(
+            requestID: maximum.id,
+            target: maximum.target,
+            succeeded: true
+        )
+        _ = await coordinator.wait(for: maximum, timeout: 1)
+
+        let newFirst = await coordinator.begin(target: 40)
+        let outcome = await coordinator.wait(for: newFirst, timeout: 0.01)
+
+        XCTAssertEqual(oldFirst.id, newFirst.id)
+        XCTAssertEqual(outcome, .timedOut)
+    }
 }

@@ -287,6 +287,55 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
         attachScreenshot(named: "mobile-resume-back-fifteen-continues-at-nine-forty-five")
     }
 
+    func testResumedCustomMKVStartsAtSavedPositionAndAdvances() throws {
+        let fixtureDuration: CGFloat = 60
+        let resumePosition: CGFloat = 30
+        let app = launchApp(
+            environment: [
+                "SKELETON_PLAYER_FIXTURE_URL":
+                    "\(fixtureBaseURL)/stress-subtitles.mkv",
+                "SKELETON_PLAYER_FIXTURE_INITIAL_POSITION":
+                    String(describing: resumePosition),
+                "SKELETON_PLAYER_FIXTURE_MANUAL_START": "1",
+                "SKELETON_PLAYER_CONTROLS_LOCKED": "1",
+                "SKELETON_PLAYER_DEBUG_OVERLAY": "1",
+            ]
+        )
+        startFixturePlayback(in: app)
+
+        XCTAssertTrue(
+            waitForDebugState("Playing", in: app, timeout: 20),
+            "A resumed custom-decoder stream must leave its opening state"
+        )
+        XCTAssertFalse(
+            app.descendants(matching: .any)["player-startup-status"].exists,
+            "The startup overlay must clear after the saved-position seek"
+        )
+        let timeline = app.descendants(matching: .any)["player-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            waitForSliderPosition(
+                timeline,
+                near: resumePosition / fixtureDuration,
+                tolerance: 0.08,
+                timeout: 5
+            ),
+            "Resume should settle near 00:30 instead of remaining at 00:00; value=\(String(describing: timeline.value))"
+        )
+        let resumedSeconds = sliderElapsedSeconds(timeline)
+        XCTAssertTrue(
+            waitForLivePlaybackAdvance(
+                timeline,
+                fromSeconds: resumedSeconds,
+                timeout: 5
+            ),
+            "The media clock must advance after the initial resume seek"
+        )
+        XCTAssertFalse(app.otherElements["player-error"].exists)
+        XCTAssertEqual(app.state, .runningForeground)
+        attachScreenshot(named: "mobile-resumed-custom-mkv-playing")
+    }
+
     func testExpiredProviderURLIsResolvedAgainBeforeSourceFailover() throws {
         _ = try Data(
             contentsOf: XCTUnwrap(

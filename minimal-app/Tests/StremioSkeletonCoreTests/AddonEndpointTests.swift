@@ -8,6 +8,26 @@ final class AddonEndpointTests: XCTestCase {
         XCTAssertEqual(endpoint.manifestURL.absoluteString, "https://example.com/addon/manifest.json")
     }
 
+    func testCompleteManifestInputPreservesQueryToken() throws {
+        let endpoint = try AddonEndpoint(
+            manifestInput: "https://example.com/addon/manifest.json?token=abc123"
+        )
+        XCTAssertEqual(
+            endpoint.manifestURL.absoluteString,
+            "https://example.com/addon/manifest.json?token=abc123"
+        )
+    }
+
+    func testDirectoryManifestInputAppendsPathBeforeQuery() throws {
+        let endpoint = try AddonEndpoint(
+            manifestInput: "https://example.com/addon/?token=abc123"
+        )
+        XCTAssertEqual(
+            endpoint.manifestURL.absoluteString,
+            "https://example.com/addon/manifest.json?token=abc123"
+        )
+    }
+
     func testRejectsInsecureRemoteManifest() {
         XCTAssertThrowsError(try AddonEndpoint(manifestInput: "http://example.com/manifest.json"))
     }

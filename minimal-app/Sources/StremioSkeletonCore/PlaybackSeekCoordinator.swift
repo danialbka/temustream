@@ -37,12 +37,27 @@ public actor PlaybackSeekCoordinator {
         requestID: UInt64? = nil,
         target: TimeInterval
     ) -> PlaybackSeekRequest {
-        let resolvedRequestID = requestID ?? (nextRequestID &+ 1)
+        let resolvedRequestID: UInt64
+        if let requestID {
+            if nextRequestID == .max, requestID > 0, requestID < .max {
+                nextRequestID = 0
+            }
+            resolvedRequestID = requestID
+        } else {
+            if nextRequestID == .max {
+                nextRequestID = 0
+            }
+            resolvedRequestID = nextRequestID + 1
+        }
         let request = PlaybackSeekRequest(
             id: resolvedRequestID,
             target: target.isFinite ? max(target, 0) : 0
         )
         guard resolvedRequestID > nextRequestID else { return request }
+        // A UInt64 epoch rollover intentionally reuses numeric identifiers.
+        // Do not let a terminal result retained from the previous epoch
+        // resolve the newly accepted request with the same ID.
+        resolvedOutcomes.removeValue(forKey: resolvedRequestID)
         if let activeRequest {
             resolve(requestID: activeRequest.id, outcome: .superseded)
         }

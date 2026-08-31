@@ -33,6 +33,22 @@ public enum PlaybackBufferingPolicy {
     public static let videoTimingCalibrationPacketLimit = 48
     public static let videoTimingCalibrationSpan: TimeInterval = 2
 
+    /// `AVSampleBufferAudioRenderer` can keep reporting backpressure after a
+    /// flush while its synchronizer is stopped at a seek target. The seek
+    /// cannot complete until the selected audio track consumes its preroll and
+    /// reaches the first sample at the target, which creates a circular wait if
+    /// normal renderer readiness remains the only admission signal.
+    ///
+    /// Permit that bounded seek preroll even while readiness is stale. The
+    /// caller still applies the normal renderer-lead cap, and this exception
+    /// ends as soon as the seek transition completes.
+    public static func audioRendererCanAcceptPacket(
+        rendererIsReady: Bool,
+        hasPendingSeekTransition: Bool
+    ) -> Bool {
+        rendererIsReady || hasPendingSeekTransition
+    }
+
     /// Matroska carries PTS but no authoritative DTS. Measure one decode-order
     /// GOP before enqueueing video, then apply one stable, millisecond-quantized
     /// lead to the monotonic decode timeline. A stable offset preserves DTS

@@ -38,13 +38,12 @@ public struct AddonEndpoint: Equatable, Sendable {
     }
 
     public init(manifestInput: String) throws {
-        var value = manifestInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !value.hasSuffix("/manifest.json") {
-            value = value.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            value += "/manifest.json"
-        }
-        guard let url = URL(string: value) else {
+        let value = manifestInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var url = URL(string: value) else {
             throw AddonEndpointError.invalidManifestURL
+        }
+        if url.lastPathComponent != "manifest.json" {
+            url.appendPathComponent("manifest.json")
         }
         try self.init(manifestURL: url)
     }

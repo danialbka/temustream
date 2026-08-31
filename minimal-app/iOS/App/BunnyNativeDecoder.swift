@@ -2202,6 +2202,11 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 let maximumRendererLead = PlaybackBufferingPolicy.maximumRendererQueueLead
                 let audioHasCapacity = !hasAudio
                     || audioQueueEnd - clock < maximumRendererLead
+                let audioRendererCanAcceptPacket = PlaybackBufferingPolicy
+                    .audioRendererCanAcceptPacket(
+                        rendererIsReady: audioRenderer.isReadyForMoreMediaData,
+                        hasPendingSeekTransition: seekTransition != nil
+                    )
                 let videoDecodeHasCapacity = !hasVideo
                     || (videoDecompression?.canAcceptMore ?? false)
                 let subtitleReadyThrough = clock.isFinite ? clock + 12 : 12
@@ -2223,7 +2228,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         && videoDecodeHasCapacity,
                     audioReady: compressedPrerollReady
                         && audioHasCapacity
-                        && audioRenderer.isReadyForMoreMediaData,
+                        && audioRendererCanAcceptPacket,
                     subtitleReadyThrough: subtitleReadyThrough
                 )
 

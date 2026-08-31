@@ -2,6 +2,24 @@ import XCTest
 @testable import StremioSkeletonCore
 
 final class PlaybackBufferingPolicyTests: XCTestCase {
+    func testAudioRendererReadinessGatesNormalPlayback() {
+        XCTAssertFalse(PlaybackBufferingPolicy.audioRendererCanAcceptPacket(
+            rendererIsReady: false,
+            hasPendingSeekTransition: false
+        ))
+        XCTAssertTrue(PlaybackBufferingPolicy.audioRendererCanAcceptPacket(
+            rendererIsReady: true,
+            hasPendingSeekTransition: false
+        ))
+    }
+
+    func testPendingSeekCanFeedAudioPrerollThroughStaleBackpressure() {
+        XCTAssertTrue(PlaybackBufferingPolicy.audioRendererCanAcceptPacket(
+            rendererIsReady: false,
+            hasPendingSeekTransition: true
+        ))
+    }
+
     func testRendererLeadExceedsResumeReserveWithoutBecomingLongTermBuffer() {
         XCTAssertGreaterThan(
             PlaybackBufferingPolicy.maximumRendererQueueLead,

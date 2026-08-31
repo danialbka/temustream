@@ -1130,7 +1130,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
 
     private func waitForCustomVideoSurface(
         _ decoder: BunnyNativeDecoder,
-        timeout: TimeInterval = 2
+        // UIKit can defer the first layer attachment while a scene rotation or
+        // system gesture transaction is finishing. Keep this bounded, but do
+        // not discard an otherwise healthy decoder during that short delay.
+        timeout: TimeInterval = 5
     ) async throws {
         let startedAt = ProcessInfo.processInfo.systemUptime
         while ProcessInfo.processInfo.systemUptime - startedAt < timeout {
@@ -1645,7 +1648,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     }
 
     private func beginSeekRequest(target: TimeInterval) -> UInt64 {
-        seekRequestRevision &+= 1
+        advanceSeekRequestRevision()
         pendingSeekTarget = target
         if activeEngine == .customRust {
             customEnded = false
@@ -1665,7 +1668,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     }
 
     private func invalidateSeekRequests() {
-        seekRequestRevision &+= 1
+        advanceSeekRequestRevision()
         pendingSeekTarget = nil
         isSeeking = false
         if let customSeekCoordinator {
@@ -1674,6 +1677,12 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         if let customRecoverySeekCoordinator {
             Task { await customRecoverySeekCoordinator.cancelAll() }
         }
+    }
+
+    private func advanceSeekRequestRevision() {
+        seekRequestRevision = seekRequestRevision == .max
+            ? 1
+            : seekRequestRevision + 1
     }
 
     private func logSupersededSeek(engine: String, target: TimeInterval) {

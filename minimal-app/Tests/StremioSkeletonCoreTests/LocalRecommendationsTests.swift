@@ -305,6 +305,78 @@ final class LocalRecommendationsTests: XCTestCase {
         XCTAssertTrue(afterReset.isEmpty)
     }
 
+    func testRecommendationHistorySaturatesPersistedMaximumCount() async throws {
+        let fileURL = temporaryDirectory().appendingPathComponent("history.json")
+        let impression = RecommendationImpression(
+            mediaID: LocalMediaIdentity(id: "tt1", type: "movie"),
+            firstShownAt: date(1),
+            lastShownAt: date(2),
+            showCount: .max
+        )
+        try writeHistory([impression], to: fileURL)
+        let store = RecommendationHistoryStore(fileURL: fileURL)
+        let recommendation = LocalRecommendation(
+            item: media(id: "tt1", name: "Movie"),
+            score: 4,
+            reasons: ["Fixture"]
+        )
+
+        let updated = try await store.record([recommendation], shownAt: date(3))
+
+        XCTAssertEqual(updated.first?.showCount, .max)
+        XCTAssertEqual(updated.first?.lastShownAt, date(3))
+    }
+
+    func testRecommendationHistorySaturatesDuplicatePersistedCounts() async throws {
+        let fileURL = temporaryDirectory().appendingPathComponent("history.json")
+        let identity = LocalMediaIdentity(id: "tt1", type: "movie")
+        try writeHistory(
+            [
+                RecommendationImpression(
+                    mediaID: identity,
+                    firstShownAt: date(1),
+                    lastShownAt: date(2),
+                    showCount: .max
+                ),
+                RecommendationImpression(
+                    mediaID: identity,
+                    firstShownAt: date(0),
+                    lastShownAt: date(3),
+                    showCount: 1
+                ),
+            ],
+            to: fileURL
+        )
+
+        let items = try await RecommendationHistoryStore(fileURL: fileURL).items()
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.showCount, .max)
+        XCTAssertEqual(items.first?.firstShownAt, date(0))
+        XCTAssertEqual(items.first?.lastShownAt, date(3))
+    }
+
+    func testRecommendationHistoryNormalizesPersistedNonpositiveCount() async throws {
+        let fileURL = temporaryDirectory().appendingPathComponent("history.json")
+        let persisted = """
+        [{
+          "mediaID":{"id":"tt1","type":"movie"},
+          "firstShownAt":"1970-01-01T00:00:01Z",
+          "lastShownAt":"1970-01-01T00:00:02Z",
+          "showCount":-5
+        }]
+        """
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(persisted.utf8).write(to: fileURL)
+
+        let items = try await RecommendationHistoryStore(fileURL: fileURL).items()
+
+        XCTAssertEqual(items.first?.showCount, 1)
+    }
+
     func testResetRatingsClearsPersistedPersonalization() async throws {
         let fileURL = temporaryDirectory().appendingPathComponent("ratings.json")
         let store = MediaRatingStore(fileURL: fileURL)
@@ -344,6 +416,19 @@ final class LocalRecommendationsTests: XCTestCase {
             at: directory,
             includingPropertiesForKeys: nil
         ).filter { $0.lastPathComponent.contains(".corrupt-") }
+    }
+
+    private func writeHistory(
+        _ impressions: [RecommendationImpression],
+        to fileURL: URL
+    ) throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(impressions).write(to: fileURL)
     }
 
     private func date(_ value: TimeInterval) -> Date {

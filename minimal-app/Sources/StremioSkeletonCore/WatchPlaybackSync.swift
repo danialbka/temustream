@@ -35,12 +35,50 @@ public enum WatchVoiceControlState: String, Codable, Equatable, Sendable {
 }
 
 public struct WatchPlaybackVersion: Codable, Equatable, Hashable, Sendable, Comparable {
+    /// Convex persists this value as a float64. Keep every accepted peer
+    /// counter exactly representable and reserve the next exact integer for a
+    /// local event that must advance beyond it.
+    public static let maximumPeerCounter: Int64 = 9_007_199_254_740_990
+    fileprivate static let maximumLocalCounter = maximumPeerCounter + 1
+
     public let counter: Int64
     public let actorID: String
 
     public init(counter: Int64, actorID: String) {
-        self.counter = max(counter, 0)
+        self.counter = min(max(counter, 0), Self.maximumPeerCounter)
         self.actorID = actorID
+    }
+
+    fileprivate init(localCounter: Int64, actorID: String) {
+        counter = min(max(localCounter, 0), Self.maximumLocalCounter)
+        self.actorID = actorID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case counter
+        case actorID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedCounter = try container.decode(Int64.self, forKey: .counter)
+        let decodedActorID = try container.decode(String.self, forKey: .actorID)
+
+        // The one reserved successor is a legitimate value produced by this
+        // client and must survive its wire round trip. Values beyond that
+        // protocol domain are untrusted peer input and normalize through the
+        // public initializer, leaving the successor available locally.
+        if decodedCounter == Self.maximumLocalCounter {
+            self.init(localCounter: decodedCounter, actorID: decodedActorID)
+        } else {
+            self.init(counter: decodedCounter, actorID: decodedActorID)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(counter, forKey: .counter)
+        try container.encode(actorID, forKey: .actorID)
     }
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
@@ -86,9 +124,47 @@ public struct WatchPlaybackEvent: Codable, Equatable, Sendable {
         self.sentAtMilliseconds = sentAtMilliseconds
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case eventID
+        case contentKey
+        case kind
+        case position
+        case isPlaying
+        case rate
+        case version
+        case sentAtMilliseconds
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            eventID: try container.decode(UUID.self, forKey: .eventID),
+            contentKey: try container.decode(String.self, forKey: .contentKey),
+            kind: try container.decode(WatchPlaybackEventKind.self, forKey: .kind),
+            position: try container.decode(TimeInterval.self, forKey: .position),
+            isPlaying: try container.decode(Bool.self, forKey: .isPlaying),
+            rate: try container.decode(Double.self, forKey: .rate),
+            version: try container.decode(WatchPlaybackVersion.self, forKey: .version),
+            sentAtMilliseconds: try container.decode(Int64.self, forKey: .sentAtMilliseconds)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(eventID, forKey: .eventID)
+        try container.encode(contentKey, forKey: .contentKey)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(position, forKey: .position)
+        try container.encode(isPlaying, forKey: .isPlaying)
+        try container.encode(rate, forKey: .rate)
+        try container.encode(version, forKey: .version)
+        try container.encode(sentAtMilliseconds, forKey: .sentAtMilliseconds)
+    }
+
     public func projectedPosition(at nowMilliseconds: Int64) -> TimeInterval {
         guard isPlaying else { return position }
-        let elapsed = min(max(Double(nowMilliseconds - sentAtMilliseconds) / 1_000, 0), 30)
+        let elapsedMilliseconds = Double(nowMilliseconds) - Double(sentAtMilliseconds)
+        let elapsed = min(max(elapsedMilliseconds / 1_000, 0), 30)
         return position + elapsed * rate
     }
 }
@@ -151,8 +227,11 @@ public struct WatchPlaybackReconciler: Sendable {
         sample: WatchLocalPlaybackSample,
         nowMilliseconds: Int64
     ) -> WatchPlaybackEvent {
-        lamportCounter = max(lamportCounter, lastAppliedVersion?.counter ?? 0) + 1
-        let version = WatchPlaybackVersion(counter: lamportCounter, actorID: actorID)
+        let observedCounter = max(lamportCounter, lastAppliedVersion?.counter ?? 0)
+        lamportCounter = observedCounter >= WatchPlaybackVersion.maximumLocalCounter
+            ? WatchPlaybackVersion.maximumLocalCounter
+            : observedCounter + 1
+        let version = WatchPlaybackVersion(localCounter: lamportCounter, actorID: actorID)
         lastAppliedVersion = version
         return WatchPlaybackEvent(
             contentKey: contentKey,
@@ -170,9 +249,13 @@ public struct WatchPlaybackReconciler: Sendable {
         local: WatchLocalPlaybackSample,
         nowMilliseconds: Int64
     ) -> WatchPlaybackAdjustment? {
-        lamportCounter = max(lamportCounter, remote.version.counter)
-        if let lastAppliedVersion, remote.version <= lastAppliedVersion { return nil }
-        lastAppliedVersion = remote.version
+        let observedVersion = WatchPlaybackVersion(
+            counter: remote.version.counter,
+            actorID: remote.version.actorID
+        )
+        lamportCounter = max(lamportCounter, observedVersion.counter)
+        if let lastAppliedVersion, observedVersion <= lastAppliedVersion { return nil }
+        lastAppliedVersion = observedVersion
 
         let target = remote.projectedPosition(at: nowMilliseconds)
         let drift = target - local.position
