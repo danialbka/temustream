@@ -145,6 +145,6 @@ public actor PlaybackSeekCoordinator {
 
     private static func nanoseconds(for timeout: TimeInterval) -> UInt64 {
         let bounded = min(max(timeout, 0), TimeInterval(UInt64.max) / 1_000_000_000)
-        return UInt64((bounded * 1_000_000_000).rounded(.up))
+        return UInt64(exactly: (bounded * 1_000_000_000).rounded(.up)) ?? .max
     }
 }

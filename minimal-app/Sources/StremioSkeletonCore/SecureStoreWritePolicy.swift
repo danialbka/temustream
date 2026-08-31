@@ -39,4 +39,18 @@ public enum SecureStoreMigrationPolicy {
         try save()
         removeLegacyValue()
     }
+
+    /// Keeps a legacy discovery marker intact until every dependent durable
+    /// write succeeds. A launch interrupted between writes can therefore retry
+    /// the whole migration instead of losing the only key that locates the
+    /// remaining legacy state.
+    public static func migrateTransactionIfPresent(
+        _ isPresent: Bool,
+        persistAllDependencies: () throws -> Void,
+        clearLegacyDiscovery: () throws -> Void
+    ) throws {
+        guard isPresent else { return }
+        try persistAllDependencies()
+        try clearLegacyDiscovery()
+    }
 }

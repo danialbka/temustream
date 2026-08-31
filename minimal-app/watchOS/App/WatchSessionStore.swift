@@ -14,18 +14,23 @@ struct WatchSessionStore {
 #endif
     }
 
-    func load(profileID: UUID) -> StremioSession? {
-        load(account: account(for: profileID), simulatorURL: simulatorSessionURL(profileID: profileID))
+    func load(profileID: UUID) throws -> StremioSession? {
+        try load(
+            account: account(for: profileID),
+            simulatorURL: simulatorSessionURL(profileID: profileID)
+        )
     }
 
-    func loadLegacy() -> StremioSession? {
-        load(account: legacyAccount, simulatorURL: legacySimulatorSessionURL)
+    func loadLegacy() throws -> StremioSession? {
+        try load(account: legacyAccount, simulatorURL: legacySimulatorSessionURL)
     }
 
-    private func load(account: String, simulatorURL: URL) -> StremioSession? {
+    private func load(account: String, simulatorURL: URL) throws -> StremioSession? {
 #if targetEnvironment(simulator)
-        guard let data = try? Data(contentsOf: simulatorURL) else { return nil }
-        return try? JSONDecoder().decode(StremioSession.self, from: data)
+        guard FileManager.default.fileExists(atPath: simulatorURL.path) else {
+            return nil
+        }
+        let data = try Data(contentsOf: simulatorURL)
 #else
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -35,11 +40,16 @@ struct WatchSessionStore {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data
-        else { return nil }
-        return try? JSONDecoder().decode(StremioSession.self, from: data)
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+        guard let data = result as? Data else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
 #endif
+        return try JSONDecoder().decode(StremioSession.self, from: data)
     }
 
     func save(_ session: StremioSession, profileID: UUID) throws {
@@ -71,37 +81,56 @@ struct WatchSessionStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(key as CFDictionary)
-        var insert = key
-        insert[kSecValueData as String] = data
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(insert as CFDictionary, nil)
+        let status = SecureStoreWritePolicy.updateOrAdd(
+            successStatus: errSecSuccess,
+            itemNotFoundStatus: errSecItemNotFound,
+            duplicateItemStatus: errSecDuplicateItem,
+            update: {
+                SecItemUpdate(
+                    key as CFDictionary,
+                    [kSecValueData as String: data] as CFDictionary
+                )
+            },
+            add: {
+                var insert = key
+                insert[kSecValueData as String] = data
+                insert[kSecAttrAccessible as String] =
+                    kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                return SecItemAdd(insert as CFDictionary, nil)
+            }
+        )
         guard status == errSecSuccess else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }
 #endif
     }
 
-    func clear(profileID: UUID) {
-        clear(
+    func clear(profileID: UUID) throws {
+        try clear(
             account: account(for: profileID),
             simulatorURL: simulatorSessionURL(profileID: profileID)
         )
     }
 
-    func clearLegacy() {
-        clear(account: legacyAccount, simulatorURL: legacySimulatorSessionURL)
+    func clearLegacy() throws {
+        try clear(account: legacyAccount, simulatorURL: legacySimulatorSessionURL)
     }
 
-    private func clear(account: String, simulatorURL: URL) {
+    private func clear(account: String, simulatorURL: URL) throws {
 #if targetEnvironment(simulator)
-        try? FileManager.default.removeItem(at: simulatorURL)
+        guard FileManager.default.fileExists(atPath: simulatorURL.path) else {
+            return
+        }
+        try FileManager.default.removeItem(at: simulatorURL)
 #else
-        SecItemDelete([
+        let status = SecItemDelete([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
 #endif
     }
 
@@ -136,11 +165,13 @@ struct WatchSessionStore {
 struct WatchAddonURLStore {
     private let service = "local.stremio.skeleton.watchkitapp.addon-urls"
 
-    func load(scope: String) -> [URL]? {
+    func load(scope: String) throws -> [URL]? {
 #if targetEnvironment(simulator)
-        guard let data = try? Data(contentsOf: simulatorURL(scope: scope)) else {
+        let source = simulatorURL(scope: scope)
+        guard FileManager.default.fileExists(atPath: source.path) else {
             return nil
         }
+        let data = try Data(contentsOf: source)
 #else
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -150,13 +181,22 @@ struct WatchAddonURLStore {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data
-        else { return nil }
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+        guard let data = result as? Data else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
 #endif
-        guard let values = try? JSONDecoder().decode([String].self, from: data)
-        else { return nil }
-        return values.compactMap(URL.init(string:))
+        let values = try JSONDecoder().decode([String].self, from: data)
+        return try values.map { value in
+            guard let url = URL(string: value),
+                  (try? AddonEndpoint(manifestURL: url)) != nil
+            else { throw CocoaError(.fileReadCorruptFile) }
+            return url
+        }
     }
 
     func save(_ urls: [URL], scope: String) throws {
@@ -177,11 +217,24 @@ struct WatchAddonURLStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: scope,
         ]
-        SecItemDelete(key as CFDictionary)
-        var insert = key
-        insert[kSecValueData as String] = data
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(insert as CFDictionary, nil)
+        let status = SecureStoreWritePolicy.updateOrAdd(
+            successStatus: errSecSuccess,
+            itemNotFoundStatus: errSecItemNotFound,
+            duplicateItemStatus: errSecDuplicateItem,
+            update: {
+                SecItemUpdate(
+                    key as CFDictionary,
+                    [kSecValueData as String: data] as CFDictionary
+                )
+            },
+            add: {
+                var insert = key
+                insert[kSecValueData as String] = data
+                insert[kSecAttrAccessible as String] =
+                    kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                return SecItemAdd(insert as CFDictionary, nil)
+            }
+        )
         guard status == errSecSuccess else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }

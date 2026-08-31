@@ -49,6 +49,8 @@ struct TVSettingsView: View {
     } message: {
       Text(errorMessage ?? "Please try again.")
     }
+    .onChange(of: email) { _, _ in errorMessage = nil }
+    .onChange(of: password) { _, _ in errorMessage = nil }
     .accessibilityIdentifier("tvos-settings")
   }
 
@@ -104,6 +106,12 @@ struct TVSettingsView: View {
             .autocorrectionDisabled()
           SecureField("Password", text: $password)
             .textContentType(.password)
+          if let signInValidationMessage {
+            Label(signInValidationMessage, systemImage: "exclamationmark.circle")
+              .font(.callout)
+              .foregroundStyle(.red)
+              .accessibilityIdentifier("tvos-account-sign-in-validation")
+          }
           Button {
             Task { await signIn() }
           } label: {
@@ -114,7 +122,7 @@ struct TVSettingsView: View {
             }
           }
           .buttonStyle(.borderedProminent)
-          .disabled(isSigningIn || email.isEmpty || password.isEmpty)
+          .disabled(isSigningIn || !canSubmitSignIn)
         }
       }
     }
@@ -189,9 +197,10 @@ struct TVSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
           Text("Bunny for Apple TV")
             .font(.title2.bold())
-          Text("Version 1.3 (18)")
+          Text(AppBundleMetadata().versionLabel)
             .font(.headline)
             .foregroundStyle(.secondary)
+            .accessibilityIdentifier("tvos-version-build")
           Text(
             "Uses the native tvOS player for Siri Remote controls, audio tracks, subtitles, and display matching."
           )
@@ -216,15 +225,34 @@ struct TVSettingsView: View {
 
   @MainActor
   private func signIn() async {
+    let credentials: SignInFormCredentials
+    do {
+      credentials = try SignInFormCredentials(email: email, password: password)
+    } catch {
+      errorMessage = error.localizedDescription
+      return
+    }
+
     isSigningIn = true
+    errorMessage = nil
     defer { isSigningIn = false }
     do {
-      try await model.signIn(email: email, password: password)
+      try await model.signIn(email: credentials.email, password: credentials.password)
+      email = credentials.email
       password = ""
       statusMessage = "Signed in"
     } catch {
       errorMessage = error.localizedDescription
     }
+  }
+
+  private var canSubmitSignIn: Bool {
+    SignInFormCredentials.canSubmit(email: email, password: password)
+  }
+
+  private var signInValidationMessage: String? {
+    guard !email.isEmpty || !password.isEmpty else { return nil }
+    return SignInFormCredentials.validationError(email: email, password: password)
   }
 
   @MainActor

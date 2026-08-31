@@ -1,9 +1,69 @@
 import Foundation
 
+public struct PlaybackTerminalClockDecision: Equatable, Sendable {
+    public let shouldFinish: Bool
+    public let position: TimeInterval
+    public let desiredRate: Float
+    public let appliedRate: Float
+}
+
 /// Keeps transient UI and app-lifecycle events from restarting an already
 /// running media clock. Genuine pauses, seeks, and audio interruptions still
 /// request an explicit rate change.
 public enum PlaybackContinuityPolicy {
+    /// Keeps a public playhead inside the media timeline while preserving a
+    /// useful clock for live or otherwise unknown-duration sources.
+    public static func clampedTimelinePosition(
+        _ position: TimeInterval,
+        duration: TimeInterval
+    ) -> TimeInterval {
+        let nonnegativePosition = position.isFinite ? max(position, 0) : 0
+        guard duration.isFinite, duration > 0 else { return nonnegativePosition }
+        return min(nonnegativePosition, duration)
+    }
+
+    /// Resolves the handoff from EOF tail draining to a stable terminal clock.
+    /// A known-duration source keeps advancing until its declared boundary;
+    /// an unknown-duration source stops as soon as the decoder reports EOF.
+    public static func terminalClockDecision(
+        sampledPosition: TimeInterval,
+        duration: TimeInterval,
+        continuingRate: Float,
+        boundaryTolerance: TimeInterval = 0.05
+    ) -> PlaybackTerminalClockDecision {
+        let sampledPosition = clampedTimelinePosition(
+            sampledPosition,
+            duration: 0
+        )
+        let continuingRate = continuingRate.isFinite
+            ? max(continuingRate, 0)
+            : 0
+        guard duration.isFinite, duration > 0 else {
+            return PlaybackTerminalClockDecision(
+                shouldFinish: true,
+                position: sampledPosition,
+                desiredRate: 0,
+                appliedRate: 0
+            )
+        }
+
+        let boundary = max(duration - max(boundaryTolerance, 0), 0)
+        guard sampledPosition >= boundary else {
+            return PlaybackTerminalClockDecision(
+                shouldFinish: false,
+                position: sampledPosition,
+                desiredRate: continuingRate,
+                appliedRate: continuingRate
+            )
+        }
+        return PlaybackTerminalClockDecision(
+            shouldFinish: true,
+            position: duration,
+            desiredRate: 0,
+            appliedRate: 0
+        )
+    }
+
     /// Resolves a relative seek against the newest authoritative playhead.
     ///
     /// A resumed player can expose its controls while the decoder clock is

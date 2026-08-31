@@ -132,10 +132,10 @@ fn detect_format(document: &str) -> SubtitleFormat {
         has_dialogue |= line
             .get(..9)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("dialogue:"));
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case("scripttype") {
-                ssa |= value.trim().eq_ignore_ascii_case("v4.00");
-            }
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case("scripttype")
+        {
+            ssa |= value.trim().eq_ignore_ascii_case("v4.00");
         }
     }
     if has_events || has_dialogue {
@@ -271,10 +271,10 @@ fn parse_ass_like(document: &str, mut ssa: bool) -> Result<Vec<SubtitleCue>, Sub
             in_events = line.eq_ignore_ascii_case("[events]");
             continue;
         }
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case("scripttype") {
-                ssa = value.trim().eq_ignore_ascii_case("v4.00");
-            }
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case("scripttype")
+        {
+            ssa = value.trim().eq_ignore_ascii_case("v4.00");
         }
         if !in_events
             && !line.get(..9).is_some_and(|prefix| {
@@ -284,14 +284,14 @@ fn parse_ass_like(document: &str, mut ssa: bool) -> Result<Vec<SubtitleCue>, Sub
             continue;
         }
 
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case("format") {
-                fields = value
-                    .split(',')
-                    .map(|field| field.trim().to_ascii_lowercase())
-                    .collect();
-                continue;
-            }
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case("format")
+        {
+            fields = value
+                .split(',')
+                .map(|field| field.trim().to_ascii_lowercase())
+                .collect();
+            continue;
         }
         let Some((kind, payload)) = line.split_once(':') else {
             continue;

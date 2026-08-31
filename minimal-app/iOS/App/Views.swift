@@ -786,14 +786,7 @@ private struct ContinueWatchingCard: View {
     }
 
     private func formattedTime(_ value: TimeInterval) -> String {
-        guard value.isFinite, value >= 0 else { return "0:00" }
-        let total = Int(value.rounded(.down))
-        let hours = total / 3_600
-        let minutes = (total % 3_600) / 60
-        let seconds = total % 60
-        return hours > 0
-            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
-            : String(format: "%d:%02d", minutes, seconds)
+        PlaybackTimeFormatter.clock(value)
     }
 }
 
@@ -2184,10 +2177,10 @@ struct DetailsView: View {
     ) -> some View {
         if let thumbnail = episode.thumbnail {
             ZStack(alignment: .bottomTrailing) {
-                AsyncImage(url: thumbnail, transaction: Transaction(animation: nil)) { phase in
+                BoundedArtworkImage(url: thumbnail) { phase in
                     switch phase {
                     case let .success(image):
-                        image
+                        Image(uiImage: image)
                             .resizable()
                             .scaledToFill()
                     case .empty:
@@ -2198,8 +2191,6 @@ struct DetailsView: View {
                                     .controlSize(.small)
                             }
                     case .failure:
-                        episodeThumbnailPlaceholder
-                    @unknown default:
                         episodeThumbnailPlaceholder
                     }
                 }
@@ -2402,13 +2393,7 @@ struct DetailsView: View {
     }
 
     private func formatPlaybackTime(_ value: TimeInterval) -> String {
-        guard value.isFinite, value >= 0 else { return "0:00" }
-        let total = Int(value.rounded(.down))
-        let hours = total / 3_600
-        let minutes = (total % 3_600) / 60
-        let seconds = total % 60
-        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, seconds) }
-        return String(format: "%d:%02d", minutes, seconds)
+        PlaybackTimeFormatter.clock(value)
     }
 
     private func providerButton(id: String, title: String, count: Int) -> some View {
@@ -2505,14 +2490,7 @@ private struct EpisodeDotMatrixTimeline: View {
     }
 
     private func formattedTime(_ value: TimeInterval) -> String {
-        guard value.isFinite, value >= 0 else { return "0:00" }
-        let total = Int(value.rounded(.down))
-        let hours = total / 3_600
-        let minutes = (total % 3_600) / 60
-        let seconds = total % 60
-        return hours > 0
-            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
-            : String(format: "%d:%02d", minutes, seconds)
+        PlaybackTimeFormatter.clock(value)
     }
 }
 
@@ -3055,17 +3033,15 @@ struct EpisodeStreamsView: View {
     @ViewBuilder
     private var episodeThumbnail: some View {
         if let thumbnail = episode.thumbnail {
-            AsyncImage(url: thumbnail, transaction: Transaction(animation: nil)) { phase in
+            BoundedArtworkImage(url: thumbnail) { phase in
                 switch phase {
                 case let .success(image):
-                    image.resizable().scaledToFill()
+                    Image(uiImage: image).resizable().scaledToFill()
                 case .empty:
                     Rectangle()
                         .fill(Color.secondary.opacity(0.12))
                         .overlay { ProgressView().controlSize(.small) }
                 case .failure:
-                    thumbnailPlaceholder
-                @unknown default:
                     thumbnailPlaceholder
                 }
             }
@@ -3217,13 +3193,7 @@ struct EpisodeStreamsView: View {
     }
 
     private func formatPlaybackTime(_ value: TimeInterval) -> String {
-        guard value.isFinite, value >= 0 else { return "0:00" }
-        let total = Int(value.rounded(.down))
-        let hours = total / 3_600
-        let minutes = (total % 3_600) / 60
-        let seconds = total % 60
-        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, seconds) }
-        return String(format: "%d:%02d", minutes, seconds)
+        PlaybackTimeFormatter.clock(value)
     }
 }
 
@@ -3406,7 +3376,7 @@ struct LibraryView: View {
 struct AddonsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var input = ""
-    @State private var status: String?
+    @State private var feedback = AddonFormFeedback()
 
     var body: some View {
         List {
@@ -3416,17 +3386,23 @@ struct AddonsView: View {
                     .keyboardType(.URL)
                 Button("Validate and install") {
                     Task {
+                        feedback.setManifestMessage(nil)
                         do {
                             try await model.installAddon(input)
-                            status = "Installed"
+                            feedback.setManifestMessage("Installed")
                             input = ""
                         } catch {
-                            status = error.localizedDescription
+                            feedback.setManifestMessage(error.localizedDescription)
                         }
                     }
                 }
                 .disabled(input.isEmpty)
-                if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
+                if let manifestMessage = feedback.manifestMessage {
+                    Text(manifestMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("addon-manifest-status")
+                }
             }
 
             Section("Installed") {
@@ -3454,10 +3430,25 @@ struct AddonsView: View {
                     Spacer()
                     Button("Save and test") {
                         Task {
-                            do { try await model.saveStreamingServer() }
-                            catch { status = error.localizedDescription }
+                            feedback.setStreamingServerMessage(nil)
+                            do {
+                                try await model.saveStreamingServer()
+                                feedback.setStreamingServerMessage(
+                                    model.streamingServerOnline
+                                        ? "Saved · Server online"
+                                        : "Saved · Server offline"
+                                )
+                            } catch {
+                                feedback.setStreamingServerMessage(error.localizedDescription)
+                            }
                         }
                     }
+                }
+                if let streamingServerMessage = feedback.streamingServerMessage {
+                    Text(streamingServerMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("streaming-server-status")
                 }
                 Text("Use localhost for an embedded/desktop service, a private LAN address, or HTTPS.")
                     .font(.caption)
@@ -3905,11 +3896,11 @@ struct SubtitleStyleSettingsView: View {
                     HStack {
                         Text("Background")
                         Spacer()
-                        Text("\(Int((backgroundOpacity * 100).rounded()))%")
+                        Text("\(backgroundOpacityPercentage)%")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
-                    Slider(value: $backgroundOpacity, in: 0...0.9, step: 0.05)
+                    Slider(value: sanitizedBackgroundOpacityBinding, in: 0...0.9, step: 0.05)
                         .tint(Color.appAccent)
                         .accessibilityLabel("Subtitle background opacity")
                 }
@@ -3937,6 +3928,27 @@ struct SubtitleStyleSettingsView: View {
         .navigationTitle("Subtitle Style")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("subtitle-style-settings")
+        .onAppear {
+            let sanitized = sanitizedBackgroundOpacity
+            if backgroundOpacity != sanitized {
+                backgroundOpacity = sanitized
+            }
+        }
+    }
+
+    private var sanitizedBackgroundOpacity: Double {
+        SubtitleStyle(backgroundOpacity: backgroundOpacity).backgroundOpacity
+    }
+
+    private var sanitizedBackgroundOpacityBinding: Binding<Double> {
+        Binding(
+            get: { sanitizedBackgroundOpacity },
+            set: { backgroundOpacity = SubtitleStyle(backgroundOpacity: $0).backgroundOpacity }
+        )
+    }
+
+    private var backgroundOpacityPercentage: Int {
+        Int((sanitizedBackgroundOpacity * 100).rounded())
     }
 
     private var visualStyle: SubtitleVisualStyle {
@@ -3945,7 +3957,7 @@ struct SubtitleStyleSettingsView: View {
                 sizeRawValue: sizeRawValue,
                 colorRawValue: colorRawValue,
                 weightRawValue: weightRawValue,
-                backgroundOpacity: backgroundOpacity,
+                backgroundOpacity: sanitizedBackgroundOpacity,
                 shadowEnabled: shadowEnabled
             )
         )
@@ -3994,18 +4006,15 @@ struct AccountView: View {
                         .keyboardType(.emailAddress)
                     SecureField("Password", text: $password)
                     Button("Sign in and sync") {
-                        Task {
-                            busy = true
-                            defer { busy = false }
-                            do {
-                                try await model.signIn(email: email, password: password)
-                                password = ""
-                            } catch {
-                                status = error.localizedDescription
-                            }
-                        }
+                        Task { await signIn() }
                     }
-                    .disabled(email.isEmpty || password.isEmpty || busy)
+                    .disabled(!canSubmitSignIn || busy)
+                    if let signInValidationMessage {
+                        Text(signInValidationMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("account-sign-in-validation")
+                    }
                 }
             }
 
@@ -4017,6 +4026,42 @@ struct AccountView: View {
             if let status { Text(status).foregroundStyle(.secondary) }
         }
         .navigationTitle("Account")
+        .onChange(of: email) { _ in status = nil }
+        .onChange(of: password) { _ in status = nil }
+    }
+
+    private var canSubmitSignIn: Bool {
+        SignInFormCredentials.canSubmit(email: email, password: password)
+    }
+
+    private var signInValidationMessage: String? {
+        guard !email.isEmpty || !password.isEmpty else { return nil }
+        return SignInFormCredentials.validationError(email: email, password: password)
+    }
+
+    @MainActor
+    private func signIn() async {
+        let credentials: SignInFormCredentials
+        do {
+            credentials = try SignInFormCredentials(email: email, password: password)
+        } catch {
+            status = error.localizedDescription
+            return
+        }
+
+        busy = true
+        status = nil
+        defer { busy = false }
+        do {
+            try await model.signIn(
+                email: credentials.email,
+                password: credentials.password
+            )
+            email = credentials.email
+            password = ""
+        } catch {
+            status = error.localizedDescription
+        }
     }
 }
 

@@ -61,6 +61,13 @@ final class StreamPresentationPolicyTests: XCTestCase {
         )
     }
 
+    func testRejectsRoundedInt64UpperBoundaryInsteadOfTrapping() {
+        let stream = presented(id: "boundary", title: "8388608 TB")
+
+        XCTAssertNil(stream.fileSizeBytes)
+        XCTAssertNil(stream.fileSizeBadge)
+    }
+
     private func presented(id: String, title: String) -> PresentedStream {
         PresentedStream(
             id: id,

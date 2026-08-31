@@ -26,6 +26,26 @@ final class SubtitlePlacementTests: XCTestCase {
         XCTAssertFalse(style.shadowEnabled)
     }
 
+    func testSubtitleStyleClampsExtremeAndNonfinitePersistedOpacity() throws {
+        let suiteName = "SubtitleStyleExtremeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(1e300, forKey: SubtitleStylePreferences.backgroundOpacityKey)
+        XCTAssertEqual(
+            SubtitleStylePreferences.current(defaults: defaults).backgroundOpacity,
+            0.9,
+            accuracy: 0.001
+        )
+
+        defaults.set(Double.infinity, forKey: SubtitleStylePreferences.backgroundOpacityKey)
+        XCTAssertEqual(
+            SubtitleStylePreferences.current(defaults: defaults).backgroundOpacity,
+            SubtitleStyle.default.backgroundOpacity,
+            accuracy: 0.001
+        )
+    }
+
     func testSubtitleStylePreferencesPersistAndReset() throws {
         let suiteName = "SubtitleStyleTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

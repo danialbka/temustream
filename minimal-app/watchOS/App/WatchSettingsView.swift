@@ -342,11 +342,13 @@ struct WatchAccountView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(
-                        isBusy
-                            || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            || password.isEmpty
-                    )
+                    .disabled(isBusy || !canSubmitSignIn)
+                    if let signInValidationMessage {
+                        Text(signInValidationMessage)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("watch-account-sign-in-validation")
+                    }
                 }
             }
 
@@ -377,16 +379,38 @@ struct WatchAccountView: View {
             }
         }
         .navigationTitle("Account")
+        .onChange(of: email) { _, _ in errorMessage = nil }
+        .onChange(of: password) { _, _ in errorMessage = nil }
+    }
+
+    private var canSubmitSignIn: Bool {
+        SignInFormCredentials.canSubmit(email: email, password: password)
+    }
+
+    private var signInValidationMessage: String? {
+        guard !email.isEmpty || !password.isEmpty else { return nil }
+        return SignInFormCredentials.validationError(email: email, password: password)
     }
 
     private func signIn() async {
+        let credentials: SignInFormCredentials
+        do {
+            credentials = try SignInFormCredentials(email: email, password: password)
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+
         isBusy = true
         errorMessage = nil
-        let submittedPassword = password
         password = ""
         defer { isBusy = false }
         do {
-            try await model.signIn(email: email, password: submittedPassword)
+            try await model.signIn(
+                email: credentials.email,
+                password: credentials.password
+            )
+            email = credentials.email
         } catch {
             errorMessage = error.localizedDescription
         }

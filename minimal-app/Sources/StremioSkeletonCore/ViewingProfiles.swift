@@ -88,6 +88,7 @@ public struct ViewingProfileLegacyFile: Equatable, Sendable {
 
 public enum ViewingProfileDataFile {
     public static let anonymousLibrary = "library.json"
+    public static let playbackState = "playback-state.json"
     public static let playbackProgress = "playback-progress.json"
     public static let playbackCompletions = "playback-completions.json"
     public static let recentSearches = "recent-searches.json"
@@ -103,6 +104,7 @@ public enum ViewingProfileStoreError: Error, Equatable, LocalizedError, Sendable
     case cannotActivateArchivedProfile
     case cannotArchiveLastProfile
     case invalidLegacyFileName
+    case staleMutationPlan
 
     public var errorDescription: String? {
         switch self {
@@ -117,7 +119,38 @@ public enum ViewingProfileStoreError: Error, Equatable, LocalizedError, Sendable
             return "At least one viewing profile must remain."
         case .invalidLegacyFileName:
             return "A legacy profile-data filename was invalid."
+        case .staleMutationPlan:
+            return "The viewing profiles changed before this operation could finish."
         }
+    }
+}
+
+/// An opaque, one-use profile mutation that can be prepared before its
+/// manifest change is persisted. Callers may load and validate the target
+/// profile directory, then commit only when publication can no longer fail.
+public struct ViewingProfileMutationPlan: Identifiable, Sendable {
+    public let id: UUID
+    public let snapshot: ViewingProfileSnapshot
+    public let activeProfileDataDirectoryURL: URL
+
+    fileprivate init(
+        id: UUID,
+        snapshot: ViewingProfileSnapshot,
+        activeProfileDataDirectoryURL: URL
+    ) {
+        self.id = id
+        self.snapshot = snapshot
+        self.activeProfileDataDirectoryURL = activeProfileDataDirectoryURL
+    }
+}
+
+public struct ViewingProfileMutationCommit: Sendable {
+    public let snapshot: ViewingProfileSnapshot
+    public let generation: Int
+
+    fileprivate init(snapshot: ViewingProfileSnapshot, generation: Int) {
+        self.snapshot = snapshot
+        self.generation = generation
     }
 }
 
@@ -143,6 +176,13 @@ public actor ViewingProfileStore {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private var cache: Manifest?
+    private var mutationGeneration = 0
+    private var pendingMutations: [UUID: PendingMutation] = [:]
+
+    private struct PendingMutation {
+        let generation: Int
+        let manifest: Manifest
+    }
 
     public init(rootDirectory: URL) {
         self.rootDirectory = rootDirectory
@@ -186,6 +226,94 @@ public actor ViewingProfileStore {
         makeSnapshot(try loadOrRecover(now: now))
     }
 
+    /// Prepares creation and activation as one manifest transaction. The new
+    /// data directory may be populated and read before `commit` makes the
+    /// profile visible or active on the next launch.
+    public func prepareCreateAndActivate(
+        name: String,
+        avatar: ViewingProfileAvatar,
+        now: Date = Date()
+    ) throws -> ViewingProfileMutationPlan {
+        var manifest = try loadOrRecover(now: now)
+        let cleanName = try validate(name, excluding: nil, in: manifest)
+        let profile = ViewingProfile(
+            name: cleanName,
+            avatar: avatar,
+            createdAt: now
+        )
+        manifest.profiles.append(profile)
+        manifest.activeProfileID = profile.id
+        try createDataDirectory(for: profile.id)
+        return registerMutation(manifest)
+    }
+
+    /// Prepares an active-profile change without persisting it. This lets the
+    /// app prove the destination stores are readable before changing startup
+    /// state in the manifest.
+    public func prepareActivation(
+        id: UUID,
+        now: Date = Date()
+    ) throws -> ViewingProfileMutationPlan {
+        var manifest = try loadOrRecover(now: now)
+        guard let index = manifest.profiles.firstIndex(where: { $0.id == id }) else {
+            throw ViewingProfileStoreError.profileNotFound
+        }
+        guard !manifest.profiles[index].isArchived else {
+            throw ViewingProfileStoreError.cannotActivateArchivedProfile
+        }
+        manifest.activeProfileID = id
+        manifest.profiles[index].updatedAt = now
+        try createDataDirectory(for: id)
+        return registerMutation(manifest)
+    }
+
+    /// Prepares archival, including selection of a replacement when the active
+    /// profile is archived, without changing the durable manifest yet.
+    public func prepareArchive(
+        id: UUID,
+        now: Date = Date()
+    ) throws -> ViewingProfileMutationPlan {
+        var manifest = try loadOrRecover(now: now)
+        guard let index = manifest.profiles.firstIndex(where: { $0.id == id }) else {
+            throw ViewingProfileStoreError.profileNotFound
+        }
+        if !manifest.profiles[index].isArchived {
+            let remaining = manifest.profiles.filter { !$0.isArchived && $0.id != id }
+            guard !remaining.isEmpty else {
+                throw ViewingProfileStoreError.cannotArchiveLastProfile
+            }
+            manifest.profiles[index].archivedAt = now
+            manifest.profiles[index].updatedAt = now
+            if manifest.activeProfileID == id {
+                manifest.activeProfileID = remaining.sorted(by: Self.profileOrder).first!.id
+            }
+        }
+        try createDataDirectory(for: manifest.activeProfileID)
+        return registerMutation(manifest)
+    }
+
+    /// Commits a previously prepared mutation exactly once. Any intervening
+    /// manifest write invalidates the plan rather than overwriting newer state.
+    @discardableResult
+    public func commit(
+        _ plan: ViewingProfileMutationPlan
+    ) throws -> ViewingProfileMutationCommit {
+        guard let pending = pendingMutations.removeValue(forKey: plan.id),
+              pending.generation == mutationGeneration
+        else {
+            throw ViewingProfileStoreError.staleMutationPlan
+        }
+        try persist(pending.manifest)
+        return ViewingProfileMutationCommit(
+            snapshot: makeSnapshot(pending.manifest),
+            generation: mutationGeneration
+        )
+    }
+
+    public func cancel(_ plan: ViewingProfileMutationPlan) {
+        pendingMutations.removeValue(forKey: plan.id)
+    }
+
     @discardableResult
     public func create(
         name: String,
@@ -212,6 +340,21 @@ public actor ViewingProfileStore {
         avatar: ViewingProfileAvatar,
         now: Date = Date()
     ) throws -> ViewingProfileSnapshot {
+        try updateWithCommit(
+            id: id,
+            name: name,
+            avatar: avatar,
+            now: now
+        ).snapshot
+    }
+
+    @discardableResult
+    public func updateWithCommit(
+        id: UUID,
+        name: String,
+        avatar: ViewingProfileAvatar,
+        now: Date = Date()
+    ) throws -> ViewingProfileMutationCommit {
         var manifest = try loadOrRecover(now: now)
         guard let index = manifest.profiles.firstIndex(where: { $0.id == id }) else {
             throw ViewingProfileStoreError.profileNotFound
@@ -220,7 +363,10 @@ public actor ViewingProfileStore {
         manifest.profiles[index].avatar = avatar
         manifest.profiles[index].updatedAt = now
         try persist(manifest)
-        return makeSnapshot(manifest)
+        return ViewingProfileMutationCommit(
+            snapshot: makeSnapshot(manifest),
+            generation: mutationGeneration
+        )
     }
 
     @discardableResult
@@ -264,15 +410,34 @@ public actor ViewingProfileStore {
 
     @discardableResult
     public func restore(id: UUID, now: Date = Date()) throws -> ViewingProfileSnapshot {
+        try restoreWithCommit(id: id, now: now).snapshot
+    }
+
+    @discardableResult
+    public func restoreWithCommit(
+        id: UUID,
+        now: Date = Date()
+    ) throws -> ViewingProfileMutationCommit {
         var manifest = try loadOrRecover(now: now)
         guard let index = manifest.profiles.firstIndex(where: { $0.id == id }) else {
             throw ViewingProfileStoreError.profileNotFound
         }
+        // Archived names are intentionally reusable. Restoring one must
+        // re-enter the same active-name uniqueness boundary as create/update
+        // before changing either metadata or durable profile state.
+        _ = try validate(
+            manifest.profiles[index].name,
+            excluding: id,
+            in: manifest
+        )
         manifest.profiles[index].archivedAt = nil
         manifest.profiles[index].updatedAt = now
         try createDataDirectory(for: id)
         try persist(manifest)
-        return makeSnapshot(manifest)
+        return ViewingProfileMutationCommit(
+            snapshot: makeSnapshot(manifest),
+            generation: mutationGeneration
+        )
     }
 
     public func dataDirectoryURL(for profileID: UUID, now: Date = Date()) throws -> URL {
@@ -292,18 +457,37 @@ public actor ViewingProfileStore {
     ) throws -> Manifest {
         if let cache { return cache }
         if FileManager.default.fileExists(atPath: manifestURL.path) {
+            let data = try Data(contentsOf: manifestURL)
+            let decoded: Manifest
             do {
-                let decoded = try decoder.decode(
-                    Manifest.self,
-                    from: Data(contentsOf: manifestURL)
-                )
-                guard isValid(decoded) else { throw CocoaError(.fileReadCorruptFile) }
-                try decoded.profiles.forEach { try createDataDirectory(for: $0.id) }
-                cache = decoded
-                return decoded
+                decoded = try decoder.decode(Manifest.self, from: data)
+                guard isStructurallyValid(decoded) else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
             } catch {
                 try preserveCorruptManifest()
+                return try loadOrRecover(
+                    defaultName: defaultName,
+                    defaultAvatar: defaultAvatar,
+                    now: now
+                )
             }
+            let repair = repairingActiveNameCollisions(in: decoded, now: now)
+            guard isValid(repair.manifest) else {
+                try preserveCorruptManifest()
+                return try loadOrRecover(
+                    defaultName: defaultName,
+                    defaultAvatar: defaultAvatar,
+                    now: now
+                )
+            }
+            try repair.manifest.profiles.forEach { try createDataDirectory(for: $0.id) }
+            if repair.didChange {
+                try persist(repair.manifest)
+            } else {
+                cache = repair.manifest
+            }
+            return repair.manifest
         }
         let profile = ViewingProfile(
             name: try normalized(defaultName),
@@ -322,7 +506,7 @@ public actor ViewingProfileStore {
         return created
     }
 
-    private func isValid(_ manifest: Manifest) -> Bool {
+    private func isStructurallyValid(_ manifest: Manifest) -> Bool {
         guard manifest.schemaVersion == Self.schemaVersion,
               !manifest.profiles.isEmpty,
               Set(manifest.profiles.map(\.id)).count == manifest.profiles.count,
@@ -338,6 +522,65 @@ public actor ViewingProfileStore {
         }
     }
 
+    private func isValid(_ manifest: Manifest) -> Bool {
+        isStructurallyValid(manifest) && hasUniqueActiveNames(manifest)
+    }
+
+    /// Build 34 and earlier could restore an archived profile after its name
+    /// had been reused, leaving two active profiles with the same name. Repair
+    /// that exact durable state without deleting either profile directory. The
+    /// current profile wins its collision; otherwise the most recently created
+    /// profile keeps the name and older colliders return to the archive.
+    private func repairingActiveNameCollisions(
+        in manifest: Manifest,
+        now: Date
+    ) -> (manifest: Manifest, didChange: Bool) {
+        var repaired = manifest
+        let candidates = repaired.profiles.indices
+            .filter { !repaired.profiles[$0].isArchived }
+            .sorted { lhsIndex, rhsIndex in
+                let lhs = repaired.profiles[lhsIndex]
+                let rhs = repaired.profiles[rhsIndex]
+                let lhsIsActive = lhs.id == repaired.activeProfileID
+                let rhsIsActive = rhs.id == repaired.activeProfileID
+                if lhsIsActive != rhsIsActive { return lhsIsActive }
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+        var retainedNames: [String] = []
+        var didChange = false
+
+        for index in candidates {
+            guard let name = try? normalized(repaired.profiles[index].name) else {
+                continue
+            }
+            if retainedNames.contains(where: {
+                $0.caseInsensitiveCompare(name) == .orderedSame
+            }) {
+                repaired.profiles[index].archivedAt = now
+                repaired.profiles[index].updatedAt = now
+                didChange = true
+            } else {
+                retainedNames.append(name)
+            }
+        }
+        return (repaired, didChange)
+    }
+
+    private func hasUniqueActiveNames(_ manifest: Manifest) -> Bool {
+        var names: [String] = []
+        for profile in manifest.profiles where !profile.isArchived {
+            guard let name = try? normalized(profile.name),
+                  !names.contains(where: {
+                      $0.caseInsensitiveCompare(name) == .orderedSame
+                  })
+            else { return false }
+            names.append(name)
+        }
+        return true
+    }
+
     private func validate(
         _ name: String,
         excluding id: UUID?,
@@ -345,8 +588,11 @@ public actor ViewingProfileStore {
     ) throws -> String {
         let cleanName = try normalized(name)
         guard !manifest.profiles.contains(where: {
-            $0.id != id && !$0.isArchived
-                && $0.name.caseInsensitiveCompare(cleanName) == .orderedSame
+            guard $0.id != id,
+                  !$0.isArchived,
+                  let existingName = try? normalized($0.name)
+            else { return false }
+            return existingName.caseInsensitiveCompare(cleanName) == .orderedSame
         }) else { throw ViewingProfileStoreError.duplicateName }
         return cleanName
     }
@@ -405,6 +651,21 @@ public actor ViewingProfileStore {
         try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
         try encoder.encode(manifest).write(to: manifestURL, options: .atomic)
         cache = manifest
+        mutationGeneration += 1
+        pendingMutations.removeAll(keepingCapacity: true)
+    }
+
+    private func registerMutation(_ manifest: Manifest) -> ViewingProfileMutationPlan {
+        let id = UUID()
+        pendingMutations[id] = PendingMutation(
+            generation: mutationGeneration,
+            manifest: manifest
+        )
+        return ViewingProfileMutationPlan(
+            id: id,
+            snapshot: makeSnapshot(manifest),
+            activeProfileDataDirectoryURL: directoryURL(for: manifest.activeProfileID)
+        )
     }
 
     private func createDataDirectory(for id: UUID) throws {

@@ -1,4 +1,7 @@
-use std::collections::{HashSet, VecDeque};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 
 use super::ebml::{
     ElementHeader, MAX_METADATA_ELEMENT_LENGTH, MediaError, ReadAt, parse_id, parse_signed_vint,
@@ -59,6 +62,7 @@ const ID_PIXEL_WIDTH: u64 = 0xb0;
 const ID_PIXEL_HEIGHT: u64 = 0xba;
 const ID_DISPLAY_WIDTH: u64 = 0x54b0;
 const ID_DISPLAY_HEIGHT: u64 = 0x54ba;
+const ID_DISPLAY_UNIT: u64 = 0x54b2;
 const ID_FRAME_RATE: u64 = 0x2383e3;
 const ID_COLOUR: u64 = 0x55b0;
 const ID_MATRIX_COEFFICIENTS: u64 = 0x55b1;
@@ -145,6 +149,7 @@ pub enum Codec {
     Vp9 = 5,
     Mpeg2Video = 6,
     Theora = 7,
+    Mpeg4Part2 = 8,
     Aac = 100,
     Opus = 101,
     Vorbis = 102,
@@ -174,6 +179,7 @@ impl Codec {
             "V_VP9" => Self::Vp9,
             "V_MPEG2" => Self::Mpeg2Video,
             "V_THEORA" => Self::Theora,
+            "V_MPEG4/ISO/SP" | "V_MPEG4/ISO/ASP" => Self::Mpeg4Part2,
             id if id.starts_with("A_AAC") => Self::Aac,
             "A_OPUS" => Self::Opus,
             "A_VORBIS" => Self::Vorbis,
@@ -296,10 +302,12 @@ pub struct MediaTrack {
     pub codec_delay_ns: u64,
     pub seek_pre_roll_ns: u64,
     pub codec_private: Vec<u8>,
+    pub aac_frames_per_packet: u32,
     pub pixel_width: u64,
     pub pixel_height: u64,
     pub display_width: u64,
     pub display_height: u64,
+    pub display_unit: u64,
     pub frame_rate: f64,
     pub video_color: VideoColorInfo,
     pub block_addition_mappings: Vec<BlockAdditionMapping>,
@@ -329,7 +337,9 @@ pub struct MediaPacket {
     pub discard_padding_ns: i64,
     pub flags: PacketFlags,
     pub payload: Vec<u8>,
-    pub block_additions: Vec<BlockAddition>,
+    /// Shared across laced siblings so bounded metadata is copied once per
+    /// BlockGroup rather than once per frame in an attacker-controlled lace.
+    pub block_additions: Arc<[BlockAddition]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -372,6 +382,7 @@ struct TrackBuilder {
     pixel_height: u64,
     display_width: u64,
     display_height: u64,
+    display_unit: u64,
     frame_rate: f64,
     video_color: VideoColorInfo,
     block_addition_mappings: Vec<BlockAdditionMapping>,
@@ -404,6 +415,7 @@ impl Default for TrackBuilder {
             pixel_height: 0,
             display_width: 0,
             display_height: 0,
+            display_unit: 0,
             frame_rate: 0.0,
             video_color: VideoColorInfo::default(),
             block_addition_mappings: Vec::new(),
@@ -431,6 +443,9 @@ impl TrackBuilder {
         }
         if self.display_height == 0 {
             self.display_height = self.pixel_height;
+        }
+        if self.display_unit > 4 {
+            return Err(MediaError::InvalidData("invalid video display unit"));
         }
         if self.output_sampling_frequency == 0.0 {
             self.output_sampling_frequency = self.sampling_frequency;
@@ -475,12 +490,23 @@ impl TrackBuilder {
                 ));
             }
         }
+        let codec = Codec::from_matroska_id(&self.codec_id);
+        if codec == Codec::Aac
+            && self.codec_private.len() > super::audio::MAX_AAC_AUDIO_SPECIFIC_CONFIG_BYTES
+        {
+            return Err(MediaError::ElementTooLarge);
+        }
+        let aac_frames_per_packet = if codec == Codec::Aac {
+            super::audio::aac_frames_per_access_unit(&self.codec_private).unwrap_or(1_024)
+        } else {
+            0
+        };
         Ok(MediaTrack {
             index: u32::try_from(index).map_err(|_| MediaError::ArithmeticOverflow)?,
             number: self.number,
             uid: self.uid,
             kind: self.kind,
-            codec: Codec::from_matroska_id(&self.codec_id),
+            codec,
             codec_id: self.codec_id,
             codec_name: self.codec_name,
             name: self.name,
@@ -494,10 +520,12 @@ impl TrackBuilder {
             codec_delay_ns: self.codec_delay_ns,
             seek_pre_roll_ns: self.seek_pre_roll_ns,
             codec_private: self.codec_private,
+            aac_frames_per_packet,
             pixel_width: self.pixel_width,
             pixel_height: self.pixel_height,
             display_width: self.display_width,
             display_height: self.display_height,
+            display_unit: self.display_unit,
             frame_rate: self.frame_rate,
             video_color: self.video_color,
             block_addition_mappings: self.block_addition_mappings,
@@ -526,6 +554,7 @@ pub struct MatroskaSession {
     clusters: Vec<ClusterIndex>,
     segment_end: u64,
     next_segment_offset: u64,
+    segment_element_count: usize,
     streaming_index: bool,
     selected_tracks: Vec<bool>,
     cluster_index: usize,
@@ -590,12 +619,7 @@ impl MatroskaSession {
         cursor = segment_header.data_offset;
 
         while cursor < segment_end {
-            segment_element_count = segment_element_count
-                .checked_add(1)
-                .ok_or(MediaError::ArithmeticOverflow)?;
-            if segment_element_count > MAX_SEGMENT_ELEMENTS {
-                return Err(MediaError::ElementTooLarge);
-            }
+            consume_segment_element_budget(&mut segment_element_count)?;
             let Some(header) = read_child_header(source.as_mut(), cursor, segment_end)? else {
                 break;
             };
@@ -723,6 +747,7 @@ impl MatroskaSession {
             clusters,
             segment_end,
             next_segment_offset,
+            segment_element_count,
             streaming_index,
             selected_tracks,
             cluster_index: 0,
@@ -749,43 +774,75 @@ impl MatroskaSession {
     }
 
     pub fn set_track_selected(&mut self, index: usize, selected: bool) -> Result<(), MediaError> {
-        let value = self
-            .selected_tracks
-            .get_mut(index)
+        let track = self
+            .tracks
+            .get(index)
             .ok_or(MediaError::InvalidData("track index is out of range"))?;
-        *value = selected;
+        if selected && !track.enabled {
+            return Err(MediaError::InvalidData("track is disabled"));
+        }
+        if self.selected_tracks[index] == selected {
+            return Ok(());
+        }
+        self.selected_tracks[index] = selected;
         if let Some(decode_timestamp) = self.next_decode_timestamps_ns.get_mut(index) {
             *decode_timestamp = None;
         }
-        self.pending_packets.clear();
+        self.pending_packets
+            .retain(|packet| packet.track_index as usize != index);
         Ok(())
     }
 
     /// Selects one track and deselects its siblings of the same kind.
     pub fn select_track(&mut self, index: usize) -> Result<(), MediaError> {
-        let kind = self
+        let selected_track = self
             .tracks
             .get(index)
-            .ok_or(MediaError::InvalidData("track index is out of range"))?
-            .kind;
+            .ok_or(MediaError::InvalidData("track index is out of range"))?;
+        if !selected_track.enabled {
+            return Err(MediaError::InvalidData("track is disabled"));
+        }
+        let kind = selected_track.kind;
+        let changed = self.tracks.iter().enumerate().any(|(track_index, track)| {
+            track.kind == kind && self.selected_tracks[track_index] != (track_index == index)
+        });
+        if !changed {
+            return Ok(());
+        }
         for (track_index, track) in self.tracks.iter().enumerate() {
             if track.kind == kind {
                 self.selected_tracks[track_index] = track_index == index;
                 self.next_decode_timestamps_ns[track_index] = None;
             }
         }
-        self.pending_packets.clear();
+        let tracks = &self.tracks;
+        self.pending_packets.retain(|packet| {
+            tracks
+                .get(packet.track_index as usize)
+                .is_none_or(|track| track.kind != kind)
+        });
         Ok(())
     }
 
     pub fn set_kind_selected(&mut self, kind: TrackKind, selected: bool) {
+        let changed = self.tracks.iter().enumerate().any(|(index, track)| {
+            track.kind == kind && self.selected_tracks[index] != (selected && track.enabled)
+        });
+        if !changed {
+            return;
+        }
         for (index, track) in self.tracks.iter().enumerate() {
             if track.kind == kind {
-                self.selected_tracks[index] = selected;
+                self.selected_tracks[index] = selected && track.enabled;
                 self.next_decode_timestamps_ns[index] = None;
             }
         }
-        self.pending_packets.clear();
+        let tracks = &self.tracks;
+        self.pending_packets.retain(|packet| {
+            tracks
+                .get(packet.track_index as usize)
+                .is_none_or(|track| track.kind != kind)
+        });
     }
 
     pub fn next_packet(&mut self) -> Result<Option<MediaPacket>, MediaError> {
@@ -868,12 +925,14 @@ impl MatroskaSession {
                     .enumerate()
                     .find(|(index, _)| self.selected_tracks[*index])
             })
-            .map(|(_, track)| (track.number, track.seek_pre_roll_ns));
-        let effective_time_ns =
-            preferred_track.map_or(time_ns, |(_, pre_roll)| time_ns.saturating_sub(pre_roll));
+            .map(|(_, track)| track.number);
+        let maximum_selected_pre_roll_ns =
+            maximum_selected_seek_pre_roll_ns(&self.tracks, &self.selected_tracks);
+        let effective_time_ns = time_ns.saturating_sub(maximum_selected_pre_roll_ns);
+        let requires_cluster_preroll = effective_time_ns < time_ns;
 
         let cue = preferred_track
-            .and_then(|(track, _)| choose_cue(&self.cues, effective_time_ns, Some(track)))
+            .and_then(|track| choose_cue(&self.cues, effective_time_ns, Some(track)))
             .or_else(|| choose_cue(&self.cues, effective_time_ns, None))
             .cloned();
 
@@ -883,7 +942,7 @@ impl MatroskaSession {
                 .iter()
                 .position(|cluster| cluster.offset == cue.cluster_offset)
             {
-                self.select_cued_cluster(index, &cue)?;
+                self.select_cued_cluster(index, &cue, !requires_cluster_preroll)?;
                 return Ok(());
             }
             if self.streaming_index {
@@ -901,7 +960,7 @@ impl MatroskaSession {
                 self.clusters.push(cluster);
                 self.next_segment_offset = next;
                 self.summary.cluster_count = 1;
-                self.select_cued_cluster(0, &cue)?;
+                self.select_cued_cluster(0, &cue, !requires_cluster_preroll)?;
                 return Ok(());
             }
         }
@@ -954,14 +1013,19 @@ impl MatroskaSession {
         Ok(())
     }
 
-    fn select_cued_cluster(&mut self, index: usize, cue: &CuePoint) -> Result<(), MediaError> {
+    fn select_cued_cluster(
+        &mut self,
+        index: usize,
+        cue: &CuePoint,
+        use_relative_position: bool,
+    ) -> Result<(), MediaError> {
         let cluster = self.clusters[index];
         let relative_cursor = cluster
             .data_offset
             .checked_add(cue.relative_position)
             .ok_or(MediaError::ArithmeticOverflow)?;
         self.cluster_index = index;
-        self.cluster_cursor = if relative_cursor < cluster.end {
+        self.cluster_cursor = if use_relative_position && relative_cursor < cluster.end {
             relative_cursor
         } else {
             cluster.data_offset
@@ -1039,8 +1103,10 @@ impl MatroskaSession {
                 ID_CUES => {
                     let mut raw_cues = Vec::new();
                     parse_cues(self.source.as_mut(), header.data_offset, end, &mut raw_cues)?;
-                    self.cues
-                        .extend(resolve_cues(raw_cues, &self.summary, self.segment_end)?);
+                    merge_resolved_cues(
+                        &mut self.cues,
+                        resolve_cues(raw_cues, &self.summary, self.segment_end)?,
+                    )?;
                 }
                 ID_SEEK_HEAD => {
                     let mut nested = Vec::new();
@@ -1079,6 +1145,7 @@ impl MatroskaSession {
 
     fn discover_next_cluster(&mut self) -> Result<bool, MediaError> {
         while self.next_segment_offset < self.segment_end {
+            consume_segment_element_budget(&mut self.segment_element_count)?;
             let Some(header) = read_child_header(
                 self.source.as_mut(),
                 self.next_segment_offset,
@@ -1104,12 +1171,10 @@ impl MatroskaSession {
                     let end = element_end(header, self.segment_end)?;
                     let mut raw_cues = Vec::new();
                     parse_cues(self.source.as_mut(), header.data_offset, end, &mut raw_cues)?;
-                    self.cues
-                        .extend(resolve_cues(raw_cues, &self.summary, self.segment_end)?);
-                    self.cues
-                        .sort_by_key(|cue| (cue.time_ns, cue.track_number, cue.cluster_offset));
-                    self.cues
-                        .dedup_by_key(|cue| (cue.time_ns, cue.track_number, cue.cluster_offset));
+                    merge_resolved_cues(
+                        &mut self.cues,
+                        resolve_cues(raw_cues, &self.summary, self.segment_end)?,
+                    )?;
                     self.summary.cue_count = saturating_u32(self.cues.len());
                     self.next_segment_offset = end;
                 }
@@ -1209,17 +1274,15 @@ fn parse_seek_head(
             break;
         };
         let child_end = element_end(header, end)?;
-        if header.id == ID_SEEK {
-            if let Some((target_id, position)) =
+        if header.id == ID_SEEK
+            && let Some((target_id, position)) =
                 parse_seek_entry(source, header.data_offset, child_end)?
-            {
-                if matches!(target_id, ID_CUES | ID_SEEK_HEAD) {
-                    if targets.len() >= MAX_DEFERRED_SEEK_TARGETS {
-                        return Err(MediaError::ElementTooLarge);
-                    }
-                    targets.push((target_id, position));
-                }
+            && matches!(target_id, ID_CUES | ID_SEEK_HEAD)
+        {
+            if targets.len() >= MAX_DEFERRED_SEEK_TARGETS {
+                return Err(MediaError::ElementTooLarge);
             }
+            targets.push((target_id, position));
         }
         cursor = child_end;
     }
@@ -1375,6 +1438,7 @@ fn parse_video(
             ID_PIXEL_HEIGHT => track.pixel_height = read_uint(source, header)?,
             ID_DISPLAY_WIDTH => track.display_width = read_uint(source, header)?,
             ID_DISPLAY_HEIGHT => track.display_height = read_uint(source, header)?,
+            ID_DISPLAY_UNIT => track.display_unit = read_uint(source, header)?,
             ID_FRAME_RATE => track.frame_rate = read_float(source, header)?,
             ID_COLOUR => {
                 track.video_color = parse_video_colour(source, header.data_offset, child_end)?;
@@ -1863,6 +1927,7 @@ fn packets_from_block(
             .collect()
     };
     let payload_count = payloads.len();
+    let shared_block_additions: Arc<[BlockAddition]> = Arc::from(block_additions.to_vec());
     let mut packets = Vec::with_capacity(payload_count);
     let mut elapsed_ns = 0_u64;
     for (frame_index, payload) in payloads.into_iter().enumerate() {
@@ -1908,10 +1973,16 @@ fn packets_from_block(
             // interleaved queue. Until then PTS is the safest placeholder.
             decode_timestamp_ns: timestamp_ns,
             duration_ns,
-            discard_padding_ns: if is_last { discard_padding_ns } else { 0 },
+            discard_padding_ns: if (discard_padding_ns < 0 && frame_index == 0)
+                || (discard_padding_ns >= 0 && is_last)
+            {
+                discard_padding_ns
+            } else {
+                0
+            },
             flags,
             payload,
-            block_additions: block_additions.to_vec(),
+            block_additions: Arc::clone(&shared_block_additions),
         });
         elapsed_ns = elapsed_ns
             .checked_add(duration_ns)
@@ -1927,7 +1998,11 @@ fn inferred_audio_packet_duration_ns(track: &MediaTrack, payload: &[u8]) -> Opti
     {
         return None;
     }
-    let sample_frames = super::audio::compressed_audio_sample_frames(track.codec, payload)?;
+    let sample_frames = super::audio::compressed_audio_sample_frames(
+        track.codec,
+        payload,
+        track.aac_frames_per_packet,
+    )?;
     let duration = f64::from(sample_frames) * 1_000_000_000.0 / track.output_sampling_frequency;
     if !duration.is_finite() || duration <= 0.0 || duration > u64::MAX as f64 {
         return None;
@@ -2099,7 +2174,41 @@ fn choose_cue(cues: &[CuePoint], time_ns: u64, track: Option<u64>) -> Option<&Cu
         .filter(matching)
         .take_while(|cue| cue.time_ns <= time_ns)
         .last()
-        .or_else(|| cues.iter().find(matching))
+}
+
+fn maximum_selected_seek_pre_roll_ns(tracks: &[MediaTrack], selected: &[bool]) -> u64 {
+    tracks
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| selected.get(*index).copied().unwrap_or(false))
+        .map(|(_, track)| track.seek_pre_roll_ns)
+        .max()
+        .unwrap_or(0)
+}
+
+fn consume_segment_element_budget(count: &mut usize) -> Result<(), MediaError> {
+    *count = count.checked_add(1).ok_or(MediaError::ArithmeticOverflow)?;
+    if *count > MAX_SEGMENT_ELEMENTS {
+        return Err(MediaError::ElementTooLarge);
+    }
+    Ok(())
+}
+
+fn merge_resolved_cues(
+    cues: &mut Vec<CuePoint>,
+    mut additional: Vec<CuePoint>,
+) -> Result<(), MediaError> {
+    let aggregate = cues
+        .len()
+        .checked_add(additional.len())
+        .ok_or(MediaError::ArithmeticOverflow)?;
+    if aggregate > MAX_CUES {
+        return Err(MediaError::ElementTooLarge);
+    }
+    cues.append(&mut additional);
+    cues.sort_by_key(|cue| (cue.time_ns, cue.track_number, cue.cluster_offset));
+    cues.dedup_by_key(|cue| (cue.time_ns, cue.track_number, cue.cluster_offset));
+    Ok(())
 }
 
 fn element_end(header: ElementHeader, parent_end: u64) -> Result<u64, MediaError> {
@@ -2673,10 +2782,12 @@ mod tests {
             codec_delay_ns: 0,
             seek_pre_roll_ns: 0,
             codec_private: Vec::new(),
+            aac_frames_per_packet: if codec == Codec::Aac { 1_024 } else { 0 },
             pixel_width: 0,
             pixel_height: 0,
             display_width: 0,
             display_height: 0,
+            display_unit: 0,
             frame_rate: 0.0,
             video_color: VideoColorInfo::default(),
             block_addition_mappings: Vec::new(),
@@ -3197,6 +3308,57 @@ mod tests {
     }
 
     #[test]
+    fn selected_audio_preroll_starts_before_the_video_cue_relative_position() {
+        let mut audio = Vec::new();
+        append(&mut audio, float_element(&[0xb5], 48_000.0));
+        append(&mut audio, uint_element(&[0x9f], 2));
+        let mut audio_entry = Vec::new();
+        append(&mut audio_entry, uint_element(&[0xd7], 2));
+        append(&mut audio_entry, uint_element(&[0x73, 0xc5], 102));
+        append(&mut audio_entry, uint_element(&[0x83], 2));
+        append(&mut audio_entry, uint_element(&[0x56, 0xbb], 2_000_000_000));
+        append(&mut audio_entry, string_element(&[0x86], "A_OPUS"));
+        append(&mut audio_entry, element(&[0xe1], audio));
+
+        let timestamp = uint_element(&[0xe7], 8_000);
+        let audio_preroll = simple_block(2, 0, 0x80, &[0x98]);
+        let video_random_access = simple_block(1, 0, 0x80, b"video-cue");
+        let relative_position = timestamp.len() + audio_preroll.len();
+        let mut cluster_payload = Vec::new();
+        append(&mut cluster_payload, timestamp);
+        append(&mut cluster_payload, audio_preroll);
+        append(&mut cluster_payload, video_random_access);
+        let media_cluster = element(&[0x1f, 0x43, 0xb6, 0x75], cluster_payload);
+
+        let info = info();
+        let tracks = tracks(vec![video_track(1), element(&[0xae], audio_entry)]);
+        let cluster_position = info.len() + tracks.len();
+        let mut cue_payload = Vec::new();
+        append(
+            &mut cue_payload,
+            cue_point_relative(8_000, 1, cluster_position as u64, relative_position as u64),
+        );
+
+        let mut segment = Vec::new();
+        append(&mut segment, info);
+        append(&mut segment, tracks);
+        append(&mut segment, media_cluster);
+        append(
+            &mut segment,
+            element(&[0x1c, 0x53, 0xbb, 0x6b], cue_payload),
+        );
+        let mut file = ebml_header();
+        append(&mut file, element(&[0x18, 0x53, 0x80, 0x67], segment));
+
+        let mut session = open_file(file);
+        session.seek(10_000_000_000).unwrap();
+        let packet = session.next_packet().unwrap().unwrap();
+        assert_eq!(packet.track_number, 2);
+        assert_eq!(packet.payload, [0x98]);
+        assert_eq!(packet.timestamp_ns, 8_000_000_000);
+    }
+
+    #[test]
     fn indexes_and_reads_unknown_sized_segment_and_clusters() {
         let mut first_cluster = Vec::new();
         append(&mut first_cluster, uint_element(&[0xe7], 0));
@@ -3329,5 +3491,345 @@ mod tests {
                 .unwrap(),
             MediaError::ElementTooLarge
         );
+    }
+
+    #[test]
+    fn maps_documented_mpeg4_part2_codec_ids() {
+        assert_eq!(
+            Codec::from_matroska_id("V_MPEG4/ISO/ASP"),
+            Codec::Mpeg4Part2
+        );
+        assert_eq!(Codec::from_matroska_id("V_MPEG4/ISO/SP"), Codec::Mpeg4Part2);
+        assert_eq!(Codec::from_matroska_id("V_MPEG4/ISO/AP"), Codec::Unknown);
+    }
+
+    #[test]
+    fn laced_siblings_share_one_block_additions_allocation() {
+        let block = raw_block(1, 0, 0x84, &[1, b'a', b'b']);
+        let additions = [BlockAddition {
+            id: 5,
+            data: vec![0xb5, 0, 1],
+        }];
+        let packets = packets_from_block(
+            block,
+            0,
+            DEFAULT_TIMESTAMP_SCALE_NS,
+            &[timing_audio_track(Codec::Opus)],
+            &[true],
+            true,
+            None,
+            0,
+            true,
+            &additions,
+        )
+        .unwrap();
+
+        assert_eq!(packets.len(), 2);
+        assert!(Arc::ptr_eq(
+            &packets[0].block_additions,
+            &packets[1].block_additions
+        ));
+        assert_eq!(packets[0].block_additions[0], additions[0]);
+    }
+
+    #[test]
+    fn laced_discard_padding_trims_the_correct_boundary_packet() {
+        let block = raw_block(1, 0, 0x84, &[1, b'a', b'b']);
+        let track = timing_audio_track(Codec::Opus);
+        let packets = |discard_padding_ns| {
+            packets_from_block(
+                block.clone(),
+                0,
+                DEFAULT_TIMESTAMP_SCALE_NS,
+                std::slice::from_ref(&track),
+                &[true],
+                true,
+                None,
+                discard_padding_ns,
+                true,
+                &[],
+            )
+            .unwrap()
+        };
+
+        let start_trimmed = packets(-5);
+        assert_eq!(start_trimmed[0].discard_padding_ns, -5);
+        assert_eq!(start_trimmed[1].discard_padding_ns, 0);
+
+        let end_trimmed = packets(5);
+        assert_eq!(end_trimmed[0].discard_padding_ns, 0);
+        assert_eq!(end_trimmed[1].discard_padding_ns, 5);
+    }
+
+    #[test]
+    fn invisible_block_flag_reaches_every_laced_packet() {
+        let packets = packets_from_block(
+            raw_block(1, 0, 0x8c, &[1, b'a', b'b']),
+            0,
+            DEFAULT_TIMESTAMP_SCALE_NS,
+            &[timing_audio_track(Codec::Opus)],
+            &[true],
+            true,
+            None,
+            0,
+            true,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(packets.len(), 2);
+        assert!(
+            packets
+                .iter()
+                .all(|packet| packet.flags.contains(PacketFlags::INVISIBLE))
+        );
+    }
+
+    #[test]
+    fn lazy_discovery_carries_the_open_segment_element_budget() {
+        let mut session = MatroskaSession::open_streaming(Box::new(OwnedSource {
+            bytes: make_file(true, false),
+        }))
+        .unwrap();
+        let opening_count = session.segment_element_count;
+        while session.next_packet().unwrap().is_some() {}
+        assert!(session.segment_element_count > opening_count);
+
+        let mut exhausted_session = MatroskaSession::open_streaming(Box::new(OwnedSource {
+            bytes: make_file(true, false),
+        }))
+        .unwrap();
+        exhausted_session.segment_element_count = MAX_SEGMENT_ELEMENTS;
+        assert_eq!(
+            exhausted_session.discover_next_cluster().unwrap_err(),
+            MediaError::ElementTooLarge
+        );
+    }
+
+    #[test]
+    fn selected_track_seek_preroll_uses_the_maximum_requirement() {
+        let mut video = timing_audio_track(Codec::H264);
+        video.kind = TrackKind::Video;
+        video.seek_pre_roll_ns = 500_000_000;
+        let mut audio = timing_audio_track(Codec::Opus);
+        audio.index = 1;
+        audio.number = 2;
+        audio.seek_pre_roll_ns = 2_000_000_000;
+
+        assert_eq!(
+            maximum_selected_seek_pre_roll_ns(&[video.clone(), audio.clone()], &[true, true]),
+            2_000_000_000
+        );
+        assert_eq!(
+            maximum_selected_seek_pre_roll_ns(&[video, audio], &[true, false]),
+            500_000_000
+        );
+    }
+
+    #[test]
+    fn future_only_cue_is_not_used_for_an_earlier_seek() {
+        let cues = vec![
+            CuePoint {
+                time_ns: 100,
+                track_number: 1,
+                cluster_offset: 10,
+                relative_position: 0,
+                duration_ns: 0,
+                block_number: 1,
+            },
+            CuePoint {
+                time_ns: 200,
+                track_number: 1,
+                cluster_offset: 20,
+                relative_position: 0,
+                duration_ns: 0,
+                block_number: 1,
+            },
+        ];
+        assert!(choose_cue(&cues, 99, Some(1)).is_none());
+        assert_eq!(choose_cue(&cues, 150, Some(1)).unwrap().time_ns, 100);
+        assert!(choose_cue(&cues, 250, Some(2)).is_none());
+    }
+
+    #[test]
+    fn repeated_cues_share_one_aggregate_limit() {
+        let cue = CuePoint {
+            time_ns: 0,
+            track_number: 1,
+            cluster_offset: 1,
+            relative_position: 0,
+            duration_ns: 0,
+            block_number: 1,
+        };
+        let mut cues = (0..MAX_CUES)
+            .map(|index| CuePoint {
+                time_ns: index as u64,
+                cluster_offset: index as u64 + 1,
+                ..cue.clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            merge_resolved_cues(&mut cues, vec![cue]).unwrap_err(),
+            MediaError::ElementTooLarge
+        );
+        assert_eq!(cues.len(), MAX_CUES);
+    }
+
+    #[test]
+    fn aac_asc_frame_length_controls_matroska_lace_timing() {
+        let mut track = timing_audio_track(Codec::Aac);
+        track.codec_private = vec![0x12, 0x14]; // AAC-LC, frameLengthFlag=1.
+        track.aac_frames_per_packet = 960;
+        assert_eq!(
+            inferred_audio_packet_duration_ns(&track, &[0x11]),
+            Some(20_000_000)
+        );
+    }
+
+    #[test]
+    fn rejects_aac_codec_private_above_the_codec_specific_budget() {
+        let builder = TrackBuilder {
+            number: 1,
+            kind: TrackKind::Audio,
+            codec_id: "A_AAC".to_owned(),
+            codec_private: vec![0; crate::media::audio::MAX_AAC_AUDIO_SPECIFIC_CONFIG_BYTES + 1],
+            ..TrackBuilder::default()
+        };
+
+        assert_eq!(builder.finish(0).unwrap_err(), MediaError::ElementTooLarge);
+    }
+
+    #[test]
+    fn cached_aac_frame_metadata_is_independent_of_packet_count_and_private_tail() {
+        let mut track = timing_audio_track(Codec::Aac);
+        track.aac_frames_per_packet = 960;
+        track.codec_private = vec![0; crate::media::audio::MAX_AAC_AUDIO_SPECIFIC_CONFIG_BYTES];
+
+        for _ in 0..256 {
+            assert_eq!(
+                inferred_audio_packet_duration_ns(&track, &[0x11]),
+                Some(20_000_000)
+            );
+        }
+    }
+
+    #[test]
+    fn selection_changes_preserve_unrelated_and_noop_pending_lace_siblings() {
+        let queued = |track_index: u32| MediaPacket {
+            track_index,
+            track_number: u64::from(track_index) + 1,
+            timestamp_ns: 0,
+            decode_timestamp_ns: 0,
+            duration_ns: 1,
+            discard_padding_ns: 0,
+            flags: PacketFlags::LACED,
+            payload: vec![track_index as u8],
+            block_additions: Arc::from([]),
+        };
+        let mut session = open_file(make_file(false, true));
+        session.selected_tracks = vec![true, true, false];
+        session.pending_packets = VecDeque::from([queued(0), queued(1), queued(2)]);
+
+        session.select_track(1).unwrap();
+        assert_eq!(session.pending_packets.len(), 3, "true no-op preserves all");
+
+        session.select_track(2).unwrap();
+        assert_eq!(session.pending_packets.len(), 1);
+        assert_eq!(session.pending_packets[0].track_index, 0);
+
+        session.pending_packets = VecDeque::from([queued(0), queued(1), queued(2)]);
+        session.set_kind_selected(TrackKind::Video, false);
+        assert_eq!(
+            session
+                .pending_packets
+                .iter()
+                .map(|packet| packet.track_index)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+    }
+
+    #[test]
+    fn disabled_tracks_cannot_be_selected_manually_or_by_kind() {
+        let mut session = open_file(make_file(false, true));
+        session.tracks[2].enabled = false;
+        session.selected_tracks[2] = false;
+
+        assert_eq!(
+            session.select_track(2).unwrap_err(),
+            MediaError::InvalidData("track is disabled")
+        );
+        session.set_kind_selected(TrackKind::Audio, true);
+        assert!(session.is_track_selected(1));
+        assert!(!session.is_track_selected(2));
+        assert_eq!(
+            session.set_track_selected(2, true).unwrap_err(),
+            MediaError::InvalidData("track is disabled")
+        );
+    }
+
+    #[test]
+    fn parsed_flag_enabled_zero_prevents_default_and_manual_selection() {
+        let mut audio = Vec::new();
+        append(&mut audio, float_element(&[0xb5], 48_000.0));
+        append(&mut audio, uint_element(&[0x9f], 2));
+
+        let mut disabled_entry = Vec::new();
+        append(&mut disabled_entry, uint_element(&[0xd7], 2));
+        append(&mut disabled_entry, uint_element(&[0x73, 0xc5], 102));
+        append(&mut disabled_entry, uint_element(&[0x83], 2));
+        append(&mut disabled_entry, uint_element(&[0xb9], 0));
+        append(&mut disabled_entry, string_element(&[0x86], "A_OPUS"));
+        append(&mut disabled_entry, element(&[0xe1], audio));
+
+        let mut segment = info();
+        append(
+            &mut segment,
+            tracks(vec![
+                element(&[0xae], disabled_entry),
+                audio_track(3, "Enabled audio"),
+            ]),
+        );
+        let mut file = ebml_header();
+        append(&mut file, element(&[0x18, 0x53, 0x80, 0x67], segment));
+
+        let mut session = open_file(file);
+        assert!(!session.tracks()[0].enabled);
+        assert!(session.tracks()[1].enabled);
+        assert!(!session.is_track_selected(0));
+        assert!(session.is_track_selected(1));
+        assert_eq!(
+            session.select_track(0).unwrap_err(),
+            MediaError::InvalidData("track is disabled")
+        );
+        session.set_kind_selected(TrackKind::Audio, true);
+        assert!(!session.is_track_selected(0));
+        assert!(session.is_track_selected(1));
+    }
+
+    #[test]
+    fn parses_display_unit_without_collapsing_display_aspect_metadata() {
+        let mut video = Vec::new();
+        append(&mut video, uint_element(&[0xb0], 720));
+        append(&mut video, uint_element(&[0xba], 480));
+        append(&mut video, uint_element(&[0x54, 0xb0], 16));
+        append(&mut video, uint_element(&[0x54, 0xba], 9));
+        append(&mut video, uint_element(&[0x54, 0xb2], 3));
+        let mut entry = Vec::new();
+        append(&mut entry, uint_element(&[0xd7], 1));
+        append(&mut entry, uint_element(&[0x83], 1));
+        append(&mut entry, string_element(&[0x86], "V_MPEG4/ISO/ASP"));
+        append(&mut entry, element(&[0xe0], video));
+        let mut segment = info();
+        append(&mut segment, tracks(vec![element(&[0xae], entry)]));
+        let mut file = ebml_header();
+        append(&mut file, element(&[0x18, 0x53, 0x80, 0x67], segment));
+
+        let session = open_file(file);
+        let track = &session.tracks()[0];
+        assert_eq!(track.codec, Codec::Mpeg4Part2);
+        assert_eq!((track.pixel_width, track.pixel_height), (720, 480));
+        assert_eq!((track.display_width, track.display_height), (16, 9));
+        assert_eq!(track.display_unit, 3);
     }
 }

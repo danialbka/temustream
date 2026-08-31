@@ -110,6 +110,45 @@ final class SecureStoreWritePolicyTests: XCTestCase {
         XCTAssertTrue(removed)
     }
 
+    func testMigrationTransactionKeepsDiscoveryMarkerUntilEveryWriteSucceeds() {
+        struct Failure: Error {}
+        var sessionSaved = false
+        var addonsSaved = false
+        var legacyDiscoveryPresent = true
+
+        XCTAssertThrowsError(
+            try SecureStoreMigrationPolicy.migrateTransactionIfPresent(
+                legacyDiscoveryPresent,
+                persistAllDependencies: {
+                    sessionSaved = true
+                    throw Failure()
+                },
+                clearLegacyDiscovery: {
+                    legacyDiscoveryPresent = false
+                }
+            )
+        )
+        XCTAssertTrue(sessionSaved)
+        XCTAssertFalse(addonsSaved)
+        XCTAssertTrue(legacyDiscoveryPresent)
+
+        XCTAssertNoThrow(
+            try SecureStoreMigrationPolicy.migrateTransactionIfPresent(
+                legacyDiscoveryPresent,
+                persistAllDependencies: {
+                    sessionSaved = true
+                    addonsSaved = true
+                },
+                clearLegacyDiscovery: {
+                    legacyDiscoveryPresent = false
+                }
+            )
+        )
+        XCTAssertTrue(sessionSaved)
+        XCTAssertTrue(addonsSaved)
+        XCTAssertFalse(legacyDiscoveryPresent)
+    }
+
     private func write(
         update: () -> Int32,
         add: () -> Int32

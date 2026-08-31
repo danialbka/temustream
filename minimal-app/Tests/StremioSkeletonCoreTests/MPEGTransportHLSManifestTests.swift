@@ -82,5 +82,19 @@ final class MPEGTransportHLSManifestTests: XCTestCase {
                 maximumSegmentCount: 1
             )
         )
+        XCTAssertThrowsError(
+            try MPEGTransportHLSManifest.build(
+                contentLength: .max,
+                duration: 7_200
+            )
+        ) { error in
+            XCTAssertEqual(error as? MPEGTransportHLSManifestError, .tooManySegments)
+        }
+        XCTAssertThrowsError(
+            try MPEGTransportHLSManifest.build(
+                contentLength: .max,
+                duration: .leastNonzeroMagnitude
+            )
+        )
     }
 }

@@ -81,10 +81,16 @@ public actor PlaybackCompletionStore {
             return []
         }
 
-        let decoded = try decoder.decode(
-            [PlaybackCompletion].self,
-            from: Data(contentsOf: fileURL)
-        )
+        let data = try Data(contentsOf: fileURL)
+        let decoded: [PlaybackCompletion]
+        do {
+            decoded = try decoder.decode([PlaybackCompletion].self, from: data)
+        } catch {
+            try LocalPreferenceRecovery.preserveCorruptFile(fileURL)
+            latestUpdates.removeAll()
+            try persist([])
+            return []
+        }
         let current = decoded.reduce(into: [String: PlaybackCompletion]()) {
             result,
             completion in

@@ -131,6 +131,12 @@ enum TorBoxPlaybackResolver {
                 else {
                     throw TorBoxPlaybackError.invalidRedirect
                 }
+                guard BoundedHTTPRedirectTrustPolicy.allows(
+                    from: url,
+                    to: redirected
+                ) else {
+                    throw TorBoxPlaybackError.invalidRedirect
+                }
                 url = redirectingPermalink(redirected)
                 if isTorrentRequestDownload(url) {
                     repairPermalink = url

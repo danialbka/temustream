@@ -34,9 +34,17 @@ struct MPEGTransportHLSManifest: Equatable, Sendable {
         }
 
         let bytesPerSecond = Double(contentLength) / duration
-        let targetBytes = Int64((bytesPerSecond * targetSegmentDuration).rounded())
+        let estimatedTargetBytes = bytesPerSecond * targetSegmentDuration
+        let targetBytes: Int64
+        if estimatedTargetBytes >= Double(maximumSegmentBytes) {
+            targetBytes = maximumSegmentBytes
+        } else if let converted = Int64(exactly: estimatedTargetBytes.rounded()) {
+            targetBytes = converted
+        } else {
+            throw MPEGTransportHLSManifestError.invalidMedia
+        }
         let countBoundedBytes = max(
-            (contentLength + maximumSegmentCount - 1) / maximumSegmentCount,
+            ceilingQuotient(contentLength, dividedBy: maximumSegmentCount),
             minimumSegmentBytes
         )
         let unclampedBytes = max(targetBytes, countBoundedBytes)
@@ -45,7 +53,7 @@ struct MPEGTransportHLSManifest: Equatable, Sendable {
             maximumSegmentBytes
         )
         let segmentByteLength = max((clampedBytes / 188) * 188, 188)
-        let segmentCount = (contentLength + segmentByteLength - 1) / segmentByteLength
+        let segmentCount = ceilingQuotient(contentLength, dividedBy: segmentByteLength)
         guard segmentCount > 0, segmentCount <= maximumSegmentCount else {
             throw MPEGTransportHLSManifestError.tooManySegments
         }
@@ -59,15 +67,16 @@ struct MPEGTransportHLSManifest: Equatable, Sendable {
                 Segment(
                     offset: offset,
                     length: length,
-                    duration: duration * Double(length) / Double(contentLength)
+                    duration: duration * (Double(length) / Double(contentLength))
                 )
             )
             offset += length
         }
-        let targetDuration = max(
-            Int(ceil(segments.map(\.duration).max() ?? 1)),
-            1
-        )
+        guard let targetDuration = Int(
+            exactly: ceil(segments.map(\.duration).max() ?? 1)
+        ) else {
+            throw MPEGTransportHLSManifestError.invalidMedia
+        }
         return Self(
             contentLength: contentLength,
             duration: duration,
@@ -75,6 +84,14 @@ struct MPEGTransportHLSManifest: Equatable, Sendable {
             segmentByteLength: segmentByteLength,
             segments: segments
         )
+    }
+
+    private static func ceilingQuotient(
+        _ numerator: Int64,
+        dividedBy denominator: Int64
+    ) -> Int64 {
+        let quotient = numerator / denominator
+        return quotient + (numerator % denominator == 0 ? 0 : 1)
     }
 
     func encoded() -> Data {

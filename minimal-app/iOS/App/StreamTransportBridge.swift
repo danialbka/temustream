@@ -205,9 +205,10 @@ actor StreamTransportBridge {
 
         let indexedTime = max(time - Self.vodSeekPrerollSeconds, 0)
         let fraction = min(max(indexedTime / duration, 0), 1)
+        let maximumOffset = source.contentLength - 1
         let virtualOffset = Int64(
-            (Double(source.contentLength - 1) * fraction).rounded()
-        )
+            exactly: (Double(maximumOffset) * fraction).rounded()
+        ) ?? maximumOffset
         do {
             let resolved = try await source.store.correctedUpstreamOffset(
                 forVirtualOffset: virtualOffset
@@ -940,19 +941,34 @@ private actor StreamChunkStore {
             // nearby PCR slope makes this a true local Newton correction;
             // the smoothed whole-file rate oscillated by several seconds.
             let bitrate = Double(lookup.localBitrateBPS)
-            var byteCorrection = Int64(
-                (timingErrorSeconds * bitrate / 8).rounded()
-            )
-            byteCorrection = (byteCorrection / 188) * 188
             let maximumCorrection = min(contentLength / 8, 512 * 1_024 * 1_024)
-            byteCorrection = min(
-                max(byteCorrection, -maximumCorrection),
-                maximumCorrection
-            )
-            let corrected = min(
-                max(candidate - byteCorrection, 0),
-                contentLength - 1
-            )
+            let estimatedCorrection = timingErrorSeconds * bitrate / 8
+            var byteCorrection: Int64
+            if estimatedCorrection >= Double(maximumCorrection) {
+                byteCorrection = maximumCorrection
+            } else if estimatedCorrection <= Double(-maximumCorrection) {
+                byteCorrection = -maximumCorrection
+            } else {
+                byteCorrection = Int64(exactly: estimatedCorrection.rounded()) ?? 0
+            }
+            byteCorrection = (byteCorrection / 188) * 188
+            let maximumOffset = contentLength - 1
+            let corrected: Int64
+            if byteCorrection >= 0 {
+                corrected = byteCorrection >= candidate
+                    ? 0
+                    : candidate - byteCorrection
+            } else {
+                // `byteCorrection` is bounded to 512 MiB above, so negating it
+                // is safe. Compare against the remaining distance before
+                // adding: clamping an already-overflowed value is too late for
+                // streams whose declared size approaches Int64.max.
+                let increase = -byteCorrection
+                let remaining = maximumOffset - candidate
+                corrected = increase >= remaining
+                    ? maximumOffset
+                    : candidate + increase
+            }
             guard corrected != candidate else { break }
             candidate = corrected
         }
@@ -1014,13 +1030,31 @@ private actor StreamChunkStore {
         accessCounter &+= 1
         cache[offset] = CachedChunk(data: data, lastAccess: accessCounter)
         cachedBytes += data.count
-        if let timing = PlaybackPerformanceCore.mpegTransportTiming(in: data) {
+        if let timing = PlaybackPerformanceCore.mpegTransportTiming(in: data),
+           timing.firstByteOffset <= timing.lastByteOffset,
+           timing.lastByteOffset < UInt64(data.count),
+           let relativeFirst = Int64(exactly: timing.firstByteOffset),
+           let relativeLast = Int64(exactly: timing.lastByteOffset)
+        {
+            let (firstByteOffset, firstOverflow) = offset.addingReportingOverflow(
+                relativeFirst
+            )
+            let (lastByteOffset, lastOverflow) = offset.addingReportingOverflow(
+                relativeLast
+            )
+            guard !firstOverflow, !lastOverflow,
+                  firstByteOffset >= 0,
+                  lastByteOffset < contentLength
+            else {
+                evictExcessCachedData()
+                return
+            }
             let span = PCRSpan(
                 pcrPID: timing.pcrPID,
                 firstPCRTicks: timing.firstPCRTicks,
                 lastPCRTicks: timing.lastPCRTicks,
-                firstByteOffset: offset + Int64(timing.firstByteOffset),
-                lastByteOffset: offset + Int64(timing.lastByteOffset),
+                firstByteOffset: firstByteOffset,
+                lastByteOffset: lastByteOffset,
                 bitrateBPS: timing.bitrateBPS
             )
             timingSpans[offset] = span
@@ -1034,8 +1068,13 @@ private actor StreamChunkStore {
                 #endif
             }
         }
+        evictExcessCachedData()
+    }
+
+    private func evictExcessCachedData() {
         while cachedBytes > Self.maximumCachedBytes,
-              let oldest = cache.min(by: { $0.value.lastAccess < $1.value.lastAccess }) {
+              let oldest = cache.min(by: { $0.value.lastAccess < $1.value.lastAccess })
+        {
             cache[oldest.key] = nil
             cachedBytes -= oldest.value.data.count
         }
@@ -1133,8 +1172,19 @@ private actor StreamChunkStore {
         offset: Int64,
         session: URLSession
     ) async throws -> Data {
-        let upperBound = min(offset + chunkSize - 1, contentLength - 1)
-        let expectedCount = Int(upperBound - offset + 1)
+        guard contentLength > 0, offset >= 0, offset < contentLength else {
+            throw StreamTransportBridgeError.unsupportedRange
+        }
+        let remaining = contentLength - offset
+        let requestedCount = min(chunkSize, remaining)
+        guard requestedCount > 0,
+              let expectedCount = Int(exactly: requestedCount)
+        else {
+            throw StreamTransportBridgeError.unsupportedRange
+        }
+        // `requestedCount <= contentLength - offset`, so this addition cannot
+        // exceed the validated positive content length even at Int64.max.
+        let upperBound = offset + requestedCount - 1
         var lastError: Error?
 
         for attempt in 1...3 {

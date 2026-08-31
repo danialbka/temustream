@@ -16,6 +16,28 @@ public struct PlaybackCompressedPacketBufferLimits: Equatable, Sendable {
     }
 }
 
+/// The portion of one compressed packet that participates in reservoir
+/// capacity decisions. Keeping this value-only lets the app prove a
+/// counterfactual eviction without copying packet payloads.
+public struct PlaybackCompressedPacketFootprint: Equatable, Sendable {
+    public let byteCount: Int
+    public let timelineStart: TimeInterval
+    public let timelineEnd: TimeInterval
+    public let isSubtitle: Bool
+
+    public init(
+        byteCount: Int,
+        timelineStart: TimeInterval,
+        timelineEnd: TimeInterval,
+        isSubtitle: Bool
+    ) {
+        self.byteCount = byteCount
+        self.timelineStart = timelineStart
+        self.timelineEnd = timelineEnd
+        self.isSubtitle = isSubtitle
+    }
+}
+
 /// Memory-bounded read-ahead for Bunny's compressed Matroska packets.
 ///
 /// Keeping this reserve compressed separates short provider/range jitter from
@@ -107,5 +129,78 @@ public enum PlaybackCompressedPacketBufferPolicy {
             / max(limits.maximumDuration, 0.001)
         return max(byteFraction, packetFraction, durationFraction)
             <= refillLowWatermarkFraction
+    }
+
+    /// Returns the smallest farthest-first subtitle subset whose removal
+    /// turns a full, otherwise-stalled reservoir back into readable headroom.
+    ///
+    /// Callers invoke this only after no renderer packet is ready. A healthy
+    /// future cue is therefore retained, and no subtitle is removed when the
+    /// non-subtitle packets would keep the reservoir full by themselves.
+    public static func blockingFutureSubtitleEvictionIndices(
+        packets: [PlaybackCompressedPacketFootprint],
+        subtitleReadyThrough: TimeInterval,
+        limits: PlaybackCompressedPacketBufferLimits
+    ) -> [Int] {
+        guard subtitleReadyThrough.isFinite, !packets.isEmpty else { return [] }
+
+        var timeline = PlaybackPacketTimelineIndex()
+        var tokens: [PlaybackPacketTimelineIndex.Token] = []
+        tokens.reserveCapacity(packets.count)
+        var byteCount = 0
+        for packet in packets {
+            tokens.append(
+                timeline.append(
+                    start: packet.timelineStart,
+                    end: packet.timelineEnd
+                )
+            )
+            let safeBytes = max(packet.byteCount, 0)
+            let addition = byteCount.addingReportingOverflow(safeBytes)
+            byteCount = addition.overflow ? Int.max : addition.partialValue
+        }
+
+        guard isFull(
+            byteCount: byteCount,
+            packetCount: packets.count,
+            bufferedDuration: timeline.duration,
+            limits: limits
+        ) else { return [] }
+
+        let candidates = packets.indices.filter { index in
+            let packet = packets[index]
+            return packet.isSubtitle
+                && packet.timelineStart.isFinite
+                && packet.timelineStart > subtitleReadyThrough
+        }.sorted { lhs, rhs in
+            let left = packets[lhs]
+            let right = packets[rhs]
+            if left.timelineStart == right.timelineStart {
+                return left.timelineEnd > right.timelineEnd
+            }
+            return left.timelineStart > right.timelineStart
+        }
+
+        var removed: [Int] = []
+        removed.reserveCapacity(candidates.count)
+        var packetCount = packets.count
+        for index in candidates {
+            timeline.remove(tokens[index])
+            byteCount = max(byteCount - max(packets[index].byteCount, 0), 0)
+            packetCount = max(packetCount - 1, 0)
+            removed.append(index)
+            if !isFull(
+                byteCount: byteCount,
+                packetCount: packetCount,
+                bufferedDuration: timeline.duration,
+                limits: limits
+            ) {
+                return removed.sorted()
+            }
+        }
+
+        // A/V or other packets remain independently full. Removing every
+        // future subtitle would not restore progress, so preserve them all.
+        return []
     }
 }

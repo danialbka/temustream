@@ -16,6 +16,9 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
     request_ordinal = 0
     _request_counter = 0
     _request_counter_lock = threading.Lock()
+    _provider_refresh_lock = threading.Lock()
+    _provider_resolution_count = 0
+    _provider_expired_request_count = 0
 
     def send_json(self, value, status=200):
         payload = json.dumps(value).encode("utf-8")
@@ -26,6 +29,35 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
+        route = self.path.split("?", 1)[0]
+        if route == "/provider-refresh/reset":
+            with type(self)._provider_refresh_lock:
+                type(self)._provider_resolution_count = 0
+                type(self)._provider_expired_request_count = 0
+            self.send_json({"success": True})
+            return
+        if route == "/provider-refresh/status":
+            with type(self)._provider_refresh_lock:
+                status = {
+                    "resolutions": type(self)._provider_resolution_count,
+                    "expiredRequests": type(self)._provider_expired_request_count,
+                }
+            self.send_json(status)
+            return
+        if route == "/provider-refresh/request":
+            with type(self)._provider_refresh_lock:
+                type(self)._provider_resolution_count += 1
+                resolution = type(self)._provider_resolution_count
+            destination = (
+                "/provider-refresh/expired"
+                if resolution == 1
+                else "/sample-autoplay.mp4"
+            )
+            self.send_response(302)
+            self.send_header("Location", destination)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path == "/heartbeat":
             self.send_json({"success": True})
             return
@@ -124,10 +156,22 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         return super().translate_path(path)
 
     def send_head(self):
+        translated_request_path = self.path
+        if self.path.split("?", 1)[0] == "/provider-refresh/expired":
+            with type(self)._provider_refresh_lock:
+                type(self)._provider_expired_request_count += 1
+                request_count = type(self)._provider_expired_request_count
+            if request_count > 1:
+                self.send_response(410)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            translated_request_path = "/sample-autoplay.mp4"
+
         with type(self)._request_counter_lock:
             type(self)._request_counter += 1
             self.request_ordinal = type(self)._request_counter
-        path = self.translate_path(self.path)
+        path = self.translate_path(translated_request_path)
         if os.path.isdir(path):
             return super().send_head()
         try:

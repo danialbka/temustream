@@ -53,6 +53,13 @@ final class TemuStreamTVUITests: XCTestCase {
     snapshot("07-addons")
 
     launchTab("settings", identifier: "tvos-settings")
+    let installedVersion = element("tvos-version-build")
+    XCTAssertTrue(installedVersion.waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      installedVersion.label.hasPrefix("Version ")
+        || installedVersion.label.hasPrefix("Build "),
+      "About must render the installed bundle metadata"
+    )
     snapshot("08-settings")
   }
 

@@ -17,9 +17,16 @@ public actor LibraryStore {
             cache = []
             return []
         }
-        let decoded = try decoder.decode([MetaItem].self, from: Data(contentsOf: fileURL))
-        cache = decoded
-        return decoded
+        let data = try Data(contentsOf: fileURL)
+        do {
+            let decoded = try decoder.decode([MetaItem].self, from: data)
+            cache = decoded
+            return decoded
+        } catch {
+            try LocalPreferenceRecovery.preserveCorruptFile(fileURL)
+            try persist([])
+            return []
+        }
     }
 
     @discardableResult

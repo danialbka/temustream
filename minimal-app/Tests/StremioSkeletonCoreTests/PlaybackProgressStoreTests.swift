@@ -14,6 +14,40 @@ final class PlaybackProgressStoreTests: XCTestCase {
         sources: nil
     )
 
+    func testCorruptProgressIsPreservedAndStoreRemainsWritable() async throws {
+        let url = temporaryStoreURL()
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let corrupt = Data("not playback progress json".utf8)
+        try corrupt.write(to: url)
+
+        let store = PlaybackProgressStore(fileURL: url)
+        let recoveredEmptyItems = try await store.items()
+        XCTAssertEqual(recoveredEmptyItems, [])
+
+        let recoveryFiles = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("playback-progress.corrupt-") }
+        XCTAssertEqual(recoveryFiles.count, 1)
+        XCTAssertEqual(try Data(contentsOf: recoveryFiles[0]), corrupt)
+
+        let recovered = progress(identifier: "movie:recovered", position: 120)
+        let recoveredItems = try await store.record(recovered)
+        XCTAssertEqual(
+            recoveredItems.map(\.contentIdentifier),
+            [recovered.contentIdentifier]
+        )
+        let reloadedItems = try await PlaybackProgressStore(fileURL: url).items()
+        XCTAssertEqual(
+            reloadedItems.map(\.contentIdentifier),
+            [recovered.contentIdentifier]
+        )
+    }
+
     func testProgressPersistsAndLatestPositionReplacesPreviousValue() async throws {
         let url = temporaryStoreURL()
         let store = PlaybackProgressStore(fileURL: url)
@@ -193,6 +227,39 @@ final class PlaybackProgressStoreTests: XCTestCase {
         XCTAssertNil(recorded.first?.stream.url)
         let reloaded = try await PlaybackProgressStore(fileURL: storeURL).items()
         XCTAssertNil(reloaded.first?.stream.url)
+    }
+
+    func testUnrepresentableTimelineValuesAreRejectedAndRemoved() async throws {
+        let storeURL = temporaryStoreURL()
+        try FileManager.default.createDirectory(
+            at: storeURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let extreme = PlaybackProgress(
+            contentIdentifier: "movie:extreme",
+            contentTitle: "Extreme",
+            stream: movieStream,
+            position: 1e300,
+            duration: 1.5e300
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([extreme]).write(to: storeURL)
+
+        let loaded = try await PlaybackProgressStore(fileURL: storeURL).items()
+        XCTAssertTrue(loaded.isEmpty)
+        let recorded = try await PlaybackProgressStore(fileURL: storeURL).record(extreme)
+        XCTAssertTrue(recorded.isEmpty)
+    }
+
+    func testPlaybackTimeFormatterRejectsUnrepresentableValueWithoutTrapping() {
+        XCTAssertNil(PlaybackTimeFormatter.wholeSeconds(1e300))
+        XCTAssertEqual(PlaybackTimeFormatter.clock(1e300), "0:00")
+        XCTAssertEqual(
+            PlaybackTimeFormatter.clock(65, zeroPadMinutes: true),
+            "01:05"
+        )
+        XCTAssertEqual(PlaybackTimeFormatter.clock(3_665), "1:01:05")
     }
 
     private func progress(

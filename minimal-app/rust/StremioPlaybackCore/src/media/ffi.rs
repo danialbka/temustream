@@ -12,7 +12,8 @@ use super::{
 };
 
 const ABI_VERSION: u32 = 1;
-const MEDIA_PACKET_ABI_VERSION: u32 = 3;
+const MEDIA_TRACK_ABI_VERSION: u32 = 2;
+const MEDIA_PACKET_ABI_VERSION: u32 = 4;
 
 const VIDEO_COLOR_MATRIX_PRESENT: u32 = 1 << 0;
 const VIDEO_COLOR_BITS_PER_CHANNEL_PRESENT: u32 = 1 << 1;
@@ -27,6 +28,7 @@ const BLOCK_ADD_ID_TYPE_ITU_T_T35: u64 = 4;
 const TRACK_FLAG_DEFAULT: u32 = 1 << 0;
 const TRACK_FLAG_FORCED: u32 = 1 << 1;
 const TRACK_FLAG_APPLE_DECODABLE: u32 = 1 << 2;
+const TRACK_FLAG_ENABLED: u32 = 1 << 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -51,6 +53,10 @@ pub struct StremioMediaTrackInfo {
     pub flags: u32,
     pub width: u32,
     pub height: u32,
+    pub display_width: u32,
+    pub display_height: u32,
+    pub display_unit: u32,
+    pub audio_frames_per_packet: u32,
     pub sample_rate: f64,
     pub channels: u32,
     pub bit_depth: u32,
@@ -102,6 +108,7 @@ pub struct StremioMediaPacket {
     pub presentation_time_ns: i64,
     pub decode_time_ns: i64,
     pub duration_ns: u64,
+    pub discard_padding_ns: i64,
     pub flags: u32,
     pub data: *const u8,
     pub data_size: usize,
@@ -168,6 +175,7 @@ fn ffi_codec(codec: Codec) -> u32 {
         Codec::Hevc => 2,
         Codec::Av1 => 3,
         Codec::Vp9 => 4,
+        Codec::Mpeg4Part2 => 5,
         Codec::Aac => 100,
         Codec::Ac3 => 101,
         Codec::Eac3 => 102,
@@ -236,13 +244,14 @@ pub unsafe extern "C" fn stremio_media_dolby_sample_frames(
     dolby_sample_frames(codec, packet).unwrap_or(0)
 }
 
-fn apple_format_description_supported(codec: Codec) -> bool {
+fn apple_format_description_supported(track: &MediaTrack) -> bool {
     matches!(
-        codec,
+        track.codec,
         Codec::H264
             | Codec::Hevc
             | Codec::Av1
             | Codec::Vp9
+            | Codec::Mpeg4Part2
             | Codec::Aac
             | Codec::Ac3
             | Codec::Eac3
@@ -253,7 +262,7 @@ fn apple_format_description_supported(codec: Codec) -> bool {
             | Codec::Ass
             | Codec::Ssa
             | Codec::Pgs
-    )
+    ) || (track.codec == Codec::Pcm && track.codec_id == "A_PCM/INT/LIT")
 }
 
 fn track_info(track: &MediaTrack) -> StremioMediaTrackInfo {
@@ -264,11 +273,14 @@ fn track_info(track: &MediaTrack) -> StremioMediaTrackInfo {
     if track.forced {
         flags |= TRACK_FLAG_FORCED;
     }
-    if apple_format_description_supported(track.codec) {
+    if track.enabled {
+        flags |= TRACK_FLAG_ENABLED;
+    }
+    if apple_format_description_supported(track) {
         flags |= TRACK_FLAG_APPLE_DECODABLE;
     }
     StremioMediaTrackInfo {
-        abi_version: ABI_VERSION,
+        abi_version: MEDIA_TRACK_ABI_VERSION,
         index: track.index,
         number: track.number,
         uid: track.uid,
@@ -277,6 +289,10 @@ fn track_info(track: &MediaTrack) -> StremioMediaTrackInfo {
         flags,
         width: u32::try_from(track.pixel_width).unwrap_or(u32::MAX),
         height: u32::try_from(track.pixel_height).unwrap_or(u32::MAX),
+        display_width: u32::try_from(track.display_width).unwrap_or(u32::MAX),
+        display_height: u32::try_from(track.display_height).unwrap_or(u32::MAX),
+        display_unit: u32::try_from(track.display_unit).unwrap_or(u32::MAX),
+        audio_frames_per_packet: track.aac_frames_per_packet,
         sample_rate: track.output_sampling_frequency,
         channels: u32::try_from(track.channels).unwrap_or(u32::MAX),
         bit_depth: u32::try_from(track.bit_depth).unwrap_or(u32::MAX),
@@ -371,6 +387,22 @@ fn hdr10_plus_data<'a>(packet: &'a MediaPacket, track: &MediaTrack) -> Option<&'
         });
         is_hdr10_plus.then_some(addition.data.as_slice())
     })
+}
+
+fn packet_info(packet: &MediaPacket, hdr10_plus: Option<&[u8]>) -> StremioMediaPacket {
+    StremioMediaPacket {
+        abi_version: MEDIA_PACKET_ABI_VERSION,
+        track_index: packet.track_index,
+        presentation_time_ns: packet.timestamp_ns,
+        decode_time_ns: packet.decode_timestamp_ns,
+        duration_ns: packet.duration_ns,
+        discard_padding_ns: packet.discard_padding_ns,
+        flags: packet.flags.0,
+        data: packet.payload.as_ptr(),
+        data_size: packet.payload.len(),
+        hdr10_plus_data: hdr10_plus.map_or(ptr::null(), <[u8]>::as_ptr),
+        hdr10_plus_data_size: hdr10_plus.map_or(0, <[u8]>::len),
+    }
 }
 
 fn requested_kind(value: u32) -> Option<TrackKind> {
@@ -714,20 +746,7 @@ pub unsafe extern "C" fn stremio_media_next_packet(
                 .tracks()
                 .get(packet.track_index as usize)
                 .and_then(|track| hdr10_plus_data(packet, track));
-            unsafe {
-                output.write(StremioMediaPacket {
-                    abi_version: MEDIA_PACKET_ABI_VERSION,
-                    track_index: packet.track_index,
-                    presentation_time_ns: packet.timestamp_ns,
-                    decode_time_ns: packet.decode_timestamp_ns,
-                    duration_ns: packet.duration_ns,
-                    flags: packet.flags.0,
-                    data: packet.payload.as_ptr(),
-                    data_size: packet.payload.len(),
-                    hdr10_plus_data: hdr10_plus.map_or(ptr::null(), <[u8]>::as_ptr),
-                    hdr10_plus_data_size: hdr10_plus.map_or(0, <[u8]>::len),
-                })
-            };
+            unsafe { output.write(packet_info(packet, hdr10_plus)) };
             1
         }
         Ok(None) => 0,
@@ -896,4 +915,168 @@ pub unsafe extern "C" fn stremio_pgs_part(
         })
     };
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{mem, sync::Arc};
+
+    use super::*;
+    use crate::media::{PacketFlags, TrackKind, VideoColorInfo};
+
+    fn track(codec: Codec, codec_id: &str) -> MediaTrack {
+        MediaTrack {
+            index: 7,
+            number: 8,
+            uid: 9,
+            kind: if matches!(codec, Codec::Mpeg4Part2) {
+                TrackKind::Video
+            } else {
+                TrackKind::Audio
+            },
+            codec,
+            codec_id: codec_id.to_owned(),
+            codec_name: String::new(),
+            name: String::new(),
+            language: "eng".to_owned(),
+            enabled: true,
+            default: true,
+            forced: false,
+            lacing: true,
+            timestamp_scale: 1.0,
+            default_duration_ns: 0,
+            codec_delay_ns: 0,
+            seek_pre_roll_ns: 0,
+            codec_private: Vec::new(),
+            aac_frames_per_packet: if codec == Codec::Aac { 1_024 } else { 0 },
+            pixel_width: 720,
+            pixel_height: 480,
+            display_width: 16,
+            display_height: 9,
+            display_unit: 3,
+            frame_rate: 0.0,
+            video_color: VideoColorInfo::default(),
+            block_addition_mappings: Vec::new(),
+            sampling_frequency: 48_000.0,
+            output_sampling_frequency: 48_000.0,
+            channels: 2,
+            bit_depth: 16,
+        }
+    }
+
+    #[test]
+    fn track_abi_preserves_enabled_display_and_aac_frame_metadata() {
+        let mut aac = track(Codec::Aac, "A_AAC");
+        aac.codec_private = vec![0x12, 0x14];
+        aac.aac_frames_per_packet = 960;
+        aac.enabled = false;
+        let info = track_info(&aac);
+
+        assert_eq!(info.abi_version, MEDIA_TRACK_ABI_VERSION);
+        assert_eq!((info.display_width, info.display_height), (16, 9));
+        assert_eq!(info.display_unit, 3);
+        assert_eq!(info.audio_frames_per_packet, 960);
+        assert_eq!(info.flags & TRACK_FLAG_ENABLED, 0);
+
+        aac.codec_private = vec![0x12, 0x10, 0xa9, 0x10, 0x00];
+        aac.aac_frames_per_packet = 1_024;
+        assert_eq!(track_info(&aac).audio_frames_per_packet, 1_024);
+    }
+
+    #[test]
+    fn apple_capability_matrix_restores_mpeg4_and_little_endian_pcm_only() {
+        let mpeg4 = track_info(&track(Codec::Mpeg4Part2, "V_MPEG4/ISO/ASP"));
+        assert_eq!(mpeg4.codec, 5);
+        assert_ne!(mpeg4.flags & TRACK_FLAG_APPLE_DECODABLE, 0);
+
+        let little = track_info(&track(Codec::Pcm, "A_PCM/INT/LIT"));
+        let big = track_info(&track(Codec::Pcm, "A_PCM/INT/BIG"));
+        let float = track_info(&track(Codec::Pcm, "A_PCM/FLOAT/IEEE"));
+        assert_ne!(little.flags & TRACK_FLAG_APPLE_DECODABLE, 0);
+        assert_eq!(big.flags & TRACK_FLAG_APPLE_DECODABLE, 0);
+        assert_eq!(float.flags & TRACK_FLAG_APPLE_DECODABLE, 0);
+    }
+
+    #[test]
+    fn subtitle_eligibility_preserves_enabled_and_supported_flags() {
+        let mut supported = track(Codec::Pgs, "S_HDMV/PGS");
+        supported.kind = TrackKind::Subtitle;
+        let enabled = track_info(&supported);
+        assert_ne!(enabled.flags & TRACK_FLAG_ENABLED, 0);
+        assert_ne!(enabled.flags & TRACK_FLAG_APPLE_DECODABLE, 0);
+
+        supported.enabled = false;
+        let disabled = track_info(&supported);
+        assert_eq!(disabled.flags & TRACK_FLAG_ENABLED, 0);
+        assert_ne!(disabled.flags & TRACK_FLAG_APPLE_DECODABLE, 0);
+
+        let mut unsupported = track(Codec::VobSub, "S_VOBSUB");
+        unsupported.kind = TrackKind::Subtitle;
+        let unsupported = track_info(&unsupported);
+        assert_ne!(unsupported.flags & TRACK_FLAG_ENABLED, 0);
+        assert_eq!(unsupported.flags & TRACK_FLAG_APPLE_DECODABLE, 0);
+    }
+
+    #[test]
+    fn packet_abi_preserves_signed_discard_padding() {
+        let packet = MediaPacket {
+            track_index: 2,
+            track_number: 3,
+            timestamp_ns: 4,
+            decode_timestamp_ns: 5,
+            duration_ns: 6,
+            discard_padding_ns: -7,
+            flags: PacketFlags::INVISIBLE,
+            payload: vec![8],
+            block_additions: Arc::from([]),
+        };
+        let info = packet_info(&packet, None);
+        assert_eq!(info.abi_version, MEDIA_PACKET_ABI_VERSION);
+        assert_eq!(info.discard_padding_ns, -7);
+        assert_eq!(info.flags, PacketFlags::INVISIBLE.0);
+
+        let mut end_trimmed = packet;
+        end_trimmed.discard_padding_ns = 7;
+        assert_eq!(packet_info(&end_trimmed, None).discard_padding_ns, 7);
+    }
+
+    #[test]
+    fn public_header_packet_flags_match_parser_flags() {
+        let header = include_str!("../../include/StremioPlaybackCore.h");
+        for (name, bit, rust_value) in [
+            ("STREMIO_MEDIA_PACKET_KEYFRAME", 0, PacketFlags::KEYFRAME.0),
+            (
+                "STREMIO_MEDIA_PACKET_INVISIBLE",
+                1,
+                PacketFlags::INVISIBLE.0,
+            ),
+            (
+                "STREMIO_MEDIA_PACKET_DISCARDABLE",
+                2,
+                PacketFlags::DISCARDABLE.0,
+            ),
+            ("STREMIO_MEDIA_PACKET_LACED", 3, PacketFlags::LACED.0),
+        ] {
+            assert_eq!(rust_value, 1 << bit);
+            assert!(
+                header.contains(&format!("{name} = 1 << {bit},")),
+                "public header is missing {name} parity"
+            );
+        }
+    }
+
+    #[test]
+    fn versioned_struct_layout_keeps_new_fields_before_owned_pointers() {
+        assert_eq!(mem::offset_of!(StremioMediaTrackInfo, display_width), 44);
+        assert_eq!(
+            mem::offset_of!(StremioMediaTrackInfo, audio_frames_per_packet),
+            56
+        );
+        assert_eq!(mem::offset_of!(StremioMediaTrackInfo, sample_rate), 64);
+        assert_eq!(mem::size_of::<StremioMediaTrackInfo>(), 104);
+
+        assert_eq!(mem::offset_of!(StremioMediaPacket, discard_padding_ns), 32);
+        assert_eq!(mem::offset_of!(StremioMediaPacket, data), 48);
+        assert_eq!(mem::size_of::<StremioMediaPacket>(), 80);
+    }
 }

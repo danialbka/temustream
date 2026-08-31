@@ -37,6 +37,16 @@ private actor OversizedLoader: HTTPDataLoading {
 }
 
 final class AddonClientTests: XCTestCase {
+    func testDefaultTransportBoundsIdleAndWholeResourceLifetime() {
+        let configuration = AddonClient.boundedSessionConfiguration(
+            requestTimeout: 0.25
+        )
+
+        XCTAssertEqual(configuration.timeoutIntervalForRequest, 0.25)
+        XCTAssertEqual(configuration.timeoutIntervalForResource, 0.25)
+        XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+    }
+
     func testRejectsManifestBodyOverSafetyLimit() async throws {
         let endpoint = try AddonEndpoint(manifestInput: "https://example.com/manifest.json")
         let client = AddonClient(endpoint: endpoint, loader: OversizedLoader())

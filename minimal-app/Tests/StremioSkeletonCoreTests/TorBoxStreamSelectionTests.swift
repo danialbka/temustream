@@ -27,6 +27,14 @@ final class TorBoxStreamSelectionTests: XCTestCase {
         }
     }
 
+    func testRejectsRoundedInt64UpperBoundaryInsteadOfTrapping() {
+        XCTAssertNil(
+            TorBoxStreamSelection.expectedSizeBytes(
+                in: ["9223372.036854776 TB"]
+            )
+        )
+    }
+
     func testDetectsSampleSizedResponse() {
         XCTAssertTrue(
             TorBoxStreamSelection.shouldRepair(

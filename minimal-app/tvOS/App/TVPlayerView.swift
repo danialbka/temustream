@@ -14,6 +14,7 @@ struct TVResolvingPlayerView: View {
   @State private var isResolving = true
   @State private var terminalError: String?
   @State private var attemptedSources: [String] = []
+  @State private var candidateResumePosition: TimeInterval?
 
   var body: some View {
     ZStack {
@@ -24,8 +25,11 @@ struct TVResolvingPlayerView: View {
           plan: plan,
           title: request.contentTitle,
           candidate: candidate,
-          initialPosition: request.initialPosition,
+          initialPosition: candidateResumePosition ?? request.initialPosition,
           onProgress: { position, duration, updateKind in
+            if position.isFinite {
+              candidateResumePosition = max(position, 0)
+            }
             model.recordPlaybackProgress(
               contentIdentifier: request.contentIdentifier,
               contentTitle: request.contentTitle,
@@ -46,7 +50,8 @@ struct TVResolvingPlayerView: View {
               key: key
             )
           },
-          onFailure: { message in
+          onFailure: { message, resumePosition in
+            candidateResumePosition = resumePosition
             failCurrentCandidate(message)
           }
         )
@@ -155,14 +160,17 @@ private struct TVNativePlaybackView: View {
       PlaybackProgressUpdateKind
     ) -> Void
   let onReady: @MainActor () -> Void
-  let onFailure: @MainActor (String) -> Void
+  let onFailure: @MainActor (String, TimeInterval) -> Void
 
   @State private var player = AVPlayer()
   @State private var activeURLIndex = 0
   @State private var didReportReady = false
   @State private var didReportFinal = false
-  @State private var lastCheckpointPosition: TimeInterval = 0
   @State private var fallbackResumePosition: TimeInterval?
+  @State private var latestProgressPosition: TimeInterval = 0
+  @State private var latestProgressDuration: TimeInterval = 0
+  @State private var currentAttemptDidBecomeReady = false
+  @State private var suppressFinalOnDisappear = false
   @State private var diagnosticSnapshot: NativePlaybackPerformanceSnapshot?
 
   var body: some View {
@@ -194,19 +202,13 @@ private struct TVNativePlaybackView: View {
   @MainActor
   private func play(_ url: URL) async {
     didReportFinal = false
+    currentAttemptDidBecomeReady = false
+    suppressFinalOnDisappear = false
     diagnosticSnapshot = nil
-    let attemptInitialPosition = activeURLIndex == 0
+    let requestedInitialPosition = activeURLIndex == 0
       ? initialPosition
       : fallbackResumePosition ?? initialPosition
-    var attemptDidBecomeReady = false
-    lastCheckpointPosition = attemptInitialPosition
     let diagnosticStartedAt = ProcessInfo.processInfo.systemUptime
-    var diagnosticTracker = NativePlaybackPerformanceTracker(
-      startedAt: diagnosticStartedAt,
-      initialPosition: attemptInitialPosition
-    )
-    var nextDiagnosticLogAt: TimeInterval = 0
-    var lastDiagnosticPublishAt: TimeInterval = -.infinity
     let item = AVPlayerItem(url: url)
     player.pause()
     player.automaticallyWaitsToMinimizeStalling = true
@@ -219,8 +221,10 @@ private struct TVNativePlaybackView: View {
       if item.status == .failed {
         failURL(
           item.error?.localizedDescription ?? "The player rejected this source.",
-          attemptDidBecomeReady: attemptDidBecomeReady,
-          attemptedResumePosition: attemptInitialPosition
+          attemptDidBecomeReady: false,
+          attemptedResumePosition: requestedInitialPosition,
+          latestObservedPosition: requestedInitialPosition,
+          latestDuration: currentDuration
         )
         return
       }
@@ -234,11 +238,33 @@ private struct TVNativePlaybackView: View {
     guard becameReady else {
       failURL(
         "The stream did not become ready in time.",
-        attemptDidBecomeReady: attemptDidBecomeReady,
-        attemptedResumePosition: attemptInitialPosition
+        attemptDidBecomeReady: false,
+        attemptedResumePosition: requestedInitialPosition,
+        latestObservedPosition: requestedInitialPosition,
+        latestDuration: currentDuration
       )
       return
     }
+
+    let assetDuration = try? await item.asset.load(.duration)
+    guard !Task.isCancelled, player.currentItem === item else { return }
+    let loadedDuration = assetDuration.map(CMTimeGetSeconds) ?? currentDuration
+    let resolvedDuration = loadedDuration.isFinite && loadedDuration > 0
+      ? loadedDuration
+      : currentDuration
+    let attemptInitialPosition = TVPlaybackResumePolicy.clampedPosition(
+      requestedInitialPosition,
+      duration: resolvedDuration
+    )
+    latestProgressPosition = attemptInitialPosition
+    latestProgressDuration = resolvedDuration
+    var monitor = TVPlaybackMonitorState(resumePosition: attemptInitialPosition)
+    var diagnosticTracker = NativePlaybackPerformanceTracker(
+      startedAt: diagnosticStartedAt,
+      initialPosition: attemptInitialPosition
+    )
+    var nextDiagnosticLogAt: TimeInterval = 0
+    var lastDiagnosticPublishAt: TimeInterval = -.infinity
 
     if attemptInitialPosition >= PlaybackProgress.minimumResumePosition {
       await player.seek(
@@ -252,10 +278,14 @@ private struct TVNativePlaybackView: View {
     var startupTicks = 0
     while !Task.isCancelled, player.currentItem === item {
       if item.status == .failed {
+        let failedPosition = max(monitor.latestPosition, currentPosition)
+        let failedDuration = max(monitor.latestDuration, currentDuration)
         failURL(
           item.error?.localizedDescription ?? "The stream stopped unexpectedly.",
-          attemptDidBecomeReady: attemptDidBecomeReady,
-          attemptedResumePosition: attemptInitialPosition
+          attemptDidBecomeReady: monitor.didBecomeReady,
+          attemptedResumePosition: attemptInitialPosition,
+          latestObservedPosition: failedPosition,
+          latestDuration: failedDuration
         )
         return
       }
@@ -296,37 +326,40 @@ private struct TVNativePlaybackView: View {
         )
         nextDiagnosticLogAt += 5
       }
-      if !attemptDidBecomeReady,
-        player.timeControlStatus == .playing || player.rate > 0,
-        position >= max(attemptInitialPosition - 1, 0)
-      {
-        attemptDidBecomeReady = true
-        if !didReportReady {
-          didReportReady = true
-          onReady()
+      let isPlaying = player.timeControlStatus == .playing || player.rate > 0
+      let events = monitor.observe(
+        position: position,
+        duration: duration,
+        isPlaying: isPlaying
+      )
+      latestProgressPosition = monitor.latestPosition
+      latestProgressDuration = monitor.latestDuration
+      currentAttemptDidBecomeReady = monitor.didBecomeReady
+      for event in events {
+        switch event {
+        case .ready:
+          if !didReportReady {
+            didReportReady = true
+            onReady()
+          }
+        case .replayBegan:
+          didReportFinal = false
+        case let .checkpoint(position, duration):
+          onProgress(position, duration, .checkpoint)
+        case let .final(position, duration):
+          reportFinal(position: position, duration: duration)
         }
       }
 
-      if attemptDidBecomeReady,
-        position >= PlaybackProgress.minimumResumePosition,
-        position - lastCheckpointPosition >= 15
-      {
-        lastCheckpointPosition = position
-        onProgress(position, duration, .checkpoint)
-      }
-
-      if duration > 0, position >= max(duration - 0.75, 0) {
-        reportFinal(position: position, duration: duration)
-        return
-      }
-
-      if !attemptDidBecomeReady {
+      if !monitor.didBecomeReady {
         startupTicks += 1
         if startupTicks >= 180 {
           failURL(
             "The stream remained buffered for too long.",
-            attemptDidBecomeReady: attemptDidBecomeReady,
-            attemptedResumePosition: attemptInitialPosition
+            attemptDidBecomeReady: monitor.didBecomeReady,
+            attemptedResumePosition: attemptInitialPosition,
+            latestObservedPosition: monitor.latestPosition,
+            latestDuration: monitor.latestDuration
           )
           return
         }
@@ -339,23 +372,38 @@ private struct TVNativePlaybackView: View {
   private func failURL(
     _ message: String,
     attemptDidBecomeReady: Bool,
-    attemptedResumePosition: TimeInterval
+    attemptedResumePosition: TimeInterval,
+    latestObservedPosition: TimeInterval,
+    latestDuration: TimeInterval
   ) {
-    let failedPosition = currentPosition
+    let resumePosition = TVPlaybackResumePolicy.failureResumePosition(
+      requestedPosition: attemptedResumePosition,
+      latestObservedPosition: latestObservedPosition,
+      attemptDidBecomeReady: attemptDidBecomeReady,
+      duration: latestDuration
+    )
+    latestProgressPosition = resumePosition
+    latestProgressDuration = max(latestDuration, 0)
     player.pause()
+    if attemptDidBecomeReady {
+      onProgress(resumePosition, latestProgressDuration, .checkpoint)
+    }
     if playbackURLs.indices.contains(activeURLIndex + 1) {
-      fallbackResumePosition = attemptDidBecomeReady && failedPosition.isFinite
-        ? max(failedPosition, 0)
-        : max(attemptedResumePosition, 0)
+      fallbackResumePosition = resumePosition
       activeURLIndex += 1
     } else {
-      onFailure(message)
+      suppressFinalOnDisappear = true
+      onFailure(message, resumePosition)
     }
   }
 
   @MainActor
   private func finishAndStop() {
-    reportFinal(position: currentPosition, duration: currentDuration)
+    if !suppressFinalOnDisappear, currentAttemptDidBecomeReady {
+      let position = currentPosition > 0 ? currentPosition : latestProgressPosition
+      let duration = currentDuration > 0 ? currentDuration : latestProgressDuration
+      reportFinal(position: position, duration: duration)
+    }
     player.pause()
     player.replaceCurrentItem(with: nil)
   }

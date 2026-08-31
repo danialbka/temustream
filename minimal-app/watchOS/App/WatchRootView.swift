@@ -1,4 +1,11 @@
 import SwiftUI
+import UIKit
+
+private enum WatchArtworkLoadPhase {
+    case empty
+    case success(UIImage)
+    case failure
+}
 
 struct WatchRootView: View {
     @EnvironmentObject private var model: WatchAppModel
@@ -212,11 +219,13 @@ struct WatchProgressRow: View {
 struct WatchArtwork: View {
     let url: URL?
 
+    @State private var phase: WatchArtworkLoadPhase = .empty
+
     var body: some View {
-        AsyncImage(url: url) { phase in
+        Group {
             switch phase {
             case let .success(image):
-                image.resizable().scaledToFill()
+                Image(uiImage: image).resizable().scaledToFill()
             default:
                 ZStack {
                     Color.white.opacity(0.08)
@@ -226,19 +235,28 @@ struct WatchArtwork: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .task(id: url) {
+            phase = .empty
+            guard let url,
+                  let data = await ArtworkDataCache.shared.data(
+                    for: url,
+                    limits: .watch
+                  ),
+                  !Task.isCancelled,
+                  let image = UIImage(data: data)
+            else {
+                if !Task.isCancelled {
+                    phase = .failure
+                }
+                return
+            }
+            phase = .success(image)
+        }
     }
 }
 
 enum WatchTimeFormatter {
     static func compact(_ seconds: TimeInterval) -> String {
-        guard seconds.isFinite, seconds > 0 else { return "0:00" }
-        let total = Int(seconds.rounded())
-        let hours = total / 3_600
-        let minutes = (total % 3_600) / 60
-        let remaining = total % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, remaining)
-        }
-        return String(format: "%d:%02d", minutes, remaining)
+        PlaybackTimeFormatter.clock(seconds, rounding: .toNearestOrAwayFromZero)
     }
 }

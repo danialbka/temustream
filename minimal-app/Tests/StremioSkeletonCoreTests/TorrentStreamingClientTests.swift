@@ -87,6 +87,33 @@ final class TorrentStreamingClientTests: XCTestCase {
         }
     }
 
+    func testPrivateHTTPRequiresAnExactRFC1918IPv4Literal() {
+        let accepted = [
+            "http://10.0.0.1:11470",
+            "http://10.255.255.255:11470",
+            "http://172.16.0.1:11470",
+            "http://172.31.255.255:11470",
+            "http://192.168.0.1:11470",
+            "http://192.168.255.255:11470",
+        ]
+        for input in accepted {
+            XCTAssertNoThrow(try StreamingServerEndpoint(input), input)
+        }
+
+        let rejected = [
+            "http://10.attacker.example:11470",
+            "http://192.168.attacker.example:11470",
+            "http://172.16.1.2.attacker.example:11470",
+            "http://10.0.0:11470",
+            "http://10.0.0.256:11470",
+            "http://172.32.0.1:11470",
+            "http://192.167.255.255:11470",
+        ]
+        for input in rejected {
+            XCTAssertThrowsError(try StreamingServerEndpoint(input), input)
+        }
+    }
+
     func testBuildsHardwareAcceleratedCompatibilityPlaylist() async throws {
         let loader = TorrentStubLoader()
         let client = TorrentStreamingClient(

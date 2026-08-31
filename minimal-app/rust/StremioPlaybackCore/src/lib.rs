@@ -211,6 +211,12 @@ pub extern "C" fn stremio_bunny_clock_create() -> *mut StremioBunnyClock {
 }
 
 #[unsafe(no_mangle)]
+/// Destroys a Bunny clock created by [`stremio_bunny_clock_create`].
+///
+/// # Safety
+///
+/// `clock` must be null or the unique live pointer returned by
+/// [`stremio_bunny_clock_create`]. A non-null pointer may be destroyed once.
 pub unsafe extern "C" fn stremio_bunny_clock_destroy(clock: *mut StremioBunnyClock) {
     if !clock.is_null() {
         // SAFETY: The caller transfers the unique pointer returned by create
@@ -220,6 +226,13 @@ pub unsafe extern "C" fn stremio_bunny_clock_destroy(clock: *mut StremioBunnyClo
 }
 
 #[unsafe(no_mangle)]
+/// Sets the clock's media position in microseconds.
+///
+/// # Safety
+///
+/// `clock` must be null or a live pointer returned by
+/// [`stremio_bunny_clock_create`]. Calls using the same live pointer may occur
+/// concurrently.
 pub unsafe extern "C" fn stremio_bunny_clock_seek(
     clock: *mut StremioBunnyClock,
     media_time_us: i64,
@@ -237,6 +250,13 @@ pub unsafe extern "C" fn stremio_bunny_clock_seek(
 }
 
 #[unsafe(no_mangle)]
+/// Sets the clock's playback rate.
+///
+/// # Safety
+///
+/// `clock` must be null or a live pointer returned by
+/// [`stremio_bunny_clock_create`]. Calls using the same live pointer may occur
+/// concurrently.
 pub unsafe extern "C" fn stremio_bunny_clock_set_rate(clock: *mut StremioBunnyClock, rate: f64) {
     // SAFETY: See stremio_bunny_clock_seek.
     let Some(clock) = (unsafe { clock.as_ref() }) else {
@@ -253,6 +273,13 @@ pub unsafe extern "C" fn stremio_bunny_clock_set_rate(clock: *mut StremioBunnyCl
 }
 
 #[unsafe(no_mangle)]
+/// Reconciles the clock with an observed media position in microseconds.
+///
+/// # Safety
+///
+/// `clock` must be null or a live pointer returned by
+/// [`stremio_bunny_clock_create`]. Calls using the same live pointer may occur
+/// concurrently.
 pub unsafe extern "C" fn stremio_bunny_clock_observe(
     clock: *mut StremioBunnyClock,
     media_time_us: i64,
@@ -270,6 +297,13 @@ pub unsafe extern "C" fn stremio_bunny_clock_observe(
 }
 
 #[unsafe(no_mangle)]
+/// Returns the clock's current media position in microseconds.
+///
+/// # Safety
+///
+/// `clock` must be null or a live pointer returned by
+/// [`stremio_bunny_clock_create`]. Calls using the same live pointer may occur
+/// concurrently.
 pub unsafe extern "C" fn stremio_bunny_clock_position_us(clock: *const StremioBunnyClock) -> i64 {
     // SAFETY: See stremio_bunny_clock_seek.
     let Some(clock) = (unsafe { clock.as_ref() }) else {

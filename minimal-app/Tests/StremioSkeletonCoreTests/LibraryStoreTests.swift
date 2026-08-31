@@ -3,6 +3,35 @@ import XCTest
 @testable import StremioSkeletonCore
 
 final class LibraryStoreTests: XCTestCase {
+    func testCorruptLibraryIsPreservedAndStoreRemainsWritable() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let url = directory.appendingPathComponent("library.json")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let corrupt = Data("{ definitely not a library".utf8)
+        try corrupt.write(to: url)
+
+        let store = LibraryStore(fileURL: url)
+        let recoveredEmptyItems = try await store.items()
+        XCTAssertEqual(recoveredEmptyItems, [])
+
+        let recoveryFiles = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("library.corrupt-") }
+        XCTAssertEqual(recoveryFiles.count, 1)
+        XCTAssertEqual(try Data(contentsOf: recoveryFiles[0]), corrupt)
+
+        let item = MetaItem(id: "tt-recovered", type: "movie", name: "Recovered")
+        let recoveredItems = try await store.toggle(item)
+        XCTAssertEqual(recoveredItems, [item])
+        let reloadedItems = try await LibraryStore(fileURL: url).items()
+        XCTAssertEqual(reloadedItems, [item])
+    }
+
     func testTogglePersistsAndRemovesItem() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

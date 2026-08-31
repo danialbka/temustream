@@ -35,6 +35,11 @@ impl std::error::Error for MediaError {}
 
 pub trait ReadAt {
     fn len(&self) -> u64;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn read_at(&mut self, offset: u64, output: &mut [u8]) -> Result<usize, MediaError>;
 
     fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), MediaError> {

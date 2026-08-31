@@ -101,6 +101,12 @@ public enum WikipediaTitleIdentifier {
 /// The IMDb identifier is resolved through Wikidata's P345 property and the
 /// resulting English Wikipedia article is read through the MediaWiki API.
 public struct WikipediaTriviaClient: Sendable {
+    private enum ResponseLimit {
+        static let articleResolution = 1 * 1024 * 1024
+        static let sectionDirectory = 2 * 1024 * 1024
+        static let sectionHTML = 8 * 1024 * 1024
+    }
+
     private static let wikidataEndpoint = URL(string: "https://query.wikidata.org/sparql")!
     private static let wikipediaEndpoint = URL(string: "https://en.wikipedia.org/w/api.php")!
     private static let userAgent = "Bunny/1.3 (https://github.com/danialbka/temustream)"
@@ -223,7 +229,11 @@ public struct WikipediaTriviaClient: Sendable {
         guard let url = components.url else { throw WikipediaTriviaError.invalidResponse }
         let response = try JSONDecoder().decode(
             WikidataArticleResponse.self,
-            from: try await fetch(url, accept: "application/sparql-results+json")
+            from: try await fetch(
+                url,
+                accept: "application/sparql-results+json",
+                maximumBytes: ResponseLimit.articleResolution
+            )
         )
         guard let rawURL = response.results.bindings.first?.article.value,
               let articleURL = URL(string: rawURL),
@@ -245,7 +255,11 @@ public struct WikipediaTriviaClient: Sendable {
         ])
         let response = try JSONDecoder().decode(
             WikipediaSectionsResponse.self,
-            from: try await fetch(url, accept: "application/json")
+            from: try await fetch(
+                url,
+                accept: "application/json",
+                maximumBytes: ResponseLimit.sectionDirectory
+            )
         )
         guard response.parse.revisionID > 0 else {
             throw WikipediaTriviaError.invalidResponse
@@ -269,7 +283,11 @@ public struct WikipediaTriviaClient: Sendable {
         ])
         let response = try JSONDecoder().decode(
             WikipediaSectionTextResponse.self,
-            from: try await fetch(url, accept: "application/json")
+            from: try await fetch(
+                url,
+                accept: "application/json",
+                maximumBytes: ResponseLimit.sectionHTML
+            )
         )
         return response.parse.text
     }
@@ -284,12 +302,20 @@ public struct WikipediaTriviaClient: Sendable {
         return url
     }
 
-    private func fetch(_ url: URL, accept: String) async throws -> Data {
+    private func fetch(
+        _ url: URL,
+        accept: String,
+        maximumBytes: Int
+    ) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = requestTimeout
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue(accept, forHTTPHeaderField: "Accept")
-        let (data, response) = try await loader.data(for: request)
+        let (data, response) = try await HTTPRequestBodyLoader.load(
+            using: loader,
+            request: request,
+            maximumBytes: maximumBytes
+        )
         guard let http = response as? HTTPURLResponse else {
             throw WikipediaTriviaError.invalidResponse
         }

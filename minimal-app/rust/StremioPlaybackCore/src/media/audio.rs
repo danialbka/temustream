@@ -7,6 +7,7 @@ use super::Codec;
 
 pub(crate) const DOLBY_CHANNEL_CONFIGURATION_VALID: u32 = 1 << 8;
 pub(crate) const DOLBY_CHANNEL_CONFIGURATION_LFE: u32 = 1 << 3;
+pub(crate) const MAX_AAC_AUDIO_SPECIFIC_CONFIG_BYTES: usize = 512;
 
 pub(crate) fn dolby_channel_configuration(codec: Codec, packet: &[u8]) -> Option<u32> {
     let info = dolby_frame_info(codec, packet)?;
@@ -31,9 +32,13 @@ pub(crate) fn dolby_sample_frames(codec: Codec, packet: &[u8]) -> Option<u32> {
 /// `DefaultDuration`. In that case each lace still needs its own timestamp.
 /// These small framing parsers recover timing only; Apple remains responsible
 /// for decoding the compressed payload.
-pub(crate) fn compressed_audio_sample_frames(codec: Codec, packet: &[u8]) -> Option<u32> {
+pub(crate) fn compressed_audio_sample_frames(
+    codec: Codec,
+    packet: &[u8],
+    aac_frames_per_access_unit: u32,
+) -> Option<u32> {
     match codec {
-        Codec::Aac => aac_sample_frames(packet),
+        Codec::Aac => aac_sample_frames(packet, aac_frames_per_access_unit),
         Codec::Opus => opus_sample_frames(packet),
         Codec::Flac => flac_sample_frames(packet),
         Codec::Ac3 | Codec::Eac3 => dolby_sample_frames(codec, packet),
@@ -41,17 +46,132 @@ pub(crate) fn compressed_audio_sample_frames(codec: Codec, packet: &[u8]) -> Opt
     }
 }
 
-fn aac_sample_frames(packet: &[u8]) -> Option<u32> {
+/// Returns the decoded output frames represented by one raw AAC access unit.
+///
+/// Matroska stores AAC's AudioSpecificConfig in `CodecPrivate`. The
+/// `frameLengthFlag` changes ordinary AAC from 1024 to 960 samples and AAC-LD
+/// or AAC-ELD from 512 to 480. HE-AAC/HE-AACv2 double the decoded output frame
+/// count, including when SBR/PS is declared through a sync extension rather
+/// than as the leading audio object type.
+pub(crate) fn aac_frames_per_access_unit(codec_private: &[u8]) -> Option<u32> {
+    if codec_private.len() > MAX_AAC_AUDIO_SPECIFIC_CONFIG_BYTES {
+        return None;
+    }
+    let mut bits = BitReader::new(codec_private);
+    let mut audio_object_type = read_aac_audio_object_type(&mut bits)?;
+    skip_aac_sampling_frequency(&mut bits)?;
+    let _channel_configuration = bits.read(4)?;
+
+    let mut has_sbr_or_ps = matches!(audio_object_type, 5 | 29);
+    if has_sbr_or_ps {
+        skip_aac_sampling_frequency(&mut bits)?;
+        audio_object_type = read_aac_audio_object_type(&mut bits)?;
+        if audio_object_type == 22 {
+            bits.skip(4)?; // extensionChannelConfiguration
+        }
+    }
+
+    let frame_length_flag = bits.read(1)? != 0;
+    let core_frames: u32 = match audio_object_type {
+        // AAC Main, LC, SSR, LTP, scalable and ER general-audio profiles.
+        1..=4 | 6 | 7 | 17 | 19..=23 => {
+            if matches!(audio_object_type, 23) {
+                if frame_length_flag { 480 } else { 512 }
+            } else if frame_length_flag {
+                960
+            } else {
+                1_024
+            }
+        }
+        // ER AAC ELD.
+        39 => {
+            if frame_length_flag {
+                480
+            } else {
+                512
+            }
+        }
+        _ => return None,
+    };
+
+    if !has_sbr_or_ps {
+        has_sbr_or_ps = aac_sync_extension_enables_sbr(codec_private, bits.bit_offset);
+    }
+    core_frames.checked_mul(if has_sbr_or_ps { 2 } else { 1 })
+}
+
+fn aac_sample_frames(packet: &[u8], configured_frames: u32) -> Option<u32> {
     if packet.is_empty() {
         return None;
     }
+    let configured_frames = if configured_frames == 0 {
+        1_024
+    } else {
+        configured_frames
+    };
     // Matroska A_AAC packets normally contain one raw AAC access unit. When
     // an ADTS header is present, its final two bits declare any additional
     // raw-data blocks carried by the frame.
     if packet.len() >= 7 && packet[0] == 0xff && packet[1] & 0xf6 == 0xf0 {
-        return Some(1_024 * (u32::from(packet[6] & 0x03) + 1));
+        return configured_frames.checked_mul(u32::from(packet[6] & 0x03) + 1);
     }
-    Some(1_024)
+    Some(configured_frames)
+}
+
+fn read_aac_audio_object_type(bits: &mut BitReader<'_>) -> Option<u32> {
+    let value = bits.read(5)?;
+    if value == 31 {
+        bits.read(6)?.checked_add(32)
+    } else {
+        Some(value)
+    }
+}
+
+fn skip_aac_sampling_frequency(bits: &mut BitReader<'_>) -> Option<()> {
+    let index = bits.read(4)?;
+    if index == 15 {
+        bits.skip(24)?;
+    } else if index >= 13 {
+        return None;
+    }
+    Some(())
+}
+
+fn aac_sync_extension_enables_sbr(bytes: &[u8], start_bit: usize) -> bool {
+    let bit_count = bytes.len().saturating_mul(8);
+    for offset in start_bit..=bit_count.saturating_sub(17) {
+        let Some(sync_type) = read_bits_at(bytes, offset, 11) else {
+            continue;
+        };
+        if sync_type != 0x2b7
+            || read_bits_at(bytes, offset + 11, 5) != Some(5)
+            || read_bits_at(bytes, offset + 16, 1) != Some(1)
+        {
+            continue;
+        }
+        let Some(frequency_index) = read_bits_at(bytes, offset + 17, 4) else {
+            continue;
+        };
+        if frequency_index <= 12
+            || (frequency_index == 15 && read_bits_at(bytes, offset + 21, 24).is_some())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn read_bits_at(bytes: &[u8], offset: usize, count: usize) -> Option<u32> {
+    if count > u32::BITS as usize || offset.checked_add(count)? > bytes.len().checked_mul(8)? {
+        return None;
+    }
+    let mut value = 0_u32;
+    for bit_index in offset..offset + count {
+        let byte = *bytes.get(bit_index / 8)?;
+        let shift = 7 - (bit_index % 8);
+        value = (value << 1) | u32::from((byte >> shift) & 1);
+    }
+    Some(value)
 }
 
 fn opus_sample_frames(packet: &[u8]) -> Option<u32> {
@@ -125,7 +245,7 @@ fn dolby_frame_info(codec: Codec, packet: &[u8]) -> Option<DolbyFrameInfo> {
     match codec {
         Codec::Ac3 => parse_ac3_frame_info(packet),
         Codec::Eac3 => parse_eac3_frame_info(packet),
-        _ => return None,
+        _ => None,
     }
 }
 
@@ -274,32 +394,36 @@ mod tests {
     #[test]
     fn derives_aac_access_unit_sample_frames() {
         assert_eq!(
-            compressed_audio_sample_frames(Codec::Aac, &[0x12]),
+            compressed_audio_sample_frames(Codec::Aac, &[0x12], 1_024),
             Some(1_024)
         );
         assert_eq!(
-            compressed_audio_sample_frames(Codec::Aac, &[0xff, 0xf1, 0x50, 0x80, 0x00, 0x1f, 0x02]),
+            compressed_audio_sample_frames(
+                Codec::Aac,
+                &[0xff, 0xf1, 0x50, 0x80, 0x00, 0x1f, 0x02],
+                1_024,
+            ),
             Some(3_072)
         );
-        assert_eq!(compressed_audio_sample_frames(Codec::Aac, &[]), None);
+        assert_eq!(compressed_audio_sample_frames(Codec::Aac, &[], 1_024), None);
     }
 
     #[test]
     fn derives_opus_packet_sample_frames_and_rejects_oversized_packets() {
         assert_eq!(
-            compressed_audio_sample_frames(Codec::Opus, &[0x80]),
+            compressed_audio_sample_frames(Codec::Opus, &[0x80], 0),
             Some(120)
         );
         assert_eq!(
-            compressed_audio_sample_frames(Codec::Opus, &[0x98]),
+            compressed_audio_sample_frames(Codec::Opus, &[0x98], 0),
             Some(960)
         );
         assert_eq!(
-            compressed_audio_sample_frames(Codec::Opus, &[0x83, 0x30]),
+            compressed_audio_sample_frames(Codec::Opus, &[0x83, 0x30], 0),
             Some(5_760)
         );
         assert_eq!(
-            compressed_audio_sample_frames(Codec::Opus, &[0x83, 0x31]),
+            compressed_audio_sample_frames(Codec::Opus, &[0x83, 0x31], 0),
             None
         );
     }
@@ -307,16 +431,63 @@ mod tests {
     #[test]
     fn derives_flac_block_sizes_from_fixed_and_explicit_headers() {
         assert_eq!(
-            compressed_audio_sample_frames(Codec::Flac, &[0xff, 0xf8, 0x80, 0x00, 0x00]),
+            compressed_audio_sample_frames(Codec::Flac, &[0xff, 0xf8, 0x80, 0x00, 0x00], 0,),
             Some(256)
         );
         assert_eq!(
             compressed_audio_sample_frames(
                 Codec::Flac,
-                &[0xff, 0xf8, 0x70, 0x00, 0x00, 0x03, 0xff]
+                &[0xff, 0xf8, 0x70, 0x00, 0x00, 0x03, 0xff],
+                0,
             ),
             Some(1_024)
         );
-        assert_eq!(compressed_audio_sample_frames(Codec::Flac, &[0xff]), None);
+        assert_eq!(
+            compressed_audio_sample_frames(Codec::Flac, &[0xff], 0),
+            None
+        );
+    }
+
+    #[test]
+    fn derives_aac_asc_frame_lengths_and_sbr_output_multiplier() {
+        // AAC-LC, 44.1 kHz, stereo, frameLengthFlag=0/1.
+        assert_eq!(aac_frames_per_access_unit(&[0x12, 0x10]), Some(1_024));
+        assert_eq!(aac_frames_per_access_unit(&[0x12, 0x14]), Some(960));
+
+        // AAC-LD and AAC-ELD use 512/480 core samples.
+        assert_eq!(aac_frames_per_access_unit(&[0xba, 0x10, 0x00]), Some(512));
+        assert_eq!(aac_frames_per_access_unit(&[0xba, 0x14, 0x00]), Some(480));
+        assert_eq!(
+            aac_frames_per_access_unit(&[0xf8, 0xe8, 0x40, 0x00]),
+            Some(512)
+        );
+
+        // Explicit HE-AAC (AOT 5 wrapping AAC-LC) doubles decoded output.
+        assert_eq!(
+            aac_frames_per_access_unit(&[0x2a, 0x11, 0x88, 0x00]),
+            Some(2_048)
+        );
+
+        // AAC-LC followed by syncExtensionType 0x2b7/AOT 5/SBR-present.
+        assert_eq!(
+            aac_frames_per_access_unit(&[0x12, 0x10, 0x56, 0xe5, 0x80]),
+            Some(2_048)
+        );
+        // A standalone Parametric Stereo marker does not establish SBR. PS is
+        // only valid after a complete 0x2b7/AOT5/SBR extension chain.
+        assert_eq!(
+            aac_frames_per_access_unit(&[0x12, 0x10, 0xa9, 0x10, 0x00]),
+            Some(1_024)
+        );
+        // A fully nested PS marker remains HE-AAC output, without multiplying
+        // the already doubled SBR frame count a second time.
+        assert_eq!(
+            aac_frames_per_access_unit(&[0x12, 0x10, 0x56, 0xe5, 0xa5, 0x48, 0x80]),
+            Some(2_048)
+        );
+
+        let mut oversized = vec![0_u8; MAX_AAC_AUDIO_SPECIFIC_CONFIG_BYTES + 1];
+        oversized[..2].copy_from_slice(&[0x12, 0x10]);
+        assert_eq!(aac_frames_per_access_unit(&oversized), None);
     }
 }

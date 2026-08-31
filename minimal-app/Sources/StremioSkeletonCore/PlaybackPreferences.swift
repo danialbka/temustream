@@ -167,6 +167,22 @@ enum StreamFailoverPolicy {
     }
 }
 
+/// Short-lived provider URLs must be renewed from their durable request URL
+/// before moving to a different stream. Bound consecutive pre-frame refreshes
+/// so an unavailable provider cannot trap playback in an infinite retry loop.
+enum ProviderPlaybackRefreshPolicy {
+    static let maximumConsecutiveAttempts = 2
+
+    static func shouldRefresh(
+        requiresFreshProviderResolution: Bool,
+        consecutiveAttempts: Int
+    ) -> Bool {
+        requiresFreshProviderResolution
+            && consecutiveAttempts >= 0
+            && consecutiveAttempts < maximumConsecutiveAttempts
+    }
+}
+
 enum CustomPlaybackStartupPhase: String, Equatable, Sendable {
     case opening
     case firstFrame = "first-frame"

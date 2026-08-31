@@ -1234,13 +1234,9 @@ mod tests {
         output.extend_from_slice(payload);
     }
 
-    fn pcs(
-        width: u16,
-        height: u16,
-        number: u16,
-        state: u8,
-        objects: &[(u16, u8, u8, u16, u16, Option<(u16, u16, u16, u16)>)],
-    ) -> Vec<u8> {
+    type PcsObject = (u16, u8, u8, u16, u16, Option<(u16, u16, u16, u16)>);
+
+    fn pcs(width: u16, height: u16, number: u16, state: u8, objects: &[PcsObject]) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&width.to_be_bytes());
         payload.extend_from_slice(&height.to_be_bytes());

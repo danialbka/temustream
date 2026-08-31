@@ -2,6 +2,77 @@ import XCTest
 @testable import StremioSkeletonCore
 
 final class PlaybackContinuityPolicyTests: XCTestCase {
+    func testTimelinePositionClampsAtKnownMediaBounds() {
+        XCTAssertEqual(
+            PlaybackContinuityPolicy.clampedTimelinePosition(-1, duration: 60),
+            0
+        )
+        XCTAssertEqual(
+            PlaybackContinuityPolicy.clampedTimelinePosition(42, duration: 60),
+            42
+        )
+        XCTAssertEqual(
+            PlaybackContinuityPolicy.clampedTimelinePosition(72, duration: 60),
+            60
+        )
+    }
+
+    func testTimelinePositionPreservesFiniteClockWhenDurationIsUnknown() {
+        XCTAssertEqual(
+            PlaybackContinuityPolicy.clampedTimelinePosition(72, duration: 0),
+            72
+        )
+        XCTAssertEqual(
+            PlaybackContinuityPolicy.clampedTimelinePosition(72, duration: .nan),
+            72
+        )
+        XCTAssertEqual(
+            PlaybackContinuityPolicy.clampedTimelinePosition(.infinity, duration: 60),
+            0
+        )
+    }
+
+    func testTerminalClockContinuesTailDrainBeforeKnownDurationBoundary() {
+        let decision = PlaybackContinuityPolicy.terminalClockDecision(
+            sampledPosition: 59,
+            duration: 60,
+            continuingRate: 1
+        )
+
+        XCTAssertFalse(decision.shouldFinish)
+        XCTAssertEqual(decision.position, 59)
+        XCTAssertEqual(decision.desiredRate, 1)
+        XCTAssertEqual(decision.appliedRate, 1)
+    }
+
+    func testTerminalClockStopsAtExactKnownDurationBoundary() {
+        for sampledPosition in [59.95, 72] {
+            let decision = PlaybackContinuityPolicy.terminalClockDecision(
+                sampledPosition: sampledPosition,
+                duration: 60,
+                continuingRate: 1
+            )
+
+            XCTAssertTrue(decision.shouldFinish)
+            XCTAssertEqual(decision.position, 60)
+            XCTAssertEqual(decision.desiredRate, 0)
+            XCTAssertEqual(decision.appliedRate, 0)
+        }
+    }
+
+    func testTerminalClockStopsAtSampledPositionWhenDurationIsUnknown() {
+        let decision = PlaybackContinuityPolicy.terminalClockDecision(
+            sampledPosition: 72,
+            duration: 0,
+            continuingRate: 1
+        )
+
+        XCTAssertTrue(decision.shouldFinish)
+        XCTAssertEqual(decision.position, 72)
+        XCTAssertEqual(decision.desiredRate, 0)
+        XCTAssertEqual(decision.appliedRate, 0)
+    }
+
     func testBackFifteenUsesPendingInitialResumeInsteadOfZeroDecoderClock() {
         XCTAssertEqual(
             PlaybackContinuityPolicy.relativeSeekTarget(

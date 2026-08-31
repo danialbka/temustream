@@ -162,6 +162,12 @@ private struct BunnyContentRange {
     }
 }
 
+private struct BunnyExpectedRangeResponse: Sendable {
+    let lowerBound: UInt64
+    let upperBound: UInt64
+    let totalLength: UInt64?
+}
+
 private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     struct Result {
         let data: Data
@@ -181,6 +187,7 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
     private var activeTask: URLSessionDataTask?
     private var activeTaskIdentifier: Int?
     private var activeOperationID: Int?
+    private var expectedRangeResponse: BunnyExpectedRangeResponse?
     private var sessionStorage: URLSession?
     private var sessionInvalidated = false
 
@@ -193,7 +200,8 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
         maximumBytes: Int,
         timeout: TimeInterval = 30,
         startGuard: (() -> Bool)? = nil,
-        operationID: Int? = nil
+        operationID: Int? = nil,
+        expectedRangeResponse: BunnyExpectedRangeResponse? = nil
     ) throws -> Result {
         guard let url = request.url else {
             throw BunnyNativeDecoderError.invalidSource("the media request has no URL")
@@ -213,6 +221,7 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
             activeTask = task
             activeTaskIdentifier = task.taskIdentifier
             activeOperationID = operationID
+            self.expectedRangeResponse = expectedRangeResponse
             return startGuard?() ?? true
         }
         guard shouldStart else {
@@ -261,6 +270,7 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
         lock.lock()
         defer { lock.unlock() }
         guard activeOperationID == operationID,
+              response != nil,
               relativeOffset >= 0,
               maximumLength > 0
         else { return nil }
@@ -365,11 +375,55 @@ private final class BunnyRangeFetch: NSObject, URLSessionDataDelegate, @unchecke
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
-        lock.withLock {
-            guard activeTaskIdentifier == dataTask.taskIdentifier else { return }
-            self.response = response as? HTTPURLResponse
+        let validation = lock.withLock { () -> (active: Bool, error: Error?) in
+            guard activeTaskIdentifier == dataTask.taskIdentifier else {
+                return (false, nil)
+            }
+            guard let response = response as? HTTPURLResponse else {
+                return (
+                    true,
+                    BunnyNativeDecoderError.network("invalid HTTP response")
+                )
+            }
+            if let expectedRangeResponse {
+                switch PlaybackHTTPRangeResponsePolicy.validate(
+                    statusCode: response.statusCode,
+                    contentRange: response.value(forHTTPHeaderField: "Content-Range"),
+                    expectedLowerBound: expectedRangeResponse.lowerBound,
+                    expectedUpperBound: expectedRangeResponse.upperBound,
+                    expectedTotalLength: expectedRangeResponse.totalLength
+                ) {
+                case .accepted:
+                    break
+                case .invalidStatus:
+                    return (
+                        true,
+                        BunnyNativeDecoderError.network(
+                            "server ignored byte-range request"
+                        )
+                    )
+                case .invalidContentRange:
+                    return (
+                        true,
+                        BunnyNativeDecoderError.network(
+                            "invalid byte-range response"
+                        )
+                    )
+                }
+            }
+            self.response = response
+            return (true, nil)
         }
-        completionHandler(.allow)
+        guard validation.active else {
+            completionHandler(.cancel)
+            return
+        }
+        if let error = validation.error {
+            finish(error, taskIdentifier: dataTask.taskIdentifier)
+            completionHandler(.cancel)
+        } else {
+            completionHandler(.allow)
+        }
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -504,7 +558,15 @@ final class BunnyMediaRangeReader: @unchecked Sendable {
                 var request = URLRequest(url: url)
                 request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
                 request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-                let result = try fetch.run(request, maximumBytes: 2)
+                let result = try fetch.run(
+                    request,
+                    maximumBytes: 2,
+                    expectedRangeResponse: BunnyExpectedRangeResponse(
+                        lowerBound: 0,
+                        upperBound: 0,
+                        totalLength: nil
+                    )
+                )
                 guard result.response.statusCode == 206 else {
                     throw BunnyNativeDecoderError.network("HTTP \(result.response.statusCode)")
                 }
@@ -772,7 +834,12 @@ final class BunnyMediaRangeReader: @unchecked Sendable {
                             !self.cancelled && !self.readsSuspendedForSeek
                         }
                     },
-                    operationID: operationID
+                    operationID: operationID,
+                    expectedRangeResponse: BunnyExpectedRangeResponse(
+                        lowerBound: offset,
+                        upperBound: end,
+                        totalLength: sourceLength
+                    )
                 )
                 guard result.response.statusCode == 206 else {
                     throw BunnyNativeDecoderError.network("server ignored byte-range request")

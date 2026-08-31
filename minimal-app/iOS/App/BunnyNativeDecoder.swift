@@ -224,13 +224,20 @@ private final class BunnyDisplayCadenceProbe: NSObject, @unchecked Sendable {
     var snapshot: BunnyDisplayCadenceSnapshot {
         let samples = lock.withLock { (intervals, expectedIntervals) }
         let sorted = samples.0.filter { $0 > 0 }.sorted()
-        let expected = samples.1.filter { $0 > 0 }.sorted()
         let median = percentile(sorted, fraction: 0.50)
         let p95 = percentile(sorted, fraction: 0.95)
-        let expectedMedian = percentile(expected, fraction: 0.50)
         let missed = zip(samples.0, samples.1).reduce(into: 0) { result, pair in
             guard pair.1 > 0, pair.0 > pair.1 * 1.5 else { return }
-            result += max(Int((pair.0 / pair.1).rounded()) - 1, 1)
+            let ratio = pair.0 / pair.1
+            guard ratio.isFinite,
+                  let roundedRefreshCount = Int(exactly: ratio.rounded())
+            else {
+                result = Int.max
+                return
+            }
+            let missedForSample = max(roundedRefreshCount - 1, 1)
+            let sum = result.addingReportingOverflow(missedForSample)
+            result = sum.overflow ? Int.max : sum.partialValue
         }
         return BunnyDisplayCadenceSnapshot(
             refreshHz: median.map { 1 / $0 },
@@ -308,6 +315,7 @@ struct BunnyNativePacket: @unchecked Sendable {
     let presentationTime: CMTime
     let decodeTime: CMTime
     let duration: CMTime
+    let discardPadding: CMTime
     let flags: UInt32
     let data: Data
     let hdr10PlusData: Data?
@@ -318,6 +326,7 @@ private struct BunnyRawMediaPacket: @unchecked Sendable {
     let presentationTimeNanoseconds: Int64
     let decodeTimeNanoseconds: Int64
     let durationNanoseconds: UInt64
+    let discardPaddingNanoseconds: Int64
     let flags: UInt32
     let data: Data
     let hdr10PlusData: Data?
@@ -327,6 +336,16 @@ private enum BunnyPacketReadResult: @unchecked Sendable {
     case packet(BunnyRawMediaPacket)
     case endOfStream
     case failure(String)
+}
+
+private struct BunnyGenerationOwnedReadResult: @unchecked Sendable {
+    let generation: UInt64
+    let result: BunnyPacketReadResult
+}
+
+private struct BunnyPausedPacketRead: @unchecked Sendable {
+    let result: BunnyPacketReadResult
+    let wasInFlightWhenInterruptedForTrackSelection: Bool
 }
 
 /// Owns the one mutating Rust `next_packet` call independently from Bunny's
@@ -344,6 +363,7 @@ private final class BunnyPacketReadPump: @unchecked Sendable {
     private var active = true
     private var inFlight = false
     private var pendingResult: BunnyPacketReadResult?
+    private var trackSelectionInterruptedGeneration: Int?
 
     init(session: OpaquePointer) {
         self.session = session
@@ -368,21 +388,42 @@ private final class BunnyPacketReadPump: @unchecked Sendable {
         }
     }
 
+    /// Marks the current read as owned by a deliberate track-selection
+    /// interrupt before the range reader is cancelled. A result that had
+    /// already completed remains ordinary source evidence.
+    func pauseForTrackSelection() {
+        lock.withLock {
+            active = false
+            guard inFlight else { return }
+            trackSelectionInterruptedGeneration = generation
+        }
+    }
+
     /// The reader must be interrupted before this call when a seek or track
     /// selection needs exclusive access to the Rust session. A completed
     /// result is returned so a track-only change can retain packets belonging
     /// to unaffected tracks. Seeks and shutdown deliberately discard it via
     /// `pauseAndWait()`.
-    func pauseAndTakeResult() -> BunnyPacketReadResult? {
+    func pauseAndTakeResult() -> BunnyPausedPacketRead? {
         lock.withLock {
             active = false
         }
         queue.sync {}
         return lock.withLock {
+            let completedGeneration = generation
             generation &+= 1
             inFlight = false
-            defer { pendingResult = nil }
-            return pendingResult
+            defer {
+                pendingResult = nil
+                trackSelectionInterruptedGeneration = nil
+            }
+            return pendingResult.map {
+                BunnyPausedPacketRead(
+                    result: $0,
+                    wasInFlightWhenInterruptedForTrackSelection:
+                        trackSelectionInterruptedGeneration == completedGeneration
+                )
+            }
         }
     }
 
@@ -413,7 +454,7 @@ private final class BunnyPacketReadPump: @unchecked Sendable {
         if resultCode == 0 {
             result = .endOfStream
         } else if resultCode == 1,
-                  raw.abi_version == 3,
+                  raw.abi_version == UInt32(STREMIO_MEDIA_PACKET_ABI_VERSION),
                   raw.data_size <= 16 * 1_024 * 1_024,
                   let bytes = raw.data {
             let hdr10PlusData: Data?
@@ -433,6 +474,7 @@ private final class BunnyPacketReadPump: @unchecked Sendable {
                 presentationTimeNanoseconds: raw.presentation_time_ns,
                 decodeTimeNanoseconds: raw.decode_time_ns,
                 durationNanoseconds: raw.duration_ns,
+                discardPaddingNanoseconds: raw.discard_padding_ns,
                 flags: raw.flags,
                 data: Data(bytes: bytes, count: raw.data_size),
                 hdr10PlusData: hdr10PlusData
@@ -1075,24 +1117,56 @@ private final class BunnyVideoPresentationPump: @unchecked Sendable {
 
 }
 
+private enum BunnyNativeSubtitleDelivery: @unchecked Sendable {
+    case text(String?, start: TimeInterval, duration: TimeInterval)
+    case bitmap(
+        BunnyNativeBitmapSubtitleCue?,
+        start: TimeInterval,
+        duration: TimeInterval?
+    )
+    case clearAll(at: TimeInterval)
+}
+
+private struct BunnyNativeSubtitleDeliveryEntry: @unchecked Sendable {
+    let generation: UInt64
+    let estimatedBytes: Int
+    let delivery: BunnyNativeSubtitleDelivery
+}
+
+private struct BunnyNativeSubtitleDeliveryReservation: Sendable {
+    let generation: UInt64
+    let estimatedBytes: Int
+}
+
+private struct BunnyGenerationOwnedSeekRequest: Sendable {
+    let request: BunnyNativeSeekRequest
+    let subtitleDeliveryGeneration: UInt64
+}
+
 final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     let videoLayer = AVSampleBufferDisplayLayer()
     let audioRenderer = AVSampleBufferAudioRenderer()
     let synchronizer = AVSampleBufferRenderSynchronizer()
 
-    var onOpen: ((BunnyNativeMediaInfo) -> Void)?
-    var onFirstFrame: (() -> Void)?
-    var onSubtitle: ((String?, TimeInterval, TimeInterval) -> Void)?
-    var onBitmapSubtitle: ((BunnyNativeBitmapSubtitleCue?, TimeInterval, TimeInterval) -> Void)?
-    var onSeekCompleted: ((UInt64, TimeInterval, Bool) -> Void)?
-    var onRecoverySeekCompleted: ((UInt64?, BunnyNativeRecoverySeekReason, TimeInterval, Bool) -> Void)?
-    var onMetrics: ((Int, Int, Int, TimeInterval, TimeInterval, TimeInterval) -> Void)?
-    var onEnded: (() -> Void)?
-    var onFailure: ((Error) -> Void)?
+    var onOpen: (@MainActor (BunnyNativeMediaInfo) -> Void)?
+    var onFirstFrame: (@MainActor () -> Void)?
+    var onSubtitle: (@MainActor (String?, TimeInterval, TimeInterval) -> Void)?
+    /// A nil duration is a stateful bitmap composition that remains visible
+    /// until a later PGS composition explicitly replaces or clears it.
+    var onBitmapSubtitle: (@MainActor (BunnyNativeBitmapSubtitleCue?, TimeInterval, TimeInterval?) -> Void)?
+    var onSeekCompleted: (@MainActor (UInt64, TimeInterval, Bool) -> Void)?
+    var onRecoverySeekCompleted: (@MainActor (UInt64?, BunnyNativeRecoverySeekReason, TimeInterval, Bool) -> Void)?
+    var onMetrics: (@MainActor (Int, Int, Int, TimeInterval, TimeInterval, TimeInterval) -> Void)?
+    var onEnded: (@MainActor () -> Void)?
+    var onFailure: (@MainActor (Error) -> Void)?
 
     var currentTime: TimeInterval {
         let seconds = synchronizer.currentTime().seconds
-        return seconds.isFinite ? max(seconds, 0) : 0
+        let duration = stateLock.withLock { terminalPlaybackDuration ?? 0 }
+        return PlaybackContinuityPolicy.clampedTimelinePosition(
+            seconds,
+            duration: duration
+        )
     }
 
     var rate: Float {
@@ -1149,14 +1223,28 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     private let trustedPrivateNetworkOrigin: URL?
     private let worker = DispatchQueue(label: "app.temustremio.bunny-native", qos: .userInitiated)
     private let stateLock = NSLock()
+    private let subtitleDeliveryLock = NSLock()
+    private var subtitleDeliveryGeneration: UInt64 = 0
+    private var pendingSubtitleDeliveries: [BunnyNativeSubtitleDeliveryEntry] = []
+    private var pendingSubtitleDeliveryBytes = 0
+    private var inFlightSubtitleDeliveryCount = 0
+    private var inFlightSubtitleDeliveryBytes = 0
+    private var reservedSubtitleDeliveryCount = 0
+    private var reservedSubtitleDeliveryBytes = 0
+    private var subtitleDeliveryDrainScheduled = false
+    private var acceptsSubtitleDeliveries = true
     private var started = false
     private var stopped = false
     private var desiredRate: Float = 0
-    private var pendingSeek: BunnyNativeSeekRequest?
+    private var terminalPlaybackDuration: TimeInterval?
+    private var pendingSeek: BunnyGenerationOwnedSeekRequest?
     private var activeUserSeekRequestID: UInt64?
     private var activeAcknowledgedRecovery: BunnyNativeSeekRequest?
     private var pendingAudioSelection: Int?
     private var pendingSubtitleSelection: Int?
+    private var pendingSubtitleSelectionGeneration: UInt64?
+    private var selectedSubtitleStreamIndexSnapshot: Int?
+    private var selectableSubtitleStreamIndices = Set<Int>()
     private var videoFormatReady = false
     private var firstFrameDelivered = false
     private var firstFrameCheckGeneration = 0
@@ -1173,6 +1261,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     private var rendererMetricsRequestInFlight = false
     private var rendererMetricsGeneration = 0
     private var activeReader: BunnyMediaRangeReader?
+    private var activePacketReadPump: BunnyPacketReadPump?
     private var audioRendererFlushObserver: NSObjectProtocol?
     private let diagnosticsEnabled: Bool
     private let displayCadenceProbe: BunnyDisplayCadenceProbe?
@@ -1181,6 +1270,9 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     private var dolbyFormatDescriptions: [Int: CMFormatDescription] = [:]
     private var reportedDolbyTimingMismatchTracks = Set<Int>()
     private var reportedHDR10PlusInput = false
+    private static let maximumPendingSubtitleDeliveries = 128
+    private static let maximumPendingSubtitleDeliveryBytes = 64 * 1_024 * 1_024
+    private static let maximumPgsPresentationBytes = 32 * 1_024 * 1_024
 
     init(
         url: URL,
@@ -1227,7 +1319,9 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             object: audioRenderer,
             queue: nil
         ) { [weak self] _ in
-            self?.recoverAfterAutomaticAudioRendererFlush()
+            Task { @MainActor [weak self] in
+                self?.recoverAfterAutomaticAudioRendererFlush()
+            }
         }
     }
 
@@ -1265,13 +1359,19 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         synchronizer.setRate(0, time: synchronizer.currentTime())
     }
 
+    @MainActor
     func seek(to time: TimeInterval, requestID: UInt64) {
         guard requestID > 0 else { return }
         let displacedRecovery = stateLock.withLock { () -> BunnyNativeSeekRequest? in
             let displacedRecovery = activeAcknowledgedRecovery
-            pendingSeek = BunnyNativeSeekRequest(
-                intent: .user(requestID: requestID),
-                targetTime: max(time, 0)
+            let subtitleGeneration = invalidateSubtitleDeliveries()
+            terminalPlaybackDuration = nil
+            pendingSeek = BunnyGenerationOwnedSeekRequest(
+                request: BunnyNativeSeekRequest(
+                    intent: .user(requestID: requestID),
+                    targetTime: max(time, 0)
+                ),
+                subtitleDeliveryGeneration: subtitleGeneration
             )
             activeUserSeekRequestID = requestID
             // Publish the pending seek and suspend old-position reads under the
@@ -1289,6 +1389,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
+    @MainActor
     func recoverFromTimedOutSeek(
         to time: TimeInterval,
         userRequestID: UInt64,
@@ -1303,6 +1404,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
+    @MainActor
     func recoverFromFailedSeek(
         to time: TimeInterval,
         recoveryRequestID: UInt64
@@ -1314,6 +1416,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         )
     }
 
+    @MainActor
     private func recoverAfterAutomaticAudioRendererFlush() {
         let recoveryTime = currentTime
         let scheduled = scheduleRecoverySeek(
@@ -1327,16 +1430,32 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         )
     }
 
+    @MainActor
     func selectAudioStreamIndex(_ streamIndex: Int) {
         stateLock.withLock {
             pendingAudioSelection = streamIndex
+            activePacketReadPump?.pauseForTrackSelection()
             activeReader?.interruptForSeek()
         }
     }
 
+    @MainActor
     func selectSubtitleStreamIndex(_ streamIndex: Int) {
         stateLock.withLock {
+            let requestedStreamIndex = streamIndex >= 0 ? streamIndex : nil
+            let pendingStreamIndex = pendingSubtitleSelection.flatMap {
+                $0 >= 0 ? $0 : nil
+            }
+            guard PlaybackTrackSelectionPacketPolicy.shouldQueueSubtitleSelection(
+                currentStreamIndex: selectedSubtitleStreamIndexSnapshot,
+                hasPendingSelection: pendingSubtitleSelection != nil,
+                pendingStreamIndex: pendingStreamIndex,
+                requestedStreamIndex: requestedStreamIndex,
+                selectableStreamIndices: selectableSubtitleStreamIndices
+            ) else { return }
+            pendingSubtitleSelectionGeneration = invalidateSubtitleDeliveries()
             pendingSubtitleSelection = streamIndex
+            activePacketReadPump?.pauseForTrackSelection()
             activeReader?.interruptForSeek()
         }
     }
@@ -1348,7 +1467,9 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         }
     }
 
+    @MainActor
     func stop() {
+        invalidateSubtitleDeliveries(acceptingNewDeliveries: false)
         let reader = stateLock.withLock { () -> BunnyMediaRangeReader? in
             stopped = true
             desiredRate = 0
@@ -1407,11 +1528,12 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
 
             var descriptors = try loadTracks(session: session)
             let summary = stremio_media_summary(session)
-            guard summary.abi_version == 1 else {
+            guard summary.abi_version == UInt32(STREMIO_MEDIA_SUMMARY_ABI_VERSION) else {
                 throw BunnyNativeDecoderError.core("unsupported media ABI")
             }
             var videoTracks = descriptors.filter {
                 $0.raw.kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO)
+                    && Self.isEnabled($0)
             }
             var playableVideoTracks = videoTracks.filter(Self.isApplePlayable)
             if playableVideoTracks.isEmpty,
@@ -1439,16 +1561,19 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 descriptors[Int(candidate.raw.index)] = recovered
                 videoTracks = descriptors.filter {
                     $0.raw.kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO)
+                        && Self.isEnabled($0)
                 }
                 playableVideoTracks = videoTracks.filter(Self.isApplePlayable)
             }
             let audioTracks = descriptors.filter {
                 $0.raw.kind == UInt32(STREMIO_MEDIA_TRACK_AUDIO)
+                    && Self.isEnabled($0)
             }
             let playableAudioTracks = audioTracks.filter(Self.isApplePlayable)
             let video = Self.defaultTrack(in: playableVideoTracks)
             let selectedAudio = Self.defaultTrack(in: playableAudioTracks)
             var selectedAudioStreamIndex = selectedAudio.map { Int($0.raw.index) }
+            var selectedSubtitleStreamIndex: Int?
             if !videoTracks.isEmpty, video == nil {
                 throw BunnyNativeDecoderError.unsupportedCodec(
                     videoTracks.map(\.codecID).joined(separator: ", ")
@@ -1556,7 +1681,13 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 NSLog("BUNNY_VIDEO_PIPELINE mode=explicit-videotoolbox")
             }
             let packetReadPump = BunnyPacketReadPump(session: session)
+            stateLock.withLock { activePacketReadPump = packetReadPump }
             defer {
+                stateLock.withLock {
+                    if activePacketReadPump === packetReadPump {
+                        activePacketReadPump = nil
+                    }
+                }
                 reader.cancel()
                 packetReadPump.stop()
             }
@@ -1592,7 +1723,9 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             var requiresPostSeekPreroll = false
             var requiresCompressedPreroll = !url.isFileURL
             var isRefillingPacketReservoir = true
-            var deferredReadResult: BunnyPacketReadResult?
+            var demuxGeneration: UInt64 = 0
+            var deferredReadResult: BunnyGenerationOwnedReadResult?
+            var activeSubtitleDeliveryGeneration = currentSubtitleDeliveryGeneration()
             let requiresFullRemotePreroll = !url.isFileURL
                 && reader.sourceLength
                     >= PlaybackRangeChunkPolicy.largeSourceThresholdBytes
@@ -1628,8 +1761,11 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             }
 
             while !isStopped {
-                if let seekRequest = takePendingSeek() {
+                if let generationOwnedSeek = takePendingSeek() {
+                    let seekRequest = generationOwnedSeek.request
                     let seek = seekRequest.targetTime
+                    demuxGeneration &+= 1
+                    deferredReadResult = nil
                     packetReadPump.pauseAndWait()
                     reader.resumeAfterSeekInterrupt(prioritizeRandomAccess: true)
                     // A newer seek may have arrived after this one was taken.
@@ -1641,12 +1777,22 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                     videoPresentationPump?.suspend()
                     videoDecompression?.reset()
                     finishedDelayedVideoFrames = false
+                    let appliedSeekSubtitleGeneration =
+                        PlaybackSubtitleDeliveryPolicy.generationAfterApplying(
+                            currentAppliedGeneration:
+                                activeSubtitleDeliveryGeneration,
+                            mutationGeneration:
+                                generationOwnedSeek.subtitleDeliveryGeneration
+                        )
                     let success = performSeek(
                         session: session,
                         pgsDecoder: pgsDecoder,
                         time: seek,
+                        subtitleDeliveryGeneration:
+                            appliedSeekSubtitleGeneration,
                         error: &error
                     )
+                    activeSubtitleDeliveryGeneration = appliedSeekSubtitleGeneration
                     packetReservoir.removeAll()
                     isRefillingPacketReservoir = true
                     videoQueueEnd = seek
@@ -1692,16 +1838,28 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                     }
                     packetReadPump.resume()
                 }
-                let selectionChanges: (audio: Bool, subtitle: Bool)
+                let selectionChanges: (
+                    audio: Bool,
+                    subtitle: Bool,
+                    subtitleDeliveryGeneration: UInt64?
+                )
                 if hasPendingTrackSelection {
-                    let completedReadResult = packetReadPump.pauseAndTakeResult()
+                    let pausedRead = packetReadPump.pauseAndTakeResult()
+                    let completedReadResult = pausedRead?.result
                     reader.resumeAfterSeekInterrupt()
                     selectionChanges = applyPendingSelections(
                         session: session,
                         pgsDecoder: pgsDecoder,
                         descriptors: descriptors,
-                        selectedAudioStreamIndex: &selectedAudioStreamIndex
+                        selectedAudioStreamIndex: &selectedAudioStreamIndex,
+                        selectedSubtitleStreamIndex: &selectedSubtitleStreamIndex,
+                        activeSubtitleDeliveryGeneration:
+                            activeSubtitleDeliveryGeneration
                     )
+                    if let generation = selectionChanges.subtitleDeliveryGeneration {
+                        activeSubtitleDeliveryGeneration = generation
+                    }
+                    demuxGeneration &+= 1
                     if case let .packet(raw)? = completedReadResult,
                        let descriptor = descriptors[safe: raw.trackIndex],
                        PlaybackTrackSelectionPacketPolicy.preservesCompletedPacket(
@@ -1709,19 +1867,41 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                            audioSelectionChanged: selectionChanges.audio,
                            subtitleSelectionChanged: selectionChanges.subtitle
                        ) {
-                        deferredReadResult = completedReadResult
+                        deferredReadResult = BunnyGenerationOwnedReadResult(
+                            generation: demuxGeneration,
+                            result: .packet(raw)
+                        )
                     } else if case .endOfStream? = completedReadResult {
-                        deferredReadResult = completedReadResult
+                        deferredReadResult = BunnyGenerationOwnedReadResult(
+                            generation: demuxGeneration,
+                            result: .endOfStream
+                        )
+                    } else if case let .failure(message)? = completedReadResult,
+                              PlaybackTrackSelectionPacketPolicy
+                                  .preservesCompletedReadFailure(
+                                      readWasInFlightWhenInterruptedForTrackSelection:
+                                          pausedRead?
+                                              .wasInFlightWhenInterruptedForTrackSelection
+                                              ?? false
+                                  ) {
+                        deferredReadResult = BunnyGenerationOwnedReadResult(
+                            generation: demuxGeneration,
+                            result: .failure(message)
+                        )
                     }
                     packetReadPump.resume()
                 } else {
-                    selectionChanges = (audio: false, subtitle: false)
+                    selectionChanges = (
+                        audio: false,
+                        subtitle: false,
+                        subtitleDeliveryGeneration: nil
+                    )
                 }
                 if selectionChanges.audio {
                     packetReservoir.removeAll(kind: UInt32(STREMIO_MEDIA_TRACK_AUDIO))
                     isRefillingPacketReservoir = true
                     let reprimeTime = currentTime
-                    let scheduledReprime = scheduleRecoverySeek(
+                    let scheduledReprime = scheduleRecoverySeekFromWorker(
                         to: reprimeTime,
                         reason: .audioTrackSelection
                     )
@@ -1742,7 +1922,9 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 }
                 let availableReadResult: BunnyPacketReadResult?
                 if let completedReadResult = deferredReadResult {
-                    availableReadResult = completedReadResult
+                    availableReadResult = completedReadResult.generation == demuxGeneration
+                        ? completedReadResult.result
+                        : nil
                     deferredReadResult = nil
                 } else {
                     availableReadResult = packetReadPump.takeResult()
@@ -1771,6 +1953,10 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                                 timescale: 1_000_000_000
                             ),
                             duration: packetDuration,
+                            discardPadding: CMTime(
+                                value: raw.discardPaddingNanoseconds,
+                                timescale: 1_000_000_000
+                            ),
                             flags: raw.flags,
                             data: raw.data,
                             hdr10PlusData: raw.hdr10PlusData
@@ -1876,19 +2062,26 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         decodedVideoBacklogEnd: nil
                     )
                     let duration = TimeInterval(summary.duration_ns) / 1_000_000_000
-                    if duration <= 0 || currentTime >= duration - 0.05 {
-                        if !endPublished {
-                            endPublished = true
-                            publish { [weak self] in self?.onEnded?() }
-                        }
+                    let terminalDecision = PlaybackContinuityPolicy.terminalClockDecision(
+                        sampledPosition: synchronizer.currentTime().seconds,
+                        duration: duration,
+                        continuingRate: stateLock.withLock { desiredRate }
+                    )
+                    if terminalDecision.shouldFinish, !endPublished {
+                        endPublished = true
+                        finishPlayback(
+                            terminalDecision,
+                            knownDuration: duration
+                        )
+                        publish { [weak self] in self?.onEnded?() }
                     }
                     Thread.sleep(forTimeInterval: 0.01)
                     continue
                 }
 
                 let clock = currentTime
-                let allowsLowReservePlayback =
-                    ProcessInfo.processInfo.systemUptime < lowReservePlaybackDeadline
+                let allowsLowReservePlayback = sourceExhausted
+                    || ProcessInfo.processInfo.systemUptime < lowReservePlaybackDeadline
                 if requiresPostSeekPreroll, !allowsLowReservePlayback {
                     // Advancing briefly releases hidden post-seek preroll
                     // samples. Once that bounded decoder grace expires, return
@@ -1896,6 +2089,24 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                     // a large remote stream with only one or two frames queued.
                     isRebuffering = true
                     requiresPostSeekPreroll = false
+                }
+                if sourceExhausted {
+                    if requiresCompressedPreroll {
+                        requiresCompressedPreroll = false
+                        NSLog("BUNNY_COMPRESSED_PREROLL state=eof_release")
+                    }
+                    if !videoTimingCalibrated {
+                        calibratedVideoDecodeLead = PlaybackBufferingPolicy.videoDecodeLead(
+                            maximumObservedLag: packetReservoir.maximumObservedVideoDecodeLag
+                        )
+                        videoTimingCalibrated = true
+                        NSLog(
+                            "BUNNY_VIDEO_TIMING_CALIBRATED mode=eof lead=%.6f lag=%.6f packets=%d",
+                            calibratedVideoDecodeLead,
+                            packetReservoir.maximumObservedVideoDecodeLag,
+                            packetReservoir.observedVideoPacketCount
+                        )
+                    }
                 }
                 let compressedPrerollReady = !requiresCompressedPreroll
                     || PlaybackCompressedPacketBufferPolicy.hasRemotePreroll(
@@ -1993,13 +2204,27 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                     || audioQueueEnd - clock < maximumRendererLead
                 let videoDecodeHasCapacity = !hasVideo
                     || (videoDecompression?.canAcceptMore ?? false)
+                let subtitleReadyThrough = clock.isFinite ? clock + 12 : 12
+                if sourceExhausted {
+                    let discarded = packetReservoir.discardSubtitlePackets(
+                        after: subtitleReadyThrough
+                    )
+                    if discarded.count > 0 {
+                        NSLog(
+                            "BUNNY_SUBTITLE_DROP codec=any packets=%d bytes=%d error=eof_horizon",
+                            discarded.count,
+                            discarded.bytes
+                        )
+                    }
+                }
                 let packet = packetReservoir.takeReady(
                     videoReady: compressedPrerollReady
                         && videoTimingCalibrated
                         && videoDecodeHasCapacity,
                     audioReady: compressedPrerollReady
                         && audioHasCapacity
-                        && audioRenderer.isReadyForMoreMediaData
+                        && audioRenderer.isReadyForMoreMediaData,
+                    subtitleReadyThrough: subtitleReadyThrough
                 )
 
                 guard let packet else {
@@ -2030,6 +2255,20 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         continue
                     }
                     if packetReservoir.isFull {
+                        let discarded = packetReservoir
+                            .discardBlockingFutureSubtitlePackets(
+                                after: subtitleReadyThrough
+                            )
+                        if discarded.count > 0 {
+                            isRefillingPacketReservoir = true
+                            NSLog(
+                                "BUNNY_SUBTITLE_DROP codec=any packets=%d bytes=%d error=refill_backpressure_horizon",
+                                discarded.count,
+                                discarded.bytes
+                            )
+                            packetReadPump.requestRead()
+                            continue
+                        }
                         let now = ProcessInfo.processInfo.systemUptime
                         if diagnosticsEnabled, now - lastReservoirDiagnosticsAt >= 2 {
                             lastReservoirDiagnosticsAt = now
@@ -2048,6 +2287,14 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                     continue
                 }
                 guard let descriptor = descriptors[safe: packet.trackIndex] else { continue }
+                let presentationDisposition = PlaybackMediaPacketVisibilityPolicy
+                    .disposition(
+                        kind: Self.packetTrackKind(descriptor.raw.kind),
+                        isInvisible: packet.flags
+                            & UInt32(STREMIO_MEDIA_PACKET_INVISIBLE) != 0,
+                        subtitleRequiresDecoderState: descriptor.raw.codec
+                            == UInt32(STREMIO_MEDIA_CODEC_PGS)
+                    )
                 switch descriptor.raw.kind {
                 case UInt32(STREMIO_MEDIA_TRACK_VIDEO):
                     let isKeyframe = packet.flags & UInt32(STREMIO_MEDIA_PACKET_KEYFRAME) != 0
@@ -2092,7 +2339,13 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                                 key: kCMSampleAttachmentKey_NotSync
                             )
                         }
-                        var shouldDisplay = true
+                        var shouldDisplay = presentationDisposition == .present
+                        if !shouldDisplay {
+                            Self.setBooleanSampleAttachment(
+                                sample,
+                                key: kCMSampleAttachmentKey_DoNotDisplay
+                            )
+                        }
                         if var transition = seekTransition {
                             let isPreroll = PlaybackSeekTransitionPolicy
                                 .sampleIsEntirelyBeforeTarget(
@@ -2127,6 +2380,17 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         throw error
                     }
                 case UInt32(STREMIO_MEDIA_TRACK_AUDIO):
+                    let sample = try makeSampleBuffer(
+                        packet: packet,
+                        descriptor: descriptor,
+                        videoDecodeLead: 0
+                    )
+                    if presentationDisposition != .present {
+                        Self.setBooleanSampleAttachment(
+                            sample,
+                            key: kCMSampleAttachmentKey_DoNotDisplay
+                        )
+                    }
                     if var transition = seekTransition {
                         let isPreroll = PlaybackSeekTransitionPolicy
                             .sampleIsEntirelyBeforeTarget(
@@ -2135,6 +2399,14 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                                 targetTime: transition.targetTime
                             )
                         if isPreroll {
+                            Self.setBooleanSampleAttachment(
+                                sample,
+                                key: kCMSampleAttachmentKey_DoNotDisplay
+                            )
+                            // Decode the selected track's SeekPreRoll history
+                            // without presenting it. Stateful codecs such as
+                            // Opus need this decoder history at the target.
+                            audioRenderer.enqueue(sample)
                             transition.discardedAudioPackets += 1
                             seekTransition = transition
                             continue
@@ -2146,13 +2418,10 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         throw audioRenderer.error
                             ?? BunnyNativeDecoderError.formatDescription(descriptor.codecID)
                     }
-                    let sample = try makeSampleBuffer(
-                        packet: packet,
-                        descriptor: descriptor,
-                        videoDecodeLead: 0
-                    )
                     audioRenderer.enqueue(sample)
-                    renderedAudioFrames += 1
+                    if presentationDisposition == .present {
+                        renderedAudioFrames += 1
+                    }
                     let end = packet.presentationTime.seconds + packet.duration.seconds
                     if end.isFinite { audioQueueEnd = max(audioQueueEnd, end) }
                     if completeSeekTransitionIfReady(&seekTransition) {
@@ -2166,7 +2435,10 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                         do {
                             try publishPgsPacket(
                                 packet,
-                                decoder: pgsDecoder
+                                decoder: pgsDecoder,
+                                subtitleDeliveryGeneration:
+                                    activeSubtitleDeliveryGeneration,
+                                shouldPublish: presentationDisposition == .present
                             )
                         } catch {
                             // A corrupt or non-conforming bitmap-subtitle
@@ -2176,11 +2448,16 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                             // and reset only subtitle assembly state. A later
                             // complete epoch can resume subtitle rendering.
                             stremio_pgs_decoder_reset(pgsDecoder)
-                            publish { [weak self] in
-                                self?.onBitmapSubtitle?(
-                                    nil,
-                                    packet.presentationTime.seconds,
-                                    0
+                            if presentationDisposition == .present {
+                                _ = enqueueSubtitleDelivery(
+                                    .bitmap(
+                                        nil,
+                                        start: packet.presentationTime.seconds,
+                                        duration: nil
+                                    ),
+                                    estimatedBytes: 0,
+                                    generation: activeSubtitleDeliveryGeneration,
+                                    priority: true
                                 )
                             }
                             NSLog(
@@ -2190,16 +2467,26 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                                 error.localizedDescription
                             )
                         }
-                    } else {
+                    } else if presentationDisposition == .present {
                         let text = Self.normalizedSubtitleText(
                             packet.data,
                             codec: descriptor.raw.codec
                         )
-                        publish { [weak self] in
-                            self?.onSubtitle?(
+                        let queued = enqueueSubtitleDelivery(
+                            .text(
                                 text,
+                                start: packet.presentationTime.seconds,
+                                duration: max(packet.duration.seconds, 0.1)
+                            ),
+                            estimatedBytes: text == nil ? 0 : packet.data.count,
+                            generation: activeSubtitleDeliveryGeneration,
+                            priority: text == nil
+                        )
+                        if !queued {
+                            NSLog(
+                                "BUNNY_SUBTITLE_DROP codec=text pts=%.3f bytes=%ld error=callback_bound",
                                 packet.presentationTime.seconds,
-                                max(packet.duration.seconds, 0.1)
+                                packet.data.count
                             )
                         }
                     }
@@ -2259,6 +2546,11 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             var raw = StremioMediaTrackInfo()
             guard stremio_media_track_info(session, index, &raw) == 1 else {
                 throw BunnyNativeDecoderError.core("could not read track \(index)")
+            }
+            guard raw.abi_version == UInt32(STREMIO_MEDIA_TRACK_INFO_ABI_VERSION) else {
+                throw BunnyNativeDecoderError.core(
+                    "unsupported media track ABI for track \(index)"
+                )
             }
             let codecID = Self.trackText(
                 session: session,
@@ -2387,7 +2679,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 )
             }
             guard result == 1,
-                  packet.abi_version == 3,
+                  packet.abi_version == UInt32(STREMIO_MEDIA_PACKET_ABI_VERSION),
                   packet.track_index == descriptor.raw.index,
                   packet.data_size <= 16 * 1_024 * 1_024,
                   let bytes = packet.data
@@ -2430,7 +2722,8 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 parameterSets: [vps, sps, pps],
                 nalUnitHeaderLength: recoveredHeaderLength,
                 color: descriptor.videoColor,
-                additionalCodecAtoms: descriptor.additionalCodecAtoms
+                additionalCodecAtoms: descriptor.additionalCodecAtoms,
+                track: descriptor.raw
               ),
               videoFormatSupportsDecompression(format)
         else {
@@ -2499,13 +2792,17 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
     ) {
         let subtitles = descriptors.filter {
             $0.raw.kind == UInt32(STREMIO_MEDIA_TRACK_SUBTITLE)
+                && Self.isSelectableSubtitle($0)
+        }
+        stateLock.withLock {
+            selectableSubtitleStreamIndices = Set(
+                subtitles.map { Int($0.raw.index) }
+            )
+            selectedSubtitleStreamIndexSnapshot = nil
         }
         let info = BunnyNativeMediaInfo(
             duration: TimeInterval(summary.duration_ns) / 1_000_000_000,
-            presentationSize: CGSize(
-                width: Int(video?.raw.width ?? 0),
-                height: Int(video?.raw.height ?? 0)
-            ),
+            presentationSize: video.map(Self.presentationSize) ?? .zero,
             nominalFrameRate: video.flatMap { descriptor in
                 guard descriptor.raw.default_duration_ns > 0 else { return nil }
                 return 1_000_000_000 / Double(descriptor.raw.default_duration_ns)
@@ -2532,21 +2829,43 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         session: OpaquePointer,
         pgsDecoder: OpaquePointer,
         descriptors: [BunnyNativeTrackDescriptor],
-        selectedAudioStreamIndex: inout Int?
-    ) -> (audio: Bool, subtitle: Bool) {
-        let selections = stateLock.withLock { () -> (Int?, Int?) in
+        selectedAudioStreamIndex: inout Int?,
+        selectedSubtitleStreamIndex: inout Int?,
+        activeSubtitleDeliveryGeneration: UInt64
+    ) -> (
+        audio: Bool,
+        subtitle: Bool,
+        subtitleDeliveryGeneration: UInt64?
+    ) {
+        let selections = stateLock.withLock {
+            () -> (audio: Int?, subtitle: Int?, generation: UInt64?) in
             defer {
                 pendingAudioSelection = nil
                 pendingSubtitleSelection = nil
+                pendingSubtitleSelectionGeneration = nil
             }
-            return (pendingAudioSelection, pendingSubtitleSelection)
+            return (
+                pendingAudioSelection,
+                pendingSubtitleSelection,
+                pendingSubtitleSelectionGeneration
+            )
         }
-        guard selections.0 != nil || selections.1 != nil else {
-            return (audio: false, subtitle: false)
+        guard selections.audio != nil || selections.subtitle != nil else {
+            return (
+                audio: false,
+                subtitle: false,
+                subtitleDeliveryGeneration: nil
+            )
         }
         var audioChanged = false
         var subtitleChanged = false
-        if let audio = selections.0 {
+        let appliedSubtitleDeliveryGeneration = selections.generation.map {
+            PlaybackSubtitleDeliveryPolicy.generationAfterApplying(
+                currentAppliedGeneration: activeSubtitleDeliveryGeneration,
+                mutationGeneration: $0
+            )
+        }
+        if let audio = selections.audio {
             if !PlaybackTrackSelectionPacketPolicy.requiresAudioTimelineReprime(
                 currentStreamIndex: selectedAudioStreamIndex,
                 requestedStreamIndex: audio
@@ -2570,19 +2889,46 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 }
             }
         }
-        if let subtitle = selections.1 {
-            subtitleChanged = stremio_media_select_track(
-                session,
-                UInt32(STREMIO_MEDIA_TRACK_SUBTITLE),
-                Int32(subtitle)
-            ) == 1
-            stremio_pgs_decoder_reset(pgsDecoder)
-            publish { [weak self] in
-                self?.onSubtitle?(nil, self?.currentTime ?? 0, 0)
-                self?.onBitmapSubtitle?(nil, self?.currentTime ?? 0, 0)
+        if let subtitle = selections.subtitle {
+            let requestedSubtitleStreamIndex = subtitle >= 0 ? subtitle : nil
+            if requestedSubtitleStreamIndex == selectedSubtitleStreamIndex {
+                NSLog("BUNNY_SUBTITLE_SWITCH action=noop stream=%ld", subtitle)
+            } else if requestedSubtitleStreamIndex == nil
+                        || descriptors.contains(where: {
+                            Int($0.raw.index) == subtitle
+                                && Self.isSelectableSubtitle($0)
+                        }) {
+                subtitleChanged = stremio_media_select_track(
+                    session,
+                    UInt32(STREMIO_MEDIA_TRACK_SUBTITLE),
+                    Int32(subtitle)
+                ) == 1
+                if subtitleChanged {
+                    selectedSubtitleStreamIndex = requestedSubtitleStreamIndex
+                    stateLock.withLock {
+                        selectedSubtitleStreamIndexSnapshot =
+                            requestedSubtitleStreamIndex
+                    }
+                    stremio_pgs_decoder_reset(pgsDecoder)
+                    let clearTime = currentTime
+                    if let generation = appliedSubtitleDeliveryGeneration {
+                        _ = enqueueSubtitleDelivery(
+                            .clearAll(at: clearTime),
+                            estimatedBytes: 0,
+                            generation: generation,
+                            priority: true
+                        )
+                    }
+                }
             }
         }
-        return (audio: audioChanged, subtitle: subtitleChanged)
+        return (
+            audio: audioChanged,
+            subtitle: subtitleChanged,
+            subtitleDeliveryGeneration: selections.subtitle == nil
+                ? nil
+                : appliedSubtitleDeliveryGeneration
+        )
     }
 
     private func configureAudioRenderer(for descriptor: BunnyNativeTrackDescriptor) {
@@ -2704,9 +3050,25 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         session: OpaquePointer,
         pgsDecoder: OpaquePointer,
         time: TimeInterval,
+        subtitleDeliveryGeneration: UInt64,
         error: inout [CChar]
     ) -> Bool {
-        synchronizer.setRate(0, time: CMTime(seconds: time, preferredTimescale: 1_000_000_000))
+        let boundedTime = max(time, 0)
+        guard boundedTime.isFinite,
+              let nanoseconds = UInt64(
+                exactly: (boundedTime * 1_000_000_000).rounded()
+              )
+        else { return false }
+        _ = enqueueSubtitleDelivery(
+            .clearAll(at: boundedTime),
+            estimatedBytes: 0,
+            generation: subtitleDeliveryGeneration,
+            priority: true
+        )
+        synchronizer.setRate(
+            0,
+            time: CMTime(seconds: boundedTime, preferredTimescale: 1_000_000_000)
+        )
         // Keep the last clean frame visible while the decoder reconstructs
         // references from the preceding keyframe. Preroll samples are decoded
         // with DoNotDisplay, then the first frame covering the target replaces
@@ -2719,7 +3081,6 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             firstFrameCheckGeneration &+= 1
             firstFrameCheckScheduled = false
         }
-        let nanoseconds = UInt64(max(time, 0) * 1_000_000_000)
         let result = error.withUnsafeMutableBufferPointer { errorBuffer in
             stremio_media_seek(
                 session,
@@ -2729,6 +3090,24 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             )
         }
         return result == 1
+    }
+
+    private func finishPlayback(
+        _ decision: PlaybackTerminalClockDecision,
+        knownDuration duration: TimeInterval
+    ) {
+        let knownDuration = duration.isFinite && duration > 0 ? duration : nil
+        stateLock.withLock {
+            desiredRate = decision.desiredRate
+            terminalPlaybackDuration = knownDuration
+        }
+        synchronizer.setRate(
+            decision.appliedRate,
+            time: CMTime(
+                seconds: decision.position,
+                preferredTimescale: 1_000_000_000
+            )
+        )
     }
 
     private func updateAppliedPlaybackRate(
@@ -2809,6 +3188,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         return true
     }
 
+    @MainActor
     private func scheduleRecoverySeek(
         to time: TimeInterval,
         reason: BunnyNativeRecoverySeekReason,
@@ -2837,12 +3217,28 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 ),
                 targetTime: max(time.isFinite ? time : 0, 0)
             )
-            pendingSeek = request
+            terminalPlaybackDuration = nil
+            let subtitleGeneration = invalidateSubtitleDeliveries()
+            pendingSeek = BunnyGenerationOwnedSeekRequest(
+                request: request,
+                subtitleDeliveryGeneration: subtitleGeneration
+            )
             if recoveryRequestID != nil {
                 activeAcknowledgedRecovery = request
             }
             activeReader.interruptForSeek()
             return true
+        }
+    }
+
+    private func scheduleRecoverySeekFromWorker(
+        to time: TimeInterval,
+        reason: BunnyNativeRecoverySeekReason
+    ) -> Bool {
+        DispatchQueue.main.sync {
+            MainActor.assumeIsolated {
+                scheduleRecoverySeek(to: time, reason: reason)
+            }
         }
     }
 
@@ -2932,7 +3328,9 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
 
     private func publishPgsPacket(
         _ packet: BunnyNativePacket,
-        decoder: OpaquePointer
+        decoder: OpaquePointer,
+        subtitleDeliveryGeneration: UInt64,
+        shouldPublish: Bool
     ) throws {
         var error = [CChar](repeating: 0, count: 512)
         let result = packet.data.withUnsafeBytes { bytes in
@@ -2951,13 +3349,38 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             throw BunnyNativeDecoderError.core(Self.errorText(error))
         }
         guard result == 1 else { return }
+        // Invisible bitmap packets still advance the stateful PGS decoder, but
+        // this completed composition must not replace the visible overlay.
+        guard shouldPublish else { return }
 
         let presentation = stremio_pgs_presentation(decoder)
         let start = TimeInterval(presentation.presentation_time_ns) / 1_000_000_000
-        let duration = max(packet.duration.seconds, 0.1)
         if presentation.is_clear != 0 {
-            publish { [weak self] in self?.onBitmapSubtitle?(nil, start, 0) }
+            _ = enqueueSubtitleDelivery(
+                .bitmap(nil, start: start, duration: nil),
+                estimatedBytes: 0,
+                generation: subtitleDeliveryGeneration,
+                priority: true
+            )
             return
+        }
+
+        guard let reservation = reserveSubtitleDelivery(
+            estimatedBytes: Self.maximumPgsPresentationBytes,
+            generation: subtitleDeliveryGeneration
+        ) else {
+            NSLog(
+                "BUNNY_SUBTITLE_DROP codec=PGS pts=%.3f parts=%u error=callback_bound",
+                start,
+                presentation.part_count
+            )
+            return
+        }
+        var committedReservation = false
+        defer {
+            if !committedReservation {
+                cancelSubtitleDeliveryReservation(reservation)
+            }
         }
 
         var parts: [BunnyNativeBitmapSubtitlePart] = []
@@ -3009,7 +3432,13 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
                 height: Int(presentation.canvas_height)
             )
         )
-        publish { [weak self] in self?.onBitmapSubtitle?(cue, start, duration) }
+        // PGS presentations are stateful. Keep the current composition until
+        // the decoder publishes an explicit replacement or clear presentation.
+        commitSubtitleDelivery(
+            .bitmap(cue, start: start, duration: nil),
+            reservation: reservation
+        )
+        committedReservation = true
     }
 
     private func makeSampleBuffer(
@@ -3082,6 +3511,28 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         )
         guard status == noErr, let sample else {
             throw BunnyNativeDecoderError.sampleBuffer(status)
+        }
+        if descriptor.raw.kind == UInt32(STREMIO_MEDIA_TRACK_AUDIO),
+           packet.discardPadding.isValid,
+           packet.discardPadding != .zero {
+            let key = packet.discardPadding > .zero
+                ? kCMSampleBufferAttachmentKey_TrimDurationAtEnd
+                : kCMSampleBufferAttachmentKey_TrimDurationAtStart
+            let requested = CMTimeAbsoluteValue(packet.discardPadding)
+            let bounded = packet.duration.isValid && packet.duration > .zero
+                ? min(requested, packet.duration)
+                : requested
+            if bounded > .zero {
+                CMSetAttachment(
+                    sample,
+                    key: key,
+                    value: CMTimeCopyAsDictionary(
+                        bounded,
+                        allocator: kCFAllocatorDefault
+                    ),
+                    attachmentMode: kCMAttachmentMode_ShouldPropagate
+                )
+            }
         }
         if #available(iOS 16.0, *),
            let hdr10PlusData = packet.hdr10PlusData,
@@ -3219,7 +3670,7 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         stateLock.withLock { stopped }
     }
 
-    private func takePendingSeek() -> BunnyNativeSeekRequest? {
+    private func takePendingSeek() -> BunnyGenerationOwnedSeekRequest? {
         stateLock.withLock {
             defer { pendingSeek = nil }
             return pendingSeek
@@ -3379,6 +3830,207 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
         return String(format: "%.3f", value)
     }
 
+    private func reserveSubtitleDelivery(
+        estimatedBytes: Int,
+        generation: UInt64,
+        priority: Bool = false
+    ) -> BunnyNativeSubtitleDeliveryReservation? {
+        let estimatedBytes = max(estimatedBytes, 0)
+        return subtitleDeliveryLock.withLock {
+            guard acceptsSubtitleDeliveries,
+                  PlaybackSubtitleDeliveryPolicy.accepts(
+                    deliveryGeneration: generation,
+                    currentGeneration: subtitleDeliveryGeneration
+                  ),
+                  estimatedBytes <= Self.maximumPendingSubtitleDeliveryBytes
+            else { return nil }
+
+            let fits: () -> Bool = {
+                let ownedCount = self.pendingSubtitleDeliveries.count
+                    + self.reservedSubtitleDeliveryCount
+                    + self.inFlightSubtitleDeliveryCount
+                let ownedBytes = self.pendingSubtitleDeliveryBytes
+                    + self.reservedSubtitleDeliveryBytes
+                    + self.inFlightSubtitleDeliveryBytes
+                return ownedCount < Self.maximumPendingSubtitleDeliveries
+                    && ownedBytes <= Self.maximumPendingSubtitleDeliveryBytes
+                        - estimatedBytes
+            }
+            if !fits(), priority {
+                pendingSubtitleDeliveries.removeAll(keepingCapacity: true)
+                pendingSubtitleDeliveryBytes = 0
+            }
+            guard fits() else { return nil }
+            reservedSubtitleDeliveryCount += 1
+            reservedSubtitleDeliveryBytes += estimatedBytes
+            return BunnyNativeSubtitleDeliveryReservation(
+                generation: generation,
+                estimatedBytes: estimatedBytes
+            )
+        }
+    }
+
+    private func cancelSubtitleDeliveryReservation(
+        _ reservation: BunnyNativeSubtitleDeliveryReservation
+    ) {
+        subtitleDeliveryLock.withLock {
+            guard reservation.generation == subtitleDeliveryGeneration else { return }
+            reservedSubtitleDeliveryCount = max(reservedSubtitleDeliveryCount - 1, 0)
+            reservedSubtitleDeliveryBytes = max(
+                reservedSubtitleDeliveryBytes - reservation.estimatedBytes,
+                0
+            )
+        }
+    }
+
+    private func commitSubtitleDelivery(
+        _ delivery: BunnyNativeSubtitleDelivery,
+        reservation: BunnyNativeSubtitleDeliveryReservation
+    ) {
+        let shouldSchedule = subtitleDeliveryLock.withLock { () -> Bool in
+            guard acceptsSubtitleDeliveries,
+                  reservation.generation == subtitleDeliveryGeneration
+            else { return false }
+            reservedSubtitleDeliveryCount = max(reservedSubtitleDeliveryCount - 1, 0)
+            reservedSubtitleDeliveryBytes = max(
+                reservedSubtitleDeliveryBytes - reservation.estimatedBytes,
+                0
+            )
+            pendingSubtitleDeliveries.append(
+                BunnyNativeSubtitleDeliveryEntry(
+                    generation: reservation.generation,
+                    estimatedBytes: reservation.estimatedBytes,
+                    delivery: delivery
+                )
+            )
+            pendingSubtitleDeliveryBytes += reservation.estimatedBytes
+            guard !subtitleDeliveryDrainScheduled else { return false }
+            subtitleDeliveryDrainScheduled = true
+            return true
+        }
+        guard shouldSchedule else { return }
+        let generation = reservation.generation
+        Task { @MainActor [weak self] in
+            self?.drainSubtitleDeliveries(generation: generation)
+        }
+    }
+
+    @discardableResult
+    private func enqueueSubtitleDelivery(
+        _ delivery: BunnyNativeSubtitleDelivery,
+        estimatedBytes: Int,
+        generation: UInt64,
+        priority: Bool = false
+    ) -> Bool {
+        guard let reservation = reserveSubtitleDelivery(
+            estimatedBytes: estimatedBytes,
+            generation: generation,
+            priority: priority
+        ) else { return false }
+        commitSubtitleDelivery(delivery, reservation: reservation)
+        return true
+    }
+
+    @MainActor
+    private func drainSubtitleDeliveries(generation: UInt64) {
+        var deliveredCount = 0
+        while deliveredCount
+                < PlaybackSubtitleDeliveryPolicy.maximumDeliveriesPerMainActorTurn,
+              let entry = takeSubtitleDelivery(generation: generation) {
+            switch entry.delivery {
+            case let .text(text, start, duration):
+                onSubtitle?(text, start, duration)
+            case let .bitmap(cue, start, duration):
+                onBitmapSubtitle?(cue, start, duration)
+            case let .clearAll(start):
+                onSubtitle?(nil, start, 0)
+                onBitmapSubtitle?(nil, start, nil)
+            }
+            completeSubtitleDelivery(entry)
+            deliveredCount += 1
+        }
+        guard subtitleDeliveryNeedsAnotherDrain(generation: generation) else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            await Task<Never, Never>.yield()
+            self?.drainSubtitleDeliveries(generation: generation)
+        }
+    }
+
+    private func subtitleDeliveryNeedsAnotherDrain(generation: UInt64) -> Bool {
+        subtitleDeliveryLock.withLock {
+            guard PlaybackSubtitleDeliveryPolicy.accepts(
+                deliveryGeneration: generation,
+                currentGeneration: subtitleDeliveryGeneration
+            ) else { return false }
+            guard !pendingSubtitleDeliveries.isEmpty else {
+                subtitleDeliveryDrainScheduled = false
+                return false
+            }
+            // Keep the generation's single-owner bit asserted while the next
+            // finite MainActor batch is scheduled.
+            return true
+        }
+    }
+
+    private func takeSubtitleDelivery(
+        generation: UInt64
+    ) -> BunnyNativeSubtitleDeliveryEntry? {
+        subtitleDeliveryLock.withLock {
+            guard PlaybackSubtitleDeliveryPolicy.accepts(
+                deliveryGeneration: generation,
+                currentGeneration: subtitleDeliveryGeneration
+            ) else { return nil }
+            guard !pendingSubtitleDeliveries.isEmpty else {
+                subtitleDeliveryDrainScheduled = false
+                return nil
+            }
+            let entry = pendingSubtitleDeliveries.removeFirst()
+            pendingSubtitleDeliveryBytes = max(
+                pendingSubtitleDeliveryBytes - entry.estimatedBytes,
+                0
+            )
+            inFlightSubtitleDeliveryCount += 1
+            inFlightSubtitleDeliveryBytes += entry.estimatedBytes
+            return entry
+        }
+    }
+
+    private func completeSubtitleDelivery(_ entry: BunnyNativeSubtitleDeliveryEntry) {
+        subtitleDeliveryLock.withLock {
+            guard entry.generation == subtitleDeliveryGeneration else { return }
+            inFlightSubtitleDeliveryCount = max(inFlightSubtitleDeliveryCount - 1, 0)
+            inFlightSubtitleDeliveryBytes = max(
+                inFlightSubtitleDeliveryBytes - entry.estimatedBytes,
+                0
+            )
+        }
+    }
+
+    private func currentSubtitleDeliveryGeneration() -> UInt64 {
+        subtitleDeliveryLock.withLock { subtitleDeliveryGeneration }
+    }
+
+    @MainActor
+    @discardableResult
+    private func invalidateSubtitleDeliveries(
+        acceptingNewDeliveries: Bool = true
+    ) -> UInt64 {
+        subtitleDeliveryLock.withLock {
+            subtitleDeliveryGeneration &+= 1
+            pendingSubtitleDeliveries.removeAll(keepingCapacity: true)
+            pendingSubtitleDeliveryBytes = 0
+            inFlightSubtitleDeliveryCount = 0
+            inFlightSubtitleDeliveryBytes = 0
+            reservedSubtitleDeliveryCount = 0
+            reservedSubtitleDeliveryBytes = 0
+            subtitleDeliveryDrainScheduled = false
+            acceptsSubtitleDeliveries = acceptingNewDeliveries
+            return subtitleDeliveryGeneration
+        }
+    }
+
     private func publish(_ action: @escaping @MainActor @Sendable () -> Void) {
         Task { @MainActor in action() }
     }
@@ -3457,9 +4109,35 @@ final class BunnyNativeDecoder: NSObject, @unchecked Sendable {
             ?? descriptors.first
     }
 
+    private static func isEnabled(_ descriptor: BunnyNativeTrackDescriptor) -> Bool {
+        descriptor.raw.flags & UInt32(STREMIO_MEDIA_TRACK_ENABLED) != 0
+    }
+
     private static func isApplePlayable(_ descriptor: BunnyNativeTrackDescriptor) -> Bool {
-        descriptor.raw.flags & UInt32(STREMIO_MEDIA_TRACK_APPLE_DECODABLE) != 0
+        isEnabled(descriptor)
+            && descriptor.raw.flags & UInt32(STREMIO_MEDIA_TRACK_APPLE_DECODABLE) != 0
             && descriptor.formatDescription != nil
+    }
+
+    private static func isSelectableSubtitle(
+        _ descriptor: BunnyNativeTrackDescriptor
+    ) -> Bool {
+        descriptor.raw.kind == UInt32(STREMIO_MEDIA_TRACK_SUBTITLE)
+            && isEnabled(descriptor)
+            && descriptor.raw.flags & UInt32(STREMIO_MEDIA_TRACK_APPLE_DECODABLE) != 0
+    }
+
+    private static func presentationSize(
+        _ descriptor: BunnyNativeTrackDescriptor
+    ) -> CGSize {
+        let raw = descriptor.raw
+        let usesDisplayAspect = raw.display_unit <= 3
+            && raw.display_width > 0
+            && raw.display_height > 0
+        return CGSize(
+            width: Int(usesDisplayAspect ? raw.display_width : raw.width),
+            height: Int(usesDisplayAspect ? raw.display_height : raw.height)
+        )
     }
 
     private static func trackText(
@@ -3663,7 +4341,7 @@ private func makeFormatDescription(
         if !codecPrivate.isEmpty {
             atoms[atom] = codecPrivate
         }
-        var extensions = videoFormatExtensions(videoColor)
+        var extensions = videoFormatExtensions(videoColor, track: raw)
         if !atoms.isEmpty {
             extensions[
                 kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String
@@ -3697,7 +4375,8 @@ private func makeFormatDescription(
            let normalized = makeHEVCFormatDescriptionFromConfigurationRecord(
                 codecPrivate,
                 color: videoColor,
-                additionalCodecAtoms: additionalCodecAtoms
+                additionalCodecAtoms: additionalCodecAtoms,
+                track: raw
            ) {
             descriptions.append(normalized)
         }
@@ -3718,7 +4397,8 @@ private func makeFormatDescription(
         return nil
     case UInt32(STREMIO_MEDIA_TRACK_AUDIO):
         let formatAndFrames: (AudioFormatID, UInt32)? = switch raw.codec {
-        case UInt32(STREMIO_MEDIA_CODEC_AAC): (kAudioFormatMPEG4AAC, 1_024)
+        case UInt32(STREMIO_MEDIA_CODEC_AAC):
+            (kAudioFormatMPEG4AAC, max(raw.audio_frames_per_packet, 1))
         case UInt32(STREMIO_MEDIA_CODEC_AC3): (kAudioFormatAC3, 1_536)
         // E-AC-3 is variable-frame-rate (256/512/768/1,536 samples). Each
         // CMSampleBuffer carries the exact Rust-parsed duration.
@@ -3796,14 +4476,16 @@ private func makeFormatDescription(
 private func makeHEVCFormatDescriptionFromConfigurationRecord(
     _ configuration: Data,
     color: StremioMediaVideoColorInfo?,
-    additionalCodecAtoms: [String: Data]
+    additionalCodecAtoms: [String: Data],
+    track: StremioMediaTrackInfo
 ) -> CMVideoFormatDescription? {
     guard let parsed = parseHEVCParameterSets(configuration) else { return nil }
     return makeHEVCFormatDescription(
         parameterSets: parsed.parameterSets,
         nalUnitHeaderLength: parsed.nalUnitHeaderLength,
         color: color,
-        additionalCodecAtoms: additionalCodecAtoms
+        additionalCodecAtoms: additionalCodecAtoms,
+        track: track
     )
 }
 
@@ -3811,7 +4493,8 @@ private func makeHEVCFormatDescription(
     parameterSets: [Data],
     nalUnitHeaderLength: Int32,
     color: StremioMediaVideoColorInfo?,
-    additionalCodecAtoms: [String: Data]
+    additionalCodecAtoms: [String: Data],
+    track: StremioMediaTrackInfo
 ) -> CMVideoFormatDescription? {
     guard !parameterSets.isEmpty, (1...4).contains(nalUnitHeaderLength) else {
         return nil
@@ -3822,9 +4505,9 @@ private func makeHEVCFormatDescription(
         return pointer
     }
     defer { allocated.forEach { $0.deallocate() } }
-    var pointers = allocated.map { UnsafePointer($0) }
-    var sizes = parameterSets.map(\.count)
-    var extensions = videoFormatExtensions(color)
+    let pointers = allocated.map { UnsafePointer($0) }
+    let sizes = parameterSets.map(\.count)
+    var extensions = videoFormatExtensions(color, track: track)
     if !additionalCodecAtoms.isEmpty {
         extensions[
             kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String
@@ -4044,10 +4727,20 @@ private func videoFormatSupportsDecompression(
 }
 
 private func videoFormatExtensions(
-    _ color: StremioMediaVideoColorInfo?
+    _ color: StremioMediaVideoColorInfo?,
+    track: StremioMediaTrackInfo? = nil
 ) -> [String: Any] {
-    guard let color, color.abi_version == 1 else { return [:] }
     var extensions = [String: Any]()
+    if let track,
+       let aspect = videoPixelAspectRatio(track) {
+        extensions[kCMFormatDescriptionExtension_PixelAspectRatio as String] = [
+            kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing as String:
+                aspect.horizontal,
+            kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing as String:
+                aspect.vertical,
+        ]
+    }
+    guard let color, color.abi_version == 1 else { return extensions }
     let has: (Int) -> Bool = { flag in
         color.flags & UInt32(flag) != 0
     }
@@ -4100,6 +4793,34 @@ private func videoFormatExtensions(
         ] = contentLightLevel
     }
     return extensions
+}
+
+private func videoPixelAspectRatio(
+    _ track: StremioMediaTrackInfo
+) -> (horizontal: UInt32, vertical: UInt32)? {
+    guard track.display_unit <= 3,
+          track.width > 0,
+          track.height > 0,
+          track.display_width > 0,
+          track.display_height > 0
+    else { return nil }
+    let horizontal = UInt64(track.display_width) * UInt64(track.height)
+    let vertical = UInt64(track.display_height) * UInt64(track.width)
+    guard horizontal > 0, vertical > 0, horizontal != vertical else { return nil }
+    let divisor = greatestCommonDivisor(horizontal, vertical)
+    guard let reducedHorizontal = UInt32(exactly: horizontal / divisor),
+          let reducedVertical = UInt32(exactly: vertical / divisor)
+    else { return nil }
+    return (reducedHorizontal, reducedVertical)
+}
+
+private func greatestCommonDivisor(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+    var lhs = lhs
+    var rhs = rhs
+    while rhs != 0 {
+        (lhs, rhs) = (rhs, lhs % rhs)
+    }
+    return max(lhs, 1)
 }
 
 private func masteringDisplayColorVolumeData(

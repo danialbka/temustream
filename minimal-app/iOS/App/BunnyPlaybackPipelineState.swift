@@ -179,7 +179,11 @@ struct BunnyNativePacketReservoir {
 
     /// Preserves packet order within each renderer while allowing audio or
     /// subtitles to pass a temporarily backpressured video renderer.
-    mutating func takeReady(videoReady: Bool, audioReady: Bool) -> BunnyNativePacket? {
+    mutating func takeReady(
+        videoReady: Bool,
+        audioReady: Bool,
+        subtitleReadyThrough: TimeInterval
+    ) -> BunnyNativePacket? {
         guard (videoReady && videoPacketCount > 0)
                 || (audioReady && audioPacketCount > 0)
                 || subtitlePacketCount > 0
@@ -204,7 +208,11 @@ struct BunnyNativePacketReservoir {
             case UInt32(STREMIO_MEDIA_TRACK_SUBTITLE):
                 guard !sawSubtitle else { continue }
                 sawSubtitle = true
-                ready = true
+                // Keep future cues inside the bounded compressed reservoir.
+                // Publishing them eagerly creates one long-lived Swift task
+                // per cue and bypasses the packet-count/byte ownership limit.
+                ready = !entry.timelineStart.isFinite
+                    || entry.timelineStart <= subtitleReadyThrough
             default:
                 ready = true
             }
@@ -230,8 +238,85 @@ struct BunnyNativePacketReservoir {
         latestObservedVideoDecodeTime = nil
     }
 
+    /// Removes subtitle packets that cannot become visible within the
+    /// decoder's near-playhead ownership window. EOF uses this to release a
+    /// malformed far-future subtitle tail without publishing it across the
+    /// MainActor boundary merely to empty the compressed reservoir.
+    mutating func discardSubtitlePackets(
+        after timeline: TimeInterval
+    ) -> (count: Int, bytes: Int) {
+        guard timeline.isFinite else { return (0, 0) }
+        var discardedCount = 0
+        var discardedBytes = 0
+        let retained = entries.compactMap { $0 }.filter { entry in
+            let shouldDiscard = entry.kind == UInt32(STREMIO_MEDIA_TRACK_SUBTITLE)
+                && entry.timelineStart.isFinite
+                && entry.timelineStart > timeline
+            if shouldDiscard {
+                discardedCount += 1
+                discardedBytes += entry.packet.data.count
+            }
+            return !shouldDiscard
+        }
+        guard discardedCount > 0 else { return (0, 0) }
+        replaceEntries(with: retained)
+        return (discardedCount, discardedBytes)
+    }
+
+    /// Releases only the far-future subtitle packets that are themselves
+    /// responsible for a full reservoir after no packet can be consumed.
+    /// Healthy future cues remain compressed and owned until their JIT window.
+    mutating func discardBlockingFutureSubtitlePackets(
+        after timeline: TimeInterval
+    ) -> (count: Int, bytes: Int) {
+        guard timeline.isFinite else { return (0, 0) }
+        let liveEntries = entries.enumerated().compactMap { index, entry in
+            entry.map { (index: index, entry: $0) }
+        }
+        let footprints = liveEntries.map { value in
+            PlaybackCompressedPacketFootprint(
+                byteCount: value.entry.packet.data.count,
+                timelineStart: value.entry.timelineStart,
+                timelineEnd: value.entry.timelineEnd,
+                isSubtitle: value.entry.kind
+                    == UInt32(STREMIO_MEDIA_TRACK_SUBTITLE)
+            )
+        }
+        let compactIndices = PlaybackCompressedPacketBufferPolicy
+            .blockingFutureSubtitleEvictionIndices(
+                packets: footprints,
+                subtitleReadyThrough: timeline,
+                limits: limits
+            )
+        guard !compactIndices.isEmpty else { return (0, 0) }
+
+        let entryIndices = Set(compactIndices.map { liveEntries[$0].index })
+        var discardedBytes = 0
+        let retained = entries.enumerated().compactMap { index, entry -> Entry? in
+            guard let entry else { return nil }
+            if entryIndices.contains(index) {
+                discardedBytes += entry.packet.data.count
+                return nil
+            }
+            return entry
+        }
+        replaceEntries(with: retained)
+        return (entryIndices.count, discardedBytes)
+    }
+
     mutating func removeAll(kind: UInt32) {
         let retained = entries.compactMap { $0 }.filter { $0.kind != kind }
+        replaceEntries(with: retained)
+        if kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO) {
+            observedVideoPacketCount = 0
+            observedVideoKeyframeCount = 0
+            maximumObservedVideoDecodeLag = 0
+            firstObservedVideoDecodeTime = nil
+            latestObservedVideoDecodeTime = nil
+        }
+    }
+
+    private mutating func replaceEntries(with retained: [Entry]) {
         entries.removeAll(keepingCapacity: true)
         timelineIndex.removeAll(keepingCapacity: true)
         for entry in retained {
@@ -258,13 +343,6 @@ struct BunnyNativePacketReservoir {
         }
         subtitlePacketCount = retained.reduce(into: 0) {
             if $1.kind == UInt32(STREMIO_MEDIA_TRACK_SUBTITLE) { $0 += 1 }
-        }
-        if kind == UInt32(STREMIO_MEDIA_TRACK_VIDEO) {
-            observedVideoPacketCount = 0
-            observedVideoKeyframeCount = 0
-            maximumObservedVideoDecodeLag = 0
-            firstObservedVideoDecodeTime = nil
-            latestObservedVideoDecodeTime = nil
         }
     }
 

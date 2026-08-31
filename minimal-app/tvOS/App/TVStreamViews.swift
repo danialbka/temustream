@@ -142,8 +142,10 @@ struct TVEpisodeStreamsView: View {
                 .lineLimit(4)
             }
             if let progress = model.episodeProgress(episode, in: series) {
+              let minutes = PlaybackTimeFormatter.wholeSeconds(progress.position)
+                .map { $0 / 60 } ?? 0
               Label(
-                "Resume from \(Int(progress.position) / 60)m",
+                "Resume from \(minutes)m",
                 systemImage: "play.circle"
               )
               .font(.headline)

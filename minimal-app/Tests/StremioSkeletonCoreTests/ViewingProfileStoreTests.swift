@@ -199,6 +199,90 @@ final class ViewingProfileStoreTests: XCTestCase {
         XCTAssertFalse(reloaded.activeProfileAllowsAccountLibrarySync)
     }
 
+    func testPreparedActivationDoesNotPersistUntilCommitted() async throws {
+        let directory = temporaryDirectory()
+        let store = ViewingProfileStore(rootDirectory: directory)
+        let initial = try await store.bootstrap(now: date(1))
+        let created = try await store.create(
+            name: "Guest",
+            avatar: .star,
+            now: date(2)
+        )
+        let guestID = try XCTUnwrap(
+            created.profiles.first(where: { $0.name == "Guest" })?.id
+        )
+
+        let plan = try await store.prepareActivation(id: guestID, now: date(3))
+        let beforeCommit = try await ViewingProfileStore(
+            rootDirectory: directory
+        ).snapshot()
+
+        XCTAssertEqual(plan.snapshot.activeProfileID, guestID)
+        XCTAssertEqual(beforeCommit.activeProfileID, initial.activeProfileID)
+
+        _ = try await store.commit(plan)
+        let afterCommit = try await ViewingProfileStore(
+            rootDirectory: directory
+        ).snapshot()
+        XCTAssertEqual(afterCommit.activeProfileID, guestID)
+    }
+
+    func testPreparedCreateAndActivateIsInvisibleUntilCommitted() async throws {
+        let directory = temporaryDirectory()
+        let store = ViewingProfileStore(rootDirectory: directory)
+        let initial = try await store.bootstrap(now: date(1))
+
+        let plan = try await store.prepareCreateAndActivate(
+            name: "Guest",
+            avatar: .moon,
+            now: date(2)
+        )
+        let beforeCommit = try await ViewingProfileStore(
+            rootDirectory: directory
+        ).snapshot()
+
+        XCTAssertEqual(beforeCommit.profiles.count, 1)
+        XCTAssertEqual(beforeCommit.activeProfileID, initial.activeProfileID)
+        XCTAssertEqual(plan.snapshot.activeProfile?.name, "Guest")
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: plan.activeProfileDataDirectoryURL.path
+            )
+        )
+
+        let committed = try await store.commit(plan)
+        XCTAssertEqual(committed.snapshot.profiles.count, 2)
+        XCTAssertEqual(committed.snapshot.activeProfile?.name, "Guest")
+    }
+
+    func testInterveningWriteInvalidatesPreparedMutation() async throws {
+        let directory = temporaryDirectory()
+        let store = ViewingProfileStore(rootDirectory: directory)
+        let initial = try await store.bootstrap(now: date(1))
+        let plan = try await store.prepareCreateAndActivate(
+            name: "Guest",
+            avatar: .moon,
+            now: date(2)
+        )
+
+        _ = try await store.update(
+            id: initial.activeProfileID,
+            name: "Owner",
+            avatar: .bunny,
+            now: date(3)
+        )
+
+        do {
+            _ = try await store.commit(plan)
+            XCTFail("Expected the stale mutation guard")
+        } catch {
+            XCTAssertEqual(
+                error as? ViewingProfileStoreError,
+                .staleMutationPlan
+            )
+        }
+    }
+
     func testArchiveIsRecoverableAndCannotArchiveLastProfile() async throws {
         let store = ViewingProfileStore(rootDirectory: temporaryDirectory())
         let initial = try await store.bootstrap(now: date(1))
@@ -233,6 +317,144 @@ final class ViewingProfileStoreTests: XCTestCase {
         XCTAssertTrue(restored.archivedProfiles.isEmpty)
         XCTAssertTrue(restored.profiles.contains(where: { $0.id == guestID }))
         XCTAssertEqual(try Data(contentsOf: retainedData), Data("keep me".utf8))
+    }
+
+    func testRestoreRejectsReusedActiveNameWithoutChangingArchiveOrData() async throws {
+        let store = ViewingProfileStore(rootDirectory: temporaryDirectory())
+        _ = try await store.bootstrap(defaultName: "Owner", now: date(1))
+        let first = try await store.create(
+            name: "Kids",
+            avatar: .moon,
+            now: date(2)
+        )
+        let archivedID = try XCTUnwrap(
+            first.profiles.first(where: { $0.name == "Kids" })?.id
+        )
+        let directory = try await store.dataDirectoryURL(for: archivedID)
+        let retainedData = directory.appendingPathComponent("sentinel.txt")
+        try Data("keep archived data".utf8).write(to: retainedData)
+        _ = try await store.archive(id: archivedID, now: date(3))
+        _ = try await store.create(name: "kids", avatar: .star, now: date(4))
+
+        do {
+            _ = try await store.restore(id: archivedID, now: date(5))
+            XCTFail("Expected restore to preserve active-name uniqueness")
+        } catch {
+            XCTAssertEqual(error as? ViewingProfileStoreError, .duplicateName)
+        }
+
+        let reloaded = try await store.bootstrap(now: date(6))
+        XCTAssertEqual(
+            reloaded.profiles.filter {
+                $0.name.caseInsensitiveCompare("Kids") == .orderedSame
+            }.count,
+            1
+        )
+        XCTAssertEqual(reloaded.archivedProfiles.map(\.id), [archivedID])
+        XCTAssertEqual(
+            try Data(contentsOf: retainedData),
+            Data("keep archived data".utf8)
+        )
+    }
+
+    func testUpgradeRearchivesOlderDuplicateNameAndPreservesBothProfileDirectories() async throws {
+        let directory = temporaryDirectory()
+        let manifestURL = directory.appendingPathComponent("viewing-profiles.json")
+        let ownerID = try XCTUnwrap(
+            UUID(uuidString: "11111111-1111-1111-1111-111111111111")
+        )
+        let olderKidsID = try XCTUnwrap(
+            UUID(uuidString: "22222222-2222-2222-2222-222222222222")
+        )
+        let newerKidsID = try XCTUnwrap(
+            UUID(uuidString: "33333333-3333-3333-3333-333333333333")
+        )
+        let preFixManifest = """
+        {
+          "activeProfileID" : "\(ownerID.uuidString)",
+          "legacyMigrationVersion" : 1,
+          "primaryProfileID" : "\(ownerID.uuidString)",
+          "profiles" : [
+            {
+              "avatar" : "bunny",
+              "createdAt" : "1970-01-01T00:00:01Z",
+              "id" : "\(ownerID.uuidString)",
+              "name" : "Owner",
+              "updatedAt" : "1970-01-01T00:00:01Z"
+            },
+            {
+              "avatar" : "moon",
+              "createdAt" : "1970-01-01T00:00:02Z",
+              "id" : "\(olderKidsID.uuidString)",
+              "name" : " Kids ",
+              "updatedAt" : "1970-01-01T00:00:05Z"
+            },
+            {
+              "avatar" : "star",
+              "createdAt" : "1970-01-01T00:00:04Z",
+              "id" : "\(newerKidsID.uuidString)",
+              "name" : "kids",
+              "updatedAt" : "1970-01-01T00:00:04Z"
+            }
+          ],
+          "schemaVersion" : 1
+        }
+        """
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try Data(preFixManifest.utf8).write(to: manifestURL)
+        let profilesDirectory = directory.appendingPathComponent(
+            ViewingProfileStore.profilesDirectoryName,
+            isDirectory: true
+        )
+        for (id, value) in [(olderKidsID, "older data"), (newerKidsID, "newer data")] {
+            let profileDirectory = profilesDirectory.appendingPathComponent(
+                id.uuidString.lowercased(),
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: profileDirectory,
+                withIntermediateDirectories: true
+            )
+            try Data(value.utf8).write(
+                to: profileDirectory.appendingPathComponent("sentinel.txt")
+            )
+        }
+
+        let repaired = try await ViewingProfileStore(
+            rootDirectory: directory
+        ).snapshot(now: date(10))
+        let reloaded = try await ViewingProfileStore(
+            rootDirectory: directory
+        ).snapshot(now: date(11))
+
+        XCTAssertEqual(repaired, reloaded)
+        XCTAssertEqual(repaired.activeProfileID, ownerID)
+        XCTAssertEqual(repaired.profiles.map(\.id).sorted { $0.uuidString < $1.uuidString }, [
+            ownerID,
+            newerKidsID,
+        ])
+        XCTAssertEqual(repaired.archivedProfiles.map(\.id), [olderKidsID])
+        XCTAssertEqual(repaired.archivedProfiles.first?.archivedAt, date(10))
+        XCTAssertEqual(
+            try Data(contentsOf: profilesDirectory
+                .appendingPathComponent(olderKidsID.uuidString.lowercased())
+                .appendingPathComponent("sentinel.txt")),
+            Data("older data".utf8)
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: profilesDirectory
+                .appendingPathComponent(newerKidsID.uuidString.lowercased())
+                .appendingPathComponent("sentinel.txt")),
+            Data("newer data".utf8)
+        )
+        let recoveryFiles = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("viewing-profiles.corrupt-") }
+        XCTAssertTrue(recoveryFiles.isEmpty)
     }
 
     func testNamesAreNormalizedAndValidated() async throws {
@@ -273,6 +495,40 @@ final class ViewingProfileStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.activeProfile?.name, "Recovered")
         XCTAssertEqual(recoveryFiles.count, 1)
         XCTAssertEqual(try Data(contentsOf: recoveryFiles[0]), corrupt)
+    }
+
+    func testDataDirectoryFailureDoesNotMisclassifyValidManifestAsCorrupt() async throws {
+        let directory = temporaryDirectory()
+        let original = try await ViewingProfileStore(
+            rootDirectory: directory
+        ).bootstrap(defaultName: "Original", now: date(1))
+        let manifestURL = directory.appendingPathComponent("viewing-profiles.json")
+        let originalManifest = try Data(contentsOf: manifestURL)
+        let profilePath = directory
+            .appendingPathComponent("viewing-profiles", isDirectory: true)
+            .appendingPathComponent(original.activeProfileID.uuidString.lowercased())
+
+        try FileManager.default.removeItem(at: profilePath)
+        try Data("directory obstruction".utf8).write(to: profilePath)
+
+        do {
+            _ = try await ViewingProfileStore(rootDirectory: directory).bootstrap()
+            XCTFail("Expected profile data-directory provisioning to fail")
+        } catch {
+            XCTAssertEqual(try Data(contentsOf: manifestURL), originalManifest)
+            let recoveryFiles = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil
+            ).filter { $0.lastPathComponent.hasPrefix("viewing-profiles.corrupt-") }
+            XCTAssertTrue(recoveryFiles.isEmpty)
+        }
+
+        try FileManager.default.removeItem(at: profilePath)
+        let reloaded = try await ViewingProfileStore(
+            rootDirectory: directory
+        ).bootstrap()
+        XCTAssertEqual(reloaded.activeProfileID, original.activeProfileID)
+        XCTAssertEqual(reloaded.activeProfile?.name, "Original")
     }
 
     func testInvalidLegacyFilenameDoesNotMarkMigrationComplete() async throws {

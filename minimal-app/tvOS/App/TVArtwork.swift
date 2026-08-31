@@ -1,9 +1,18 @@
 import SwiftUI
+import UIKit
+
+private enum TVArtworkLoadPhase {
+  case empty
+  case success(UIImage)
+  case failure
+}
 
 struct TVRemoteImage: View {
   let url: URL?
   let contentMode: ContentMode
   let systemImage: String
+
+  @State private var phase: TVArtworkLoadPhase = .empty
 
   init(
     url: URL?,
@@ -16,10 +25,10 @@ struct TVRemoteImage: View {
   }
 
   var body: some View {
-    AsyncImage(url: url, transaction: Transaction(animation: .easeOut(duration: 0.2))) { phase in
+    Group {
       switch phase {
       case .success(let image):
-        image
+        Image(uiImage: image)
           .resizable()
           .aspectRatio(contentMode: contentMode)
       case .empty:
@@ -30,8 +39,25 @@ struct TVRemoteImage: View {
         }
       case .failure:
         placeholder
-      @unknown default:
-        placeholder
+      }
+    }
+    .task(id: url) {
+      phase = .empty
+      guard let url,
+            let data = await ArtworkDataCache.shared.data(
+              for: url,
+              limits: .television
+            ),
+            !Task.isCancelled,
+            let image = UIImage(data: data)
+      else {
+        if !Task.isCancelled {
+          phase = .failure
+        }
+        return
+      }
+      withAnimation(.easeOut(duration: 0.2)) {
+        phase = .success(image)
       }
     }
   }
@@ -129,7 +155,7 @@ struct TVMediaLink: View {
   }
 
   private func resumeLabel(_ progress: PlaybackProgress) -> String {
-    let minutes = Int(progress.position) / 60
+    let minutes = PlaybackTimeFormatter.wholeSeconds(progress.position).map { $0 / 60 } ?? 0
     return "Resume from \(minutes)m"
   }
 }

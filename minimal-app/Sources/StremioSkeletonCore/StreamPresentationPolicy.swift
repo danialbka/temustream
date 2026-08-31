@@ -126,10 +126,13 @@ enum StreamPresentationPolicy {
         default: 1_048_576
         }
         let bytes = number * multiplier
-        guard bytes.isFinite, bytes > 0, bytes <= Double(Int64.max) else { return nil }
+        guard bytes.isFinite,
+              bytes > 0,
+              let roundedBytes = Int64(exactly: bytes.rounded())
+        else { return nil }
         return (
             String(text[fullRange]).trimmingCharacters(in: .whitespacesAndNewlines),
-            Int64(bytes.rounded())
+            roundedBytes
         )
     }
 

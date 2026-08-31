@@ -1,3 +1,4 @@
+import Darwin
 import SwiftUI
 
 @main
@@ -24,7 +25,9 @@ struct StremioSkeletonApp: App {
     @ViewBuilder
     private var platformAppContent: some View {
         #if targetEnvironment(simulator)
-        if recommendationPaginationFixtureRequested {
+        if geometryErrorReporterFixtureRequested {
+            SimulatorGeometryErrorReporterFixture()
+        } else if recommendationPaginationFixtureRequested {
             NavigationStack { HomeView() }
                 .environmentObject(model)
                 .task { model.prepareRecommendationPaginationFixture() }
@@ -57,6 +60,27 @@ struct StremioSkeletonApp: App {
             }
         } else if let fixture = mpegTransportBridgeFixture {
             SimulatorMPEGTransportBridgeFixtureScreen(fixture: fixture)
+        } else if let providerRefreshFixtureURL {
+            NavigationStack {
+                ResolvingPlayerScreen(
+                    candidate: StreamPlaybackCandidate(
+                        stream: Stream(
+                            url: providerRefreshFixtureURL,
+                            externalUrl: nil,
+                            name: "TorBox refresh fixture",
+                            title: "Short-lived provider URL",
+                            description: nil,
+                            infoHash: nil,
+                            fileIdx: nil,
+                            sources: nil
+                        ),
+                        providerName: "TorBox",
+                        contentIdentifier: "movie:provider-refresh-fixture",
+                        contentTitle: "Provider refresh fixture"
+                    )
+                )
+            }
+            .environmentObject(model)
         } else if let playerFixturePlan {
             if playerFixtureManualStart {
                 SimulatorPlayerFixtureScreen(
@@ -112,7 +136,23 @@ struct StremioSkeletonApp: App {
         #endif
     }
 
+    private var providerRefreshFixtureURL: URL? {
+        #if targetEnvironment(simulator)
+        ProcessInfo.processInfo.environment[
+            "SKELETON_PROVIDER_REFRESH_FIXTURE_URL"
+        ].flatMap(URL.init(string:))
+        #else
+        nil
+        #endif
+    }
+
     #if targetEnvironment(simulator)
+    private var geometryErrorReporterFixtureRequested: Bool {
+        ProcessInfo.processInfo.environment[
+            "SKELETON_GEOMETRY_ERROR_REPORTER_FIXTURE"
+        ] == "1"
+    }
+
     private var recommendationPaginationFixtureRequested: Bool {
         ProcessInfo.processInfo.environment[
             "SKELETON_RECOMMENDATION_PAGING_FIXTURE"
@@ -225,6 +265,31 @@ struct StremioSkeletonApp: App {
 }
 
 #if targetEnvironment(simulator)
+private struct SimulatorGeometryErrorReporterFixture: View {
+    @State private var completedOffMain = false
+
+    var body: some View {
+        Text(completedOffMain ? "Geometry reporter returned" : "Testing geometry reporter")
+            .accessibilityIdentifier(
+                completedOffMain
+                    ? "geometry-error-reporter-background-complete"
+                    : "geometry-error-reporter-pending"
+            )
+            .task {
+                completedOffMain = await Task.detached(priority: .userInitiated) {
+                    let isOffMain = pthread_main_np() == 0
+                    GeometryUpdateErrorReporter.report(
+                        NSError(
+                            domain: "BunnyGeometryReporterFixture",
+                            code: 1
+                        )
+                    )
+                    return isOffMain
+                }.value
+            }
+    }
+}
+
 private struct SimulatorMPEGTransportBridgeFixture: Sendable {
     let upstreamURL: URL
     let contentLength: Int64
@@ -408,19 +473,16 @@ private struct SimulatorPlayerFixtureScreen: View {
     @State private var playbackStarted = false
 
     var body: some View {
-        Group {
-            if playbackStarted {
-                NavigationStack {
-                    PlayerScreen(
-                        plan: plan,
-                        title: title,
-                        initialPosition: initialPosition
-                    )
-                }
-            } else {
-                fixtureStartSurface(isReady: true) {
-                    playbackStarted = true
-                }
+        NavigationStack {
+            fixtureStartSurface(isReady: true) {
+                playbackStarted = true
+            }
+            .navigationDestination(isPresented: $playbackStarted) {
+                PlayerScreen(
+                    plan: plan,
+                    title: title,
+                    initialPosition: initialPosition
+                )
             }
         }
     }

@@ -544,8 +544,20 @@ final class PlayerOrientationHandoff: ObservableObject {
     }
 }
 
+/// Geometry request failures are not guaranteed to arrive on the main queue.
+/// Keep the exact callback passed to UIKit outside MainActor isolation so a
+/// rejected rotation cannot trigger Swift's executor precondition.
+enum GeometryUpdateErrorReporter {
+    nonisolated static func report(_ error: Error) {
+        NSLog(
+            "Player orientation geometry update failed: %@",
+            error.localizedDescription
+        )
+    }
+}
+
 @MainActor
-private enum PlayerPresentation {
+enum PlayerPresentation {
     static func prepareAudioSession() {
         PlaybackAudioSession.beginPlayback()
     }
@@ -563,9 +575,27 @@ private enum PlayerPresentation {
 
         AppOrientationDelegate.supportedOrientations = target
         scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: target)) { error in
-            NSLog("Player orientation update failed: %@", error.localizedDescription)
+        scene.requestGeometryUpdate(
+            .iOS(interfaceOrientations: target),
+            errorHandler: GeometryUpdateErrorReporter.report
+        )
+    }
+
+    /// Idempotent entry point used when an automatically presented player must
+    /// enter landscape without toggling an already-landscape scene back.
+    static func ensureLandscape() {
+        guard let scene = foregroundScene else { return }
+        let target = UIInterfaceOrientationMask.landscape
+        AppOrientationDelegate.supportedOrientations = target
+        scene.keyWindow?.rootViewController?
+            .setNeedsUpdateOfSupportedInterfaceOrientations()
+        guard !scene.effectiveGeometry.interfaceOrientation.isLandscape else {
+            return
         }
+        scene.requestGeometryUpdate(
+            .iOS(interfaceOrientations: target),
+            errorHandler: GeometryUpdateErrorReporter.report
+        )
     }
 
     /// Player engines can be replaced without leaving PlayerScreen. Match the
@@ -608,9 +638,10 @@ private enum PlayerPresentation {
             ? current.isPortrait
             : current.isLandscape
         if !alreadyMatches {
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientationMask)) { error in
-                NSLog("Player orientation preservation failed: %@", error.localizedDescription)
-            }
+            scene.requestGeometryUpdate(
+                .iOS(interfaceOrientations: orientationMask),
+                errorHandler: GeometryUpdateErrorReporter.report
+            )
         }
         NSLog(
             "PLAYER_LAYOUT preserved orientation=%@",
@@ -624,9 +655,10 @@ private enum PlayerPresentation {
         guard let scene = foregroundScene else { return }
         scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         guard scene.effectiveGeometry.interfaceOrientation.isLandscape else { return }
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { error in
-            NSLog("Player portrait restore failed: %@", error.localizedDescription)
-        }
+        scene.requestGeometryUpdate(
+            .iOS(interfaceOrientations: .portrait),
+            errorHandler: GeometryUpdateErrorReporter.report
+        )
     }
 
     private static var foregroundScene: UIWindowScene? {
@@ -2069,6 +2101,8 @@ struct ResolvingPlayerScreen: View {
     @State private var resolutionRequestID: UUID?
     @State private var performanceTraceID: PerformanceTraceID?
     @State private var didRecordCandidateSuccess = false
+    @State private var sourceResolutionRevision = 0
+    @State private var consecutiveProviderRefreshAttempts = 0
 
     private struct PendingStreamFailover: Identifiable, Equatable {
         let id = UUID()
@@ -2192,7 +2226,7 @@ struct ResolvingPlayerScreen: View {
         .toolbar(.hidden, for: .tabBar)
         .animation(.easeOut(duration: 0.18), value: pendingFailover)
         .animation(.easeOut(duration: 0.22), value: pendingEpisodeAutoplay?.id)
-        .task(id: activeCandidateIndex) {
+        .task(id: "\(activeCandidateIndex)-\(sourceResolutionRevision)") {
             await resolveActiveSource()
         }
         .task(id: pendingFailover?.id) {
@@ -2305,9 +2339,9 @@ struct ResolvingPlayerScreen: View {
     @ViewBuilder
     private func nextEpisodeThumbnail(_ episode: Video) -> some View {
         if let thumbnail = episode.thumbnail {
-            AsyncImage(url: thumbnail, transaction: Transaction(animation: nil)) { phase in
+            BoundedArtworkImage(url: thumbnail) { phase in
                 if case let .success(image) = phase {
-                    image.resizable().scaledToFill()
+                    Image(uiImage: image).resizable().scaledToFill()
                 } else {
                     episodeThumbnailPlaceholder
                 }
@@ -2483,6 +2517,7 @@ struct ResolvingPlayerScreen: View {
         else { return }
         guard !didRecordCandidateSuccess else { return }
         didRecordCandidateSuccess = true
+        consecutiveProviderRefreshAttempts = 0
         if let traceID,
            let elapsed = PerformanceMilestoneRecorder.shared.mark(
                .firstVisibleFrame,
@@ -2513,8 +2548,27 @@ struct ResolvingPlayerScreen: View {
         guard let requestID,
               resolutionRequestID == requestID,
               activeCandidate.id == candidateID,
-              playbackPlan != nil
+              let playbackPlan
         else { return }
+        if ProviderPlaybackRefreshPolicy.shouldRefresh(
+            requiresFreshProviderResolution: playbackPlan
+                .requiresFreshProviderResolutionOnFailure,
+            consecutiveAttempts: consecutiveProviderRefreshAttempts
+        ) {
+            consecutiveProviderRefreshAttempts += 1
+            resolutionRequestID = nil
+            self.playbackPlan = nil
+            sourceResolutionRevision += 1
+            NSLog(
+                "STREAM_PLAYBACK provider_url_refresh attempt=%ld source=%ld/%ld resume=%.1f error=%@",
+                consecutiveProviderRefreshAttempts,
+                activeCandidateIndex + 1,
+                candidates.count,
+                resumePosition,
+                playbackError.localizedDescription
+            )
+            return
+        }
         beginSourceFailover(playbackError)
     }
 
@@ -2823,6 +2877,7 @@ struct ResolvingPlayerScreen: View {
     private func completeSourceFailover(_ pending: PendingStreamFailover) {
         guard pendingFailover?.id == pending.id else { return }
         activeCandidateIndex = pending.nextIndex
+        consecutiveProviderRefreshAttempts = 0
         playbackPlan = nil
         error = nil
         pendingFailover = nil

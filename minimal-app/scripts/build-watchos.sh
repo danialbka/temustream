@@ -27,11 +27,21 @@ typecheck() {
     Sources/StremioSkeletonCore/IntroSkipPolicy.swift \
     Sources/StremioSkeletonCore/AddonEndpoint.swift \
     Sources/StremioSkeletonCore/AddonClient.swift \
+    Sources/StremioSkeletonCore/AppPresentationPolicies.swift \
+    Sources/StremioSkeletonCore/ArtworkLoading.swift \
+    Sources/StremioSkeletonCore/HTTPRequestBodyLoader.swift \
     Sources/StremioSkeletonCore/TorrentStreamingClient.swift \
     Sources/StremioSkeletonCore/StremioAccountClient.swift \
+    Sources/StremioSkeletonCore/AccountStorageScope.swift \
+    Sources/StremioSkeletonCore/StremioAddonSyncCoordinator.swift \
+    Sources/StremioSkeletonCore/AsyncSerialGate.swift \
+    Sources/StremioSkeletonCore/LatestOperationOwner.swift \
+    Sources/StremioSkeletonCore/SecureStoreWritePolicy.swift \
     Sources/StremioSkeletonCore/LibraryStore.swift \
+    Sources/StremioSkeletonCore/LibraryMutationCoordinator.swift \
     Sources/StremioSkeletonCore/PlaybackProgressStore.swift \
     Sources/StremioSkeletonCore/PlaybackCompletionStore.swift \
+    Sources/StremioSkeletonCore/PlaybackTransitionStore.swift \
     Sources/StremioSkeletonCore/ViewingProfiles.swift \
     Sources/StremioSkeletonCore/DiscoveryPresentation.swift \
     Sources/StremioSkeletonCore/CatalogPaging.swift \

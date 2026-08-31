@@ -227,10 +227,11 @@ public actor MediaRatingStore {
             cache = []
             return []
         }
+        let data = try Data(contentsOf: fileURL)
         do {
             let decoded = try decoder.decode(
                 [MediaRating].self,
-                from: Data(contentsOf: fileURL)
+                from: data
             )
             let current = Self.latestRatings(from: decoded)
             cache = current
@@ -341,10 +342,11 @@ public actor RecommendationHistoryStore {
             cache = []
             return []
         }
+        let data = try Data(contentsOf: fileURL)
         do {
             let decoded = try decoder.decode(
                 [RecommendationImpression].self,
-                from: Data(contentsOf: fileURL)
+                from: data
             )
             let current = Self.mergedImpressions(decoded)
             cache = current
@@ -679,7 +681,7 @@ public enum LocalRecommendationEngine {
     }
 }
 
-private enum LocalPreferenceRecovery {
+enum LocalPreferenceRecovery {
     static func persist<Value: Encodable>(
         _ value: Value,
         to fileURL: URL,

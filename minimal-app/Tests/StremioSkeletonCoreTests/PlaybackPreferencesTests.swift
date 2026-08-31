@@ -78,6 +78,42 @@ final class PlaybackPreferencesTests: XCTestCase {
         XCTAssertNil(StreamFailoverPolicy.nextSourceIndex(after: -1, sourceCount: 3))
     }
 
+    func testProviderRefreshPolicyRenewsShortLivedURLBeforeFailover() {
+        XCTAssertTrue(
+            ProviderPlaybackRefreshPolicy.shouldRefresh(
+                requiresFreshProviderResolution: true,
+                consecutiveAttempts: 0
+            )
+        )
+        XCTAssertTrue(
+            ProviderPlaybackRefreshPolicy.shouldRefresh(
+                requiresFreshProviderResolution: true,
+                consecutiveAttempts: 1
+            )
+        )
+        XCTAssertFalse(
+            ProviderPlaybackRefreshPolicy.shouldRefresh(
+                requiresFreshProviderResolution: true,
+                consecutiveAttempts: 2
+            )
+        )
+    }
+
+    func testProviderRefreshPolicyDoesNotReplayStableSourceResolution() {
+        XCTAssertFalse(
+            ProviderPlaybackRefreshPolicy.shouldRefresh(
+                requiresFreshProviderResolution: false,
+                consecutiveAttempts: 0
+            )
+        )
+        XCTAssertFalse(
+            ProviderPlaybackRefreshPolicy.shouldRefresh(
+                requiresFreshProviderResolution: true,
+                consecutiveAttempts: -1
+            )
+        )
+    }
+
     func testRemoteCustomPlaybackDoesNotExpireAtOldTwentySecondOpeningLimit() {
         XCTAssertNil(
             CustomPlaybackStartupPolicy.expiredTimeout(

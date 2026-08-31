@@ -210,6 +210,7 @@ public enum StremioAccountError: LocalizedError, Equatable {
     case invalidResponse
     case httpStatus(Int)
     case api(String)
+    case updateRejected
     case decoding(method: String, path: String, reason: String)
 
     public var errorDescription: String? {
@@ -218,6 +219,7 @@ public enum StremioAccountError: LocalizedError, Equatable {
         case .invalidResponse: "Stremio returned an invalid account response."
         case let .httpStatus(status): "Stremio returned HTTP \(status)."
         case let .api(message): message
+        case .updateRejected: "Stremio rejected the account update."
         case let .decoding(method, path, reason):
             "Stremio \(method) returned incompatible data at \(path): \(reason)."
         }
@@ -225,6 +227,20 @@ public enum StremioAccountError: LocalizedError, Equatable {
 }
 
 public struct StremioAccountClient: Sendable {
+    private enum ResponseLimit {
+        static let ordinary = 2 * 1024 * 1024
+        static let addons = 8 * 1024 * 1024
+        static let library = 32 * 1024 * 1024
+
+        static func bytes(for method: String) -> Int {
+            switch method {
+            case "datastoreGet": library
+            case "addonCollectionGet": addons
+            default: ordinary
+            }
+        }
+    }
+
     public let endpoint: URL
     private let loader: any HTTPRequestLoading
     private let encoder = JSONEncoder()
@@ -250,7 +266,7 @@ public struct StremioAccountClient: Sendable {
     }
 
     public func pullLibrary(authKey: String) async throws -> [RemoteLibraryItem] {
-        let response = try await post(
+        try await post(
             "datastoreGet",
             body: DatastoreGetRequest(
                 authKey: authKey,
@@ -258,16 +274,12 @@ public struct StremioAccountClient: Sendable {
                 ids: [],
                 all: true
             ),
-            as: LossyArray<RemoteLibraryItem>.self
+            as: [RemoteLibraryItem].self
         )
-        if response.skippedCount > 0 {
-            NSLog("[StremioAccount] datastoreGet skipped %d malformed library item(s)", response.skippedCount)
-        }
-        return response.elements
     }
 
     public func pushLibrary(authKey: String, changes: [RemoteLibraryItem]) async throws {
-        _ = try await post(
+        let acknowledgement = try await post(
             "datastorePut",
             body: DatastorePutRequest(
                 authKey: authKey,
@@ -276,6 +288,9 @@ public struct StremioAccountClient: Sendable {
             ),
             as: SuccessResult.self
         )
+        guard acknowledgement.success else {
+            throw StremioAccountError.updateRejected
+        }
     }
 
     public func pullAddons(authKey: String) async throws -> [SyncedAddon] {
@@ -287,11 +302,14 @@ public struct StremioAccountClient: Sendable {
     }
 
     public func pushAddons(authKey: String, addons: [SyncedAddon]) async throws {
-        _ = try await post(
+        let acknowledgement = try await post(
             "addonCollectionSet",
             body: AddonSetRequest(authKey: authKey, addons: addons),
             as: SuccessResult.self
         )
+        guard acknowledgement.success else {
+            throw StremioAccountError.updateRejected
+        }
     }
 
     private func post<Body: Encodable, Value: Decodable>(
@@ -304,7 +322,12 @@ public struct StremioAccountClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(body)
-        let (data, response) = try await loader.data(for: request)
+        let (data, response) = try await HTTPRequestBodyLoader.load(
+            using: loader,
+            request: request,
+            maximumBytes: ResponseLimit.bytes(for: method),
+            redirectPolicy: .reject
+        )
         guard let http = response as? HTTPURLResponse else {
             throw StremioAccountError.invalidResponse
         }
@@ -351,65 +374,6 @@ public struct StremioAccountClient: Sendable {
             ? "result"
             : codingPath.map(\.stringValue).joined(separator: ".")
         return (path, reason)
-    }
-}
-
-private struct LossyArray<Element: Decodable>: Decodable {
-    let elements: [Element]
-    let skippedCount: Int
-
-    init(from decoder: Decoder) throws {
-        var container = try decoder.unkeyedContainer()
-        var decoded: [Element] = []
-        var skipped = 0
-        while !container.isAtEnd {
-            do {
-                decoded.append(try container.decode(Element.self))
-            } catch {
-                _ = try container.decode(DiscardedValue.self)
-                skipped += 1
-            }
-        }
-        elements = decoded
-        skippedCount = skipped
-    }
-}
-
-private struct DiscardedValue: Decodable {
-    init(from decoder: Decoder) throws {
-        if var array = try? decoder.unkeyedContainer() {
-            while !array.isAtEnd {
-                _ = try array.decode(DiscardedValue.self)
-            }
-            return
-        }
-        if let object = try? decoder.container(keyedBy: AnyCodingKey.self) {
-            for key in object.allKeys {
-                _ = try object.decode(DiscardedValue.self, forKey: key)
-            }
-            return
-        }
-        let value = try decoder.singleValueContainer()
-        if value.decodeNil() { return }
-        if (try? value.decode(Bool.self)) != nil { return }
-        if (try? value.decode(Double.self)) != nil { return }
-        if (try? value.decode(String.self)) != nil { return }
-        throw DecodingError.dataCorruptedError(in: value, debugDescription: "Unsupported JSON value")
-    }
-}
-
-private struct AnyCodingKey: CodingKey {
-    let stringValue: String
-    let intValue: Int?
-
-    init?(stringValue: String) {
-        self.stringValue = stringValue
-        intValue = nil
-    }
-
-    init?(intValue: Int) {
-        stringValue = String(intValue)
-        self.intValue = intValue
     }
 }
 

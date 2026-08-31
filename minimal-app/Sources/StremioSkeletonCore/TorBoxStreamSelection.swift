@@ -47,8 +47,11 @@ enum TorBoxStreamSelection {
         default: 0
         }
         let bytes = number * pow(base, Double(exponent))
-        guard bytes.isFinite, bytes > 0, bytes <= Double(Int64.max) else { return nil }
-        return Int64(bytes.rounded())
+        guard bytes.isFinite,
+              bytes > 0,
+              let roundedBytes = Int64(exactly: bytes.rounded())
+        else { return nil }
+        return roundedBytes
     }
 
     static func shouldRepair(

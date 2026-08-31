@@ -15,6 +15,7 @@ struct BunnyPlayerScreen: View {
     private let onProgress: PlaybackProgressHandler?
     private let onPlaybackReady: PlaybackReadyHandler?
     private let onExhausted: (@MainActor (Error) -> Void)?
+    private let requiresFreshProviderResolutionOnFailure: Bool
     private let watchChannel: WatchPlaybackControlChannel?
     private let onControlsVisibilityChanged: PlaybackControlsVisibilityHandler?
     @StateObject private var model: BunnyPlaybackModel
@@ -47,6 +48,8 @@ struct BunnyPlayerScreen: View {
         self.watchChannel = watchChannel
         self.onControlsVisibilityChanged = onControlsVisibilityChanged
         self.onExhausted = onExhausted
+        requiresFreshProviderResolutionOnFailure =
+            plan.requiresFreshProviderResolutionOnFailure
         _model = StateObject(
             wrappedValue: BunnyPlaybackModel(
                 plan: plan,
@@ -104,7 +107,7 @@ struct BunnyPlayerScreen: View {
                         viewportMode: $viewportMode,
                         trackPickerPresented: $trackPickerPresented,
                         close: { dismiss() },
-                        rotate: { BunnyPresentation.toggleOrientation() },
+                        rotate: { PlayerPresentation.toggleOrientation() },
                         onInteraction: { scheduleControlsAutoHide() },
                         onViewportChange: { mode in
                             viewportMode = mode
@@ -155,7 +158,7 @@ struct BunnyPlayerScreen: View {
             if startsLandscapeForVerification {
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(350))
-                    BunnyPresentation.ensureLandscape()
+                    PlayerPresentation.ensureLandscape()
                 }
             }
         }
@@ -232,7 +235,7 @@ struct BunnyPlayerScreen: View {
             #if targetEnvironment(simulator)
             PlaybackAudioSession.stopMicrophoneAuditIfNeeded()
             #endif
-            BunnyPresentation.endAudioSession()
+            PlayerPresentation.endAudioSession()
         }
     }
 
@@ -314,6 +317,16 @@ struct BunnyPlayerScreen: View {
                 "SKELETON_PLAYER_FIXTURE_PREPARE_DELAY_SECONDS"
             ], let requestedDelay = TimeInterval(rawDelay), requestedDelay > 0 {
                 try await Task.sleep(for: .seconds(min(requestedDelay, 30)))
+            }
+            if ProcessInfo.processInfo.environment[
+                "SKELETON_PLAYER_FIXTURE_WAIT_FOR_INITIAL_SEEK"
+            ] == "1" {
+                // Suspend in one-second slices so XCTest can attach while the
+                // initial resume is still authoritative. The user's relative
+                // seek releases this simulator-only gate immediately.
+                for _ in 0..<120 where !model.didAdjustPendingInitialResumeForFixture {
+                    try await Task.sleep(for: .seconds(1))
+                }
             }
             #endif
             try await model.prepare()
@@ -413,6 +426,7 @@ struct BunnyPlayerScreen: View {
     @MainActor
     private func scheduleRuntimeRecovery(after error: Error) -> Bool {
         if runtimeRecoveryScheduled { return true }
+        guard !requiresFreshProviderResolutionOnFailure else { return false }
         guard model.canRecoverFromRuntimeFailure,
               runtimeRecoveryCount < 2
         else { return false }
@@ -470,6 +484,19 @@ private enum BunnyDecoderEngine {
     }
 }
 
+private enum BunnyScheduledSubtitlePayload {
+    case text(lines: [String], cueID: UUID)
+    case bitmap(cue: BunnyNativeBitmapSubtitleCue, cueID: UUID)
+    case clear(expectedCueID: UUID?)
+}
+
+private struct BunnyScheduledSubtitleEvent {
+    let time: TimeInterval
+    let order: UInt64
+    let estimatedBytes: Int
+    let payload: BunnyScheduledSubtitlePayload
+}
+
 @MainActor
 private final class BunnyPlaybackModel: NSObject, ObservableObject {
     let player: AVPlayer
@@ -495,6 +522,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     @Published private(set) var pictureInPictureSupported = false
     @Published private(set) var debugSnapshot = BunnyDebugSnapshot.waiting
     @Published private(set) var usesCustomDecoder = false
+
+    #if targetEnvironment(simulator)
+    private(set) var didAdjustPendingInitialResumeForFixture = false
+    #endif
 
     private let plan: PlaybackPlan
     private let title: String
@@ -534,6 +565,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     private var customRecoveryAttempts = 0
     private var captionRevision = 0
     private var activeCustomSubtitleCueID: UUID?
+    private var pendingCustomSubtitleEvents: [BunnyScheduledSubtitleEvent] = []
+    private var pendingCustomSubtitleBytes = 0
+    private var customSubtitleEventOrder: UInt64 = 0
+    private var customSubtitleSchedulerTask: Task<Void, Never>?
     private var applicationIsActive = true
     private var applicationLifecycleRevision = 0
     private var resumeAfterCancelledScrub = false
@@ -542,6 +577,9 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     // adds a short A/V transition allowance while guaranteeing that UI state
     // cannot remain in `isSeeking` forever.
     private static let customSeekTimeout: TimeInterval = 35
+    private static let customSubtitleSchedulingHorizon: TimeInterval = 15
+    private static let maximumScheduledSubtitleEvents = 128
+    private static let maximumScheduledSubtitleBytes = 64 * 1_024 * 1_024
 
     init(
         plan: PlaybackPlan,
@@ -584,7 +622,13 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             ? duration
             : player.currentItem?.duration.seconds ?? duration
         guard position.isFinite, itemDuration.isFinite, itemDuration > 0 else { return nil }
-        return (max(position, 0), itemDuration)
+        return (
+            PlaybackContinuityPolicy.clampedTimelinePosition(
+                position,
+                duration: itemDuration
+            ),
+            itemDuration
+        )
     }
 
     var canRecoverFromRuntimeFailure: Bool {
@@ -601,7 +645,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
 
     func prepare() async throws {
         resetAttemptState()
-        BunnyPresentation.prepareAudioSession()
+        PlayerPresentation.prepareAudioSession()
 
         var lastError: Error = BunnyPlaybackError.noPlayableCandidate
         for candidate in candidateURLs {
@@ -970,6 +1014,7 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         }
         decoder.onEnded = { [weak self, weak decoder] in
             guard let self, let decoder, self.customDecoder === decoder else { return }
+            self.customProgressPin = nil
             self.customEnded = true
         }
         decoder.onFailure = { [weak self, weak decoder] error in
@@ -1361,6 +1406,9 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             // zero clock and accidentally replacing the saved resume point.
             resumePosition = target
             currentTime = target
+            #if targetEnvironment(simulator)
+            didAdjustPendingInitialResumeForFixture = true
+            #endif
             return true
         }
         return await performSeek(to: target, resume: wantsPlayback)
@@ -1685,6 +1733,14 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
     }
 
     func selectSubtitle(_ track: BunnyMediaOption?) {
+        guard PlaybackTrackSelectionPacketPolicy.shouldApplySubtitleOptionSelection(
+            currentOptionID: selectedSubtitleID,
+            requestedOptionID: track?.id
+        ) else { return }
+        if let track,
+           !subtitleOptions.contains(where: { $0.id == track.id }) {
+            return
+        }
         invalidateCustomSubtitles()
         if activeEngine == .customRust {
             customDecoder?.selectSubtitleStreamIndex(track?.customStreamIndex ?? -1)
@@ -1745,6 +1801,8 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         if duration > 0 {
             currentTime = duration
         }
+        debugSnapshot = makeDebugSnapshot()
+        NSLog("PLAYER_DEBUG terminal %@", debugSnapshot.logDescription)
     }
 
     func handleAudioInterruption(_ notification: Notification) {
@@ -1990,49 +2048,50 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             scheduleCustomSubtitleClear(at: start)
             return
         }
-        let revision = captionRevision
         let cueID = UUID()
         let end = start + max(subtitleDuration, 0.1)
-        Task { @MainActor [weak self] in
-            guard let self,
-                  await self.waitForCustomSubtitleTime(start, revision: revision)
-            else { return }
-            self.activeCustomSubtitleCueID = cueID
-            self.bitmapSubtitleCue = nil
-            self.captionLines = lines
-            guard await self.waitForCustomSubtitleTime(end, revision: revision),
-                  self.activeCustomSubtitleCueID == cueID
-            else { return }
-            self.activeCustomSubtitleCueID = nil
-            self.captionLines = []
+        let textBytes = lines.reduce(into: 0) {
+            $0 = min($0 + $1.utf8.count, Self.maximumScheduledSubtitleBytes)
         }
+        enqueueCustomSubtitleEvents([
+            makeCustomSubtitleEvent(
+                at: start,
+                estimatedBytes: textBytes,
+                payload: .text(lines: lines, cueID: cueID)
+            ),
+            makeCustomSubtitleEvent(
+                at: end,
+                estimatedBytes: 0,
+                payload: .clear(expectedCueID: cueID)
+            ),
+        ])
     }
 
     private func scheduleCustomBitmapSubtitle(
         _ cue: BunnyNativeBitmapSubtitleCue?,
         start: TimeInterval,
-        duration subtitleDuration: TimeInterval
+        duration subtitleDuration: TimeInterval?
     ) {
         guard let cue, !cue.parts.isEmpty, selectedSubtitleID != nil else {
             scheduleCustomSubtitleClear(at: start)
             return
         }
-        let revision = captionRevision
         let cueID = UUID()
-        let end = start + max(subtitleDuration, 0.1)
-        Task { @MainActor [weak self] in
-            guard let self,
-                  await self.waitForCustomSubtitleTime(start, revision: revision)
-            else { return }
-            self.activeCustomSubtitleCueID = cueID
-            self.captionLines = []
-            self.bitmapSubtitleCue = cue
-            guard await self.waitForCustomSubtitleTime(end, revision: revision),
-                  self.activeCustomSubtitleCueID == cueID
-            else { return }
-            self.activeCustomSubtitleCueID = nil
-            self.bitmapSubtitleCue = nil
+        var events = [makeCustomSubtitleEvent(
+            at: start,
+            estimatedBytes: Self.estimatedBitmapBytes(cue),
+            payload: .bitmap(cue: cue, cueID: cueID)
+        )]
+        if let subtitleDuration,
+           subtitleDuration.isFinite,
+           subtitleDuration > 0 {
+            events.append(makeCustomSubtitleEvent(
+                at: start + subtitleDuration,
+                estimatedBytes: 0,
+                payload: .clear(expectedCueID: cueID)
+            ))
         }
+        enqueueCustomSubtitleEvents(events)
     }
 
     private func scheduleCustomSubtitleClear(at start: TimeInterval) {
@@ -2040,36 +2099,144 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
             invalidateCustomSubtitles()
             return
         }
+        enqueueCustomSubtitleEvents([
+            makeCustomSubtitleEvent(
+                at: start,
+                estimatedBytes: 0,
+                payload: .clear(expectedCueID: nil)
+            ),
+        ])
+    }
+
+    private func makeCustomSubtitleEvent(
+        at time: TimeInterval,
+        estimatedBytes: Int,
+        payload: BunnyScheduledSubtitlePayload
+    ) -> BunnyScheduledSubtitleEvent {
+        customSubtitleEventOrder &+= 1
+        return BunnyScheduledSubtitleEvent(
+            time: time,
+            order: customSubtitleEventOrder,
+            estimatedBytes: max(estimatedBytes, 0),
+            payload: payload
+        )
+    }
+
+    private func enqueueCustomSubtitleEvents(
+        _ events: [BunnyScheduledSubtitleEvent]
+    ) {
+        guard !events.isEmpty, selectedSubtitleID != nil else { return }
+        let clock = customDecoder?.currentTime ?? currentTime
+        guard clock.isFinite,
+              events.allSatisfy({ $0.time.isFinite }),
+              let earliestEventTime = events.map(\.time).min(),
+              earliestEventTime <= clock + Self.customSubtitleSchedulingHorizon
+        else {
+            NSLog("BUNNY_SUBTITLE_SCHEDULE drop=outside_horizon count=%d", events.count)
+            return
+        }
+        let additionalBytes = events.reduce(into: 0) {
+            $0 = min(
+                $0 + $1.estimatedBytes,
+                Self.maximumScheduledSubtitleBytes + 1
+            )
+        }
+        guard pendingCustomSubtitleEvents.count + events.count
+                <= Self.maximumScheduledSubtitleEvents,
+              pendingCustomSubtitleBytes + additionalBytes
+                <= Self.maximumScheduledSubtitleBytes
+        else {
+            NSLog(
+                "BUNNY_SUBTITLE_SCHEDULE drop=bounded events=%d bytes=%d",
+                pendingCustomSubtitleEvents.count,
+                pendingCustomSubtitleBytes
+            )
+            return
+        }
+        pendingCustomSubtitleEvents.append(contentsOf: events)
+        pendingCustomSubtitleEvents.sort {
+            $0.time == $1.time ? $0.order < $1.order : $0.time < $1.time
+        }
+        pendingCustomSubtitleBytes += additionalBytes
+        startCustomSubtitleSchedulerIfNeeded()
+    }
+
+    private func startCustomSubtitleSchedulerIfNeeded() {
+        guard customSubtitleSchedulerTask == nil else { return }
         let revision = captionRevision
-        Task { @MainActor [weak self] in
-            guard let self,
-                  await self.waitForCustomSubtitleTime(start, revision: revision)
-            else { return }
-            self.activeCustomSubtitleCueID = nil
-            self.captionLines = []
-            self.bitmapSubtitleCue = nil
+        customSubtitleSchedulerTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled,
+                  revision == self.captionRevision,
+                  self.selectedSubtitleID != nil,
+                  self.customDecoder != nil,
+                  let event = self.pendingCustomSubtitleEvents.first {
+                let clock = self.customDecoder?.currentTime ?? self.currentTime
+                guard clock.isFinite else { break }
+                if clock < event.time - 0.025 {
+                    try? await Task.sleep(for: .milliseconds(40))
+                    continue
+                }
+                self.pendingCustomSubtitleEvents.removeFirst()
+                self.pendingCustomSubtitleBytes = max(
+                    self.pendingCustomSubtitleBytes - event.estimatedBytes,
+                    0
+                )
+                self.applyCustomSubtitleEvent(event)
+            }
+            if revision == self.captionRevision {
+                self.customSubtitleSchedulerTask = nil
+            }
         }
     }
 
-    private func waitForCustomSubtitleTime(
-        _ target: TimeInterval,
-        revision: Int
-    ) async -> Bool {
-        while !Task.isCancelled,
-              revision == captionRevision,
-              selectedSubtitleID != nil,
-              customDecoder != nil {
-            let clock = customDecoder?.currentTime ?? currentTime
-            if clock.isFinite, clock >= target - 0.025 {
-                return true
+    private func applyCustomSubtitleEvent(_ event: BunnyScheduledSubtitleEvent) {
+        switch event.payload {
+        case let .text(lines, cueID):
+            activeCustomSubtitleCueID = cueID
+            bitmapSubtitleCue = nil
+            captionLines = lines
+        case let .bitmap(cue, cueID):
+            activeCustomSubtitleCueID = cueID
+            captionLines = []
+            bitmapSubtitleCue = cue
+        case let .clear(expectedCueID):
+            guard expectedCueID == nil || activeCustomSubtitleCueID == expectedCueID else {
+                return
             }
-            try? await Task.sleep(for: .milliseconds(40))
+            activeCustomSubtitleCueID = nil
+            captionLines = []
+            bitmapSubtitleCue = nil
         }
-        return false
+    }
+
+    private static func estimatedBitmapBytes(
+        _ cue: BunnyNativeBitmapSubtitleCue
+    ) -> Int {
+        cue.parts.reduce(into: 0) { total, part in
+            let width = part.sourceRect.width
+            let height = part.sourceRect.height
+            guard width.isFinite,
+                  height.isFinite,
+                  width > 0,
+                  height > 0,
+                  width <= 16_384,
+                  height <= 16_384
+            else {
+                total = maximumScheduledSubtitleBytes
+                return
+            }
+            let bytes = Int(width) * Int(height) * 4
+            total = min(total + bytes, maximumScheduledSubtitleBytes)
+        }
     }
 
     private func invalidateCustomSubtitles() {
         captionRevision &+= 1
+        customSubtitleSchedulerTask?.cancel()
+        customSubtitleSchedulerTask = nil
+        pendingCustomSubtitleEvents.removeAll(keepingCapacity: false)
+        pendingCustomSubtitleBytes = 0
         activeCustomSubtitleCueID = nil
         captionLines = []
         bitmapSubtitleCue = nil
@@ -2238,12 +2405,18 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
                 return
             }
             if let customProgressPin {
-                currentTime = customProgressPin
-                resumePosition = customProgressPin
+                currentTime = PlaybackContinuityPolicy.clampedTimelinePosition(
+                    customProgressPin,
+                    duration: duration
+                )
+                resumePosition = currentTime
             } else {
                 let decoderTime = customDecoder.currentTime
                 if decoderTime.isFinite {
-                    currentTime = max(decoderTime, 0)
+                    currentTime = PlaybackContinuityPolicy.clampedTimelinePosition(
+                        decoderTime,
+                        duration: duration
+                    )
                     resumePosition = currentTime
                 }
             }
@@ -2266,7 +2439,10 @@ private final class BunnyPlaybackModel: NSObject, ObservableObject {
         }
         let itemTime = item.currentTime().seconds
         if itemTime.isFinite {
-            currentTime = max(itemTime, 0)
+            currentTime = PlaybackContinuityPolicy.clampedTimelinePosition(
+                itemTime,
+                duration: duration
+            )
             resumePosition = currentTime
         }
         let itemDuration = item.duration.seconds
@@ -3181,7 +3357,7 @@ private struct BunnyTimeline: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(formatted(isEditing ? scrubPosition : model.currentTime))
+            Text(formatted(isEditing ? scrubPosition : displayedPosition))
             Slider(
                 value: Binding(
                     get: { isEditing ? scrubPosition : min(model.currentTime, upperBound) },
@@ -3208,6 +3384,13 @@ private struct BunnyTimeline: View {
 
     private var upperBound: TimeInterval {
         max(model.duration, 1)
+    }
+
+    private var displayedPosition: TimeInterval {
+        PlaybackContinuityPolicy.clampedTimelinePosition(
+            model.currentTime,
+            duration: model.duration
+        )
     }
 
     private func editingChanged(_ editing: Bool) {
@@ -3255,14 +3438,11 @@ private struct BunnyTimeline: View {
     }
 
     private func formatted(_ seconds: TimeInterval) -> String {
-        guard seconds.isFinite else { return "--:--" }
-        let clamped = max(Int(seconds.rounded(.down)), 0)
-        let hours = clamped / 3_600
-        let minutes = (clamped % 3_600) / 60
-        let remainingSeconds = clamped % 60
-        return hours > 0
-            ? String(format: "%d:%02d:%02d", hours, minutes, remainingSeconds)
-            : String(format: "%02d:%02d", minutes, remainingSeconds)
+        PlaybackTimeFormatter.clock(
+            seconds,
+            invalidValue: "--:--",
+            zeroPadMinutes: true
+        )
     }
 }
 
@@ -3671,51 +3851,6 @@ private struct BunnyOverlayButtonStyle: ButtonStyle {
             .background(.black.opacity(configuration.isPressed ? 0.82 : 0.58), in: Circle())
             .scaleEffect(configuration.isPressed ? 0.94 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
-@MainActor
-private enum BunnyPresentation {
-    static func prepareAudioSession() {
-        PlaybackAudioSession.beginPlayback()
-    }
-
-    static func endAudioSession() {
-        PlaybackAudioSession.endPlayback()
-    }
-
-    static func toggleOrientation() {
-        guard let scene = foregroundScene else { return }
-        let orientation = scene.effectiveGeometry.interfaceOrientation
-        let target: UIInterfaceOrientationMask = orientation.isLandscape
-            ? .portrait
-            : .landscape
-
-        AppOrientationDelegate.supportedOrientations = target
-        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: target)) { error in
-            NSLog("Bunny orientation update failed: %@", error.localizedDescription)
-        }
-    }
-
-    /// Idempotent simulator-verification entry point. Re-applying it for an
-    /// automatically presented episode keeps landscape instead of toggling
-    /// an already-landscape player back to portrait.
-    static func ensureLandscape() {
-        guard let scene = foregroundScene else { return }
-        let target = UIInterfaceOrientationMask.landscape
-        AppOrientationDelegate.supportedOrientations = target
-        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-        guard !scene.effectiveGeometry.interfaceOrientation.isLandscape else { return }
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: target)) { error in
-            NSLog("Bunny landscape verification failed: %@", error.localizedDescription)
-        }
-    }
-
-    private static var foregroundScene: UIWindowScene? {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }
     }
 }
 

@@ -1,6 +1,66 @@
 #if SKELETON_SCREENSHOT_HARNESS
 import Foundation
 import SwiftUI
+import UIKit
+
+@MainActor
+private enum UIStateScreenshotArtworkFixtures {
+    static let posterPortraitURL = URL(
+        string: "http://127.0.0.1:18766/ui-states/poster-portrait.png"
+    )!
+    static let posterWideURL = URL(
+        string: "http://127.0.0.1:18766/ui-states/poster-wide.png"
+    )!
+    static let posterTallURL = URL(
+        string: "http://127.0.0.1:18766/ui-states/poster-tall.png"
+    )!
+    static let episodeURL = URL(
+        string: "http://127.0.0.1:18766/ui-states/episode-2.png"
+    )!
+    static let allURLs = [posterPortraitURL, posterWideURL, posterTallURL, episodeURL]
+
+    static func makeStore() -> EmbeddedArtworkImageStore {
+        EmbeddedArtworkImageStore(
+            imagesByURL: [
+                posterPortraitURL: image(
+                    size: CGSize(width: 600, height: 900),
+                    color: UIColor(red: 0.16, green: 0.32, blue: 0.58, alpha: 1)
+                ),
+                posterWideURL: image(
+                    size: CGSize(width: 900, height: 600),
+                    color: UIColor(red: 0.13, green: 0.49, blue: 0.41, alpha: 1)
+                ),
+                posterTallURL: image(
+                    size: CGSize(width: 500, height: 1_000),
+                    color: UIColor(red: 0.55, green: 0.24, blue: 0.49, alpha: 1)
+                ),
+                episodeURL: image(
+                    size: CGSize(width: 640, height: 360),
+                    color: UIColor(red: 0.62, green: 0.31, blue: 0.12, alpha: 1)
+                ),
+            ]
+        )
+    }
+
+    private static func image(size: CGSize, color: UIColor) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            color.setFill()
+            context.cgContext.fill(CGRect(origin: .zero, size: size))
+            UIColor.white.withAlphaComponent(0.32).setFill()
+            context.cgContext.fillEllipse(
+                in: CGRect(
+                    x: size.width * 0.22,
+                    y: size.height * 0.25,
+                    width: size.width * 0.56,
+                    height: size.height * 0.5
+                )
+            )
+        }
+    }
+}
 
 /// Deterministic, simulator-only entry point used by ui-state-screenshots.sh.
 /// Production builds do not compile this declaration.
@@ -10,6 +70,7 @@ struct UIStateScreenshotApp: App {
     @StateObject private var model = AppModel()
     @StateObject private var watchTogether = WatchTogetherModel()
     private let state = ProcessInfo.processInfo.environment["UI_SCREENSHOT_STATE"] ?? "home-cinemeta"
+    private let artworkStore = UIStateScreenshotArtworkFixtures.makeStore()
 
     init() {
         let environment = ProcessInfo.processInfo.environment
@@ -34,9 +95,10 @@ struct UIStateScreenshotApp: App {
     var body: some Scene {
         WindowGroup {
             AppThemeHost {
-                UIStateScreenshotRoot(state: state)
+                UIStateScreenshotRoot(state: state, artworkStore: artworkStore)
                     .environmentObject(model)
                     .environmentObject(watchTogether)
+                    .environment(\.embeddedArtworkImageStore, artworkStore)
             }
         }
     }
@@ -45,6 +107,7 @@ struct UIStateScreenshotApp: App {
 private struct UIStateScreenshotRoot: View {
     @EnvironmentObject private var model: AppModel
     let state: String
+    let artworkStore: EmbeddedArtworkImageStore
     @State private var prepared = false
 
     var body: some View {
@@ -384,7 +447,7 @@ private struct UIStateScreenshotRoot: View {
             prepared = true
         }
 
-        // Let AsyncImage, navigation chrome, and detail resolution settle before capture.
+        // Let remote artwork, navigation chrome, and detail resolution settle before capture.
         // The Up Next card is presented by a child task after the player first appears,
         // so its fixture needs an additional render turn before declaring itself ready.
         let readinessDelayMilliseconds: Int
@@ -407,6 +470,9 @@ private struct UIStateScreenshotRoot: View {
             readinessDelayMilliseconds = 650
         }
         try? await Task.sleep(for: .milliseconds(readinessDelayMilliseconds))
+        guard artworkStore.containsAll(UIStateScreenshotArtworkFixtures.allURLs) else {
+            fatalError("Deterministic screenshot artwork provider is incomplete")
+        }
         let runID = ProcessInfo.processInfo.environment["UI_SCREENSHOT_RUN_ID"] ?? "manual"
         let readyMarker = FileManager.default.temporaryDirectory
             .appendingPathComponent("ui-state-\(runID).ready")
@@ -419,7 +485,7 @@ private struct UIStateScreenshotRoot: View {
             id: "tt1254207",
             type: "movie",
             name: "Big Buck Bunny",
-            poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-portrait.png"),
+            poster: UIStateScreenshotArtworkFixtures.posterPortraitURL,
             description: "A cheerful open movie used to verify the complete playback workflow.",
             releaseInfo: "2008",
             genres: ["Animation", "Comedy"],
@@ -547,7 +613,7 @@ private struct UIStateScreenshotRoot: View {
             id: "tt-fixture-series",
             type: "series",
             name: "Fixture Show",
-            poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-portrait.png"),
+            poster: UIStateScreenshotArtworkFixtures.posterPortraitURL,
             description: "A deterministic series used to verify episode playback state.",
             releaseInfo: "2024–",
             genres: ["Drama", "Adventure"],
@@ -576,21 +642,21 @@ private struct UIStateScreenshotRoot: View {
                 id: "poster-wide",
                 type: "series",
                 name: "Short Title",
-                poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-wide.png"),
+                poster: UIStateScreenshotArtworkFixtures.posterWideURL,
                 releaseInfo: "2024–"
             ),
             MetaItem(
                 id: "poster-tall",
                 type: "series",
                 name: "A Very Long Series Title That Needs Two Lines",
-                poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-tall.png"),
+                poster: UIStateScreenshotArtworkFixtures.posterTallURL,
                 releaseInfo: "2025–"
             ),
             MetaItem(
                 id: "poster-standard",
                 type: "series",
                 name: "Medium Length Title",
-                poster: URL(string: "http://127.0.0.1:18766/ui-states/poster-portrait.png"),
+                poster: UIStateScreenshotArtworkFixtures.posterPortraitURL,
                 releaseInfo: "2026–"
             ),
         ]
@@ -613,7 +679,7 @@ private struct UIStateScreenshotRoot: View {
             title: "The Crossing",
             season: 1,
             episode: 2,
-            thumbnail: URL(string: "http://127.0.0.1:18766/ui-states/episode-2.png"),
+            thumbnail: UIStateScreenshotArtworkFixtures.episodeURL,
             overview: "The team crosses hostile terrain while an old alliance begins to fracture.",
             released: "2024-01-12T00:00:00.000Z"
         )

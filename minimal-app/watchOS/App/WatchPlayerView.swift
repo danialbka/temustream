@@ -56,6 +56,8 @@ final class WatchPlayerController: ObservableObject {
     private var audioByID: [String: AVMediaSelectionOption] = [:]
     private var subtitleByID: [String: AVMediaSelectionOption] = [:]
     private var mediaSelectionLoaded = false
+    private var mediaSelectionOwner = LatestOperationOwner()
+    private var mediaSelectionTask: Task<Void, Never>?
     private var performanceTracker: NativePlaybackPerformanceTracker?
     private var nextPerformanceLogAt: TimeInterval = 0
     private var lastPerformancePublishAt: TimeInterval = -.infinity
@@ -82,7 +84,7 @@ final class WatchPlayerController: ObservableObject {
     func prepare() {
         guard player.currentItem == nil else { return }
         status = .loading
-        mediaSelectionLoaded = false
+        resetMediaSelectionState()
         debugSnapshot = nil
         nextPerformanceLogAt = 0
         lastPerformancePublishAt = -.infinity
@@ -108,12 +110,9 @@ final class WatchPlayerController: ObservableObject {
 
     func retry() {
         resumePosition = position
+        resetMediaSelectionState()
         removeObservers()
         player.replaceCurrentItem(with: nil)
-        audioOptions = []
-        subtitleOptions = []
-        audioByID = [:]
-        subtitleByID = [:]
         prepare()
         WKInterfaceDevice.current().play(.retry)
     }
@@ -184,6 +183,7 @@ final class WatchPlayerController: ObservableObject {
 
     func stop() {
         resumePosition = position
+        resetMediaSelectionState()
         player.pause()
         isPlaying = false
         removeObservers()
@@ -233,6 +233,7 @@ final class WatchPlayerController: ObservableObject {
         ) { [weak self, weak item] _ in
             Task { @MainActor [weak self, weak item] in
                 guard let self, let item else { return }
+                guard player.currentItem === item else { return }
                 refreshPublishedMediaSelection(for: item)
             }
         }
@@ -356,14 +357,41 @@ final class WatchPlayerController: ObservableObject {
     private func loadMediaSelectionIfNeeded() {
         guard !mediaSelectionLoaded, let item = player.currentItem else { return }
         mediaSelectionLoaded = true
-        Task { @MainActor [weak self, weak item] in
+        let token = mediaSelectionOwner.begin()
+        mediaSelectionTask?.cancel()
+        mediaSelectionTask = Task { @MainActor [weak self, weak item] in
             guard let self, let item else { return }
-            audioGroup = try? await item.asset.loadMediaSelectionGroup(for: .audible)
-            subtitleGroup = try? await item.asset.loadMediaSelectionGroup(for: .legible)
+            let loadedAudioGroup = try? await item.asset.loadMediaSelectionGroup(
+                for: .audible
+            )
+            guard !Task.isCancelled else { return }
+            let loadedSubtitleGroup = try? await item.asset.loadMediaSelectionGroup(
+                for: .legible
+            )
+            guard !Task.isCancelled,
+                  mediaSelectionOwner.owns(token),
+                  player.currentItem === item
+            else { return }
+            audioGroup = loadedAudioGroup
+            subtitleGroup = loadedSubtitleGroup
             buildMediaOptions(for: item)
             applyPreferredMediaSelection(to: item)
             refreshPublishedMediaSelection(for: item)
         }
+    }
+
+    private func resetMediaSelectionState() {
+        mediaSelectionTask?.cancel()
+        mediaSelectionTask = nil
+        mediaSelectionOwner.invalidate()
+        mediaSelectionLoaded = false
+        audioGroup = nil
+        subtitleGroup = nil
+        audioByID = [:]
+        subtitleByID = [:]
+        audioOptions = []
+        subtitleOptions = []
+        subtitlesAreOff = true
     }
 
     private func buildMediaOptions(for item: AVPlayerItem) {

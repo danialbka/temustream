@@ -55,6 +55,12 @@ public struct StreamingServerEndpoint: Equatable, Sendable {
 }
 
 public struct TorrentStreamingClient: Sendable {
+    private enum ResponseLimit {
+        static let heartbeat = 64 * 1024
+        static let create = 1 * 1024 * 1024
+        static let settings = 1 * 1024 * 1024
+    }
+
     public let endpoint: StreamingServerEndpoint
     private let loader: any HTTPRequestLoading
 
@@ -71,7 +77,11 @@ public struct TorrentStreamingClient: Sendable {
             let url = endpoint.baseURL.appendingPathComponent("heartbeat")
             var request = URLRequest(url: url)
             request.timeoutInterval = 2
-            let (_, response) = try await loader.data(for: request)
+            let (_, response) = try await HTTPRequestBodyLoader.load(
+                using: loader,
+                request: request,
+                maximumBytes: ResponseLimit.heartbeat
+            )
             return (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
         } catch {
             return false
@@ -97,7 +107,11 @@ public struct TorrentStreamingClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
-        let (data, response) = try await loader.data(for: request)
+        let (data, response) = try await HTTPRequestBodyLoader.load(
+            using: loader,
+            request: request,
+            maximumBytes: ResponseLimit.create
+        )
         guard let http = response as? HTTPURLResponse else {
             throw StreamingServerError.invalidResponse
         }
@@ -168,7 +182,11 @@ public struct TorrentStreamingClient: Sendable {
             let url = endpoint.baseURL.appendingPathComponent("settings")
             var request = URLRequest(url: url)
             request.timeoutInterval = 3
-            let (data, response) = try await loader.data(for: request)
+            let (data, response) = try await HTTPRequestBodyLoader.load(
+                using: loader,
+                request: request,
+                maximumBytes: ResponseLimit.settings
+            )
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode),
                   let envelope = try? JSONDecoder().decode(ServerSettingsEnvelope.self, from: data)
@@ -217,8 +235,23 @@ private extension String {
         if host == "localhost" || host == "127.0.0.1" || host == "::1" || host.hasSuffix(".local") {
             return true
         }
-        if host.hasPrefix("10.") || host.hasPrefix("192.168.") { return true }
-        let parts = host.split(separator: ".").compactMap { Int($0) }
-        return parts.count == 4 && parts[0] == 172 && (16...31).contains(parts[1])
+        let labels = host.split(
+            separator: ".",
+            omittingEmptySubsequences: false
+        )
+        guard labels.count == 4 else { return false }
+        var octets: [Int] = []
+        octets.reserveCapacity(4)
+        for label in labels {
+            guard !label.isEmpty,
+                  label.allSatisfy({ $0.isNumber }),
+                  let octet = Int(label),
+                  (0...255).contains(octet)
+            else { return false }
+            octets.append(octet)
+        }
+        return octets[0] == 10
+            || (octets[0] == 172 && (16...31).contains(octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
     }
 }

@@ -95,7 +95,8 @@ public struct PlaybackProgress: Codable, Equatable, Identifiable, Sendable {
     }
 
     public static func shouldSave(position: TimeInterval, duration: TimeInterval) -> Bool {
-        guard position.isFinite, duration.isFinite,
+        guard isRepresentableTimelineValue(position),
+              isRepresentableTimelineValue(duration),
               position >= minimumResumePosition
         else { return false }
         guard duration > 0 else { return true }
@@ -108,10 +109,49 @@ public struct PlaybackProgress: Codable, Equatable, Identifiable, Sendable {
     }
 
     public static func isCompleted(position: TimeInterval, duration: TimeInterval) -> Bool {
-        guard position.isFinite, duration.isFinite,
+        guard isRepresentableTimelineValue(position),
+              isRepresentableTimelineValue(duration),
               position >= minimumResumePosition, duration > 0
         else { return false }
         return !shouldSave(position: position, duration: duration)
+    }
+
+    public static func isRepresentableTimelineValue(_ value: TimeInterval) -> Bool {
+        guard value.isFinite, value >= 0 else { return false }
+        let nanoseconds = value * 1_000_000_000
+        return nanoseconds.isFinite
+            && UInt64(exactly: nanoseconds.rounded(.down)) != nil
+    }
+}
+
+public enum PlaybackTimeFormatter {
+    public static func wholeSeconds(
+        _ value: TimeInterval,
+        rounding rule: FloatingPointRoundingRule = .down
+    ) -> Int? {
+        guard value.isFinite, value >= 0 else { return nil }
+        return Int(exactly: value.rounded(rule))
+    }
+
+    public static func clock(
+        _ value: TimeInterval,
+        invalidValue: String = "0:00",
+        zeroPadMinutes: Bool = false,
+        rounding rule: FloatingPointRoundingRule = .down
+    ) -> String {
+        guard let total = wholeSeconds(value, rounding: rule) else {
+            return invalidValue
+        }
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        let paddedMinutes = minutes < 10 ? "0\(minutes)" : String(minutes)
+        let paddedSeconds = seconds < 10 ? "0\(seconds)" : String(seconds)
+        if hours > 0 {
+            return "\(hours):\(paddedMinutes):\(paddedSeconds)"
+        }
+        let displayedMinutes = zeroPadMinutes ? paddedMinutes : String(minutes)
+        return "\(displayedMinutes):\(paddedSeconds)"
     }
 }
 
@@ -164,11 +204,19 @@ public actor PlaybackProgressStore {
             cache = []
             return []
         }
-        let decoded = try decoder.decode(
-            [PlaybackProgress].self,
-            from: Data(contentsOf: fileURL)
-        )
-        let sanitized = decoded.map(\.persistenceSafe)
+        let data = try Data(contentsOf: fileURL)
+        let decoded: [PlaybackProgress]
+        do {
+            decoded = try decoder.decode([PlaybackProgress].self, from: data)
+        } catch {
+            try LocalPreferenceRecovery.preserveCorruptFile(fileURL)
+            latestUpdates.removeAll()
+            try persist([])
+            return []
+        }
+        let sanitized = decoded.compactMap { progress in
+            progress.isValidForPersistence ? progress.persistenceSafe : nil
+        }
         let current = sanitized.reduce(into: [String: PlaybackProgress]()) { result, progress in
             if result[progress.contentIdentifier]?.updatedAt ?? .distantPast < progress.updatedAt {
                 result[progress.contentIdentifier] = progress
@@ -190,8 +238,8 @@ public actor PlaybackProgressStore {
     public func record(_ progress: PlaybackProgress) throws -> [PlaybackProgress] {
         var current = try items()
         guard !progress.contentIdentifier.isEmpty,
-              progress.position.isFinite,
-              progress.duration.isFinite,
+              PlaybackProgress.isRepresentableTimelineValue(progress.position),
+              PlaybackProgress.isRepresentableTimelineValue(progress.duration),
               progress.position >= PlaybackProgress.minimumResumePosition
         else { return current }
 
@@ -237,7 +285,14 @@ public actor PlaybackProgressStore {
     }
 }
 
-private extension PlaybackProgress {
+extension PlaybackProgress {
+    var isValidForPersistence: Bool {
+        !contentIdentifier.isEmpty
+            && Self.isRepresentableTimelineValue(position)
+            && Self.isRepresentableTimelineValue(duration)
+            && position >= Self.minimumResumePosition
+    }
+
     var persistenceSafe: PlaybackProgress {
         PlaybackProgress(
             contentIdentifier: contentIdentifier,

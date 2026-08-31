@@ -72,6 +72,54 @@ final class LocalRecommendationsTests: XCTestCase {
         )
     }
 
+    func testRatingReadFailureIsNotMisclassifiedAsCorruptData() async throws {
+        let directory = temporaryDirectory()
+        let fileURL = directory.appendingPathComponent("media-ratings.json")
+        try FileManager.default.createDirectory(
+            at: fileURL,
+            withIntermediateDirectories: true
+        )
+
+        do {
+            _ = try await MediaRatingStore(fileURL: fileURL).items()
+            XCTFail("Expected the ratings read to fail")
+        } catch {
+            var isDirectory: ObjCBool = false
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fileURL.path,
+                    isDirectory: &isDirectory
+                )
+            )
+            XCTAssertTrue(isDirectory.boolValue)
+            XCTAssertTrue(try recoveryFiles(in: directory).isEmpty)
+        }
+    }
+
+    func testHistoryReadFailureIsNotMisclassifiedAsCorruptData() async throws {
+        let directory = temporaryDirectory()
+        let fileURL = directory.appendingPathComponent("history.json")
+        try FileManager.default.createDirectory(
+            at: fileURL,
+            withIntermediateDirectories: true
+        )
+
+        do {
+            _ = try await RecommendationHistoryStore(fileURL: fileURL).items()
+            XCTFail("Expected the recommendation-history read to fail")
+        } catch {
+            var isDirectory: ObjCBool = false
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fileURL.path,
+                    isDirectory: &isDirectory
+                )
+            )
+            XCTAssertTrue(isDirectory.boolValue)
+            XCTAssertTrue(try recoveryFiles(in: directory).isEmpty)
+        }
+    }
+
     func testLoveSignalsRankMatchingGenreAndActorWithReasons() {
         let loved = MediaRating(
             media: LocalMediaSnapshot(
@@ -289,6 +337,13 @@ final class LocalRecommendationsTests: XCTestCase {
     private func temporaryDirectory() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    }
+
+    private func recoveryFiles(in directory: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.contains(".corrupt-") }
     }
 
     private func date(_ value: TimeInterval) -> Date {

@@ -160,6 +160,7 @@ struct SingleMoviePlaybackAuditReport: Codable, Sendable {
     var passed: Bool { metrics?.passed == true && error == nil }
 }
 
+@MainActor
 private final class BunnyStressProbe {
     var info: BunnyNativeMediaInfo?
     var firstFrameRendered = false
@@ -241,6 +242,9 @@ private enum BunnyPlayerStressBenchmark {
         cadenceSampleSeconds: TimeInterval = 12,
         interactionStress: Bool = true
     ) async throws -> PlayerStressMetrics {
+        let boundedCadenceSampleSeconds = cadenceSampleSeconds.isFinite
+            ? min(max(cadenceSampleSeconds, 0.1), 300)
+            : 12
         // Exercise the production movie-session policy as part of the stress
         // gate. Previously the simulator benchmark bypassed this setup, so it
         // could not catch AirPods/multichannel route regressions.
@@ -445,7 +449,7 @@ private enum BunnyPlayerStressBenchmark {
             "PLAYER_STRESS_STEP cadence_begin title=%@ pre_sample_dropped=%ld sample_seconds=%.1f",
             title,
             rendererDropsBeforeSample,
-            cadenceSampleSeconds
+            boundedCadenceSampleSeconds
         )
         var underflowSince: TimeInterval?
         var isInsideCountedStall = false
@@ -455,7 +459,10 @@ private enum BunnyPlayerStressBenchmark {
         var rendererUnderflowSkewSamples = [Double]()
         var longestVideoUnderflowMilliseconds = 0.0
 
-        let cadenceSampleCount = max(Int(cadenceSampleSeconds * 10), 1)
+        let cadenceSampleCount = max(
+            Int(exactly: (boundedCadenceSampleSeconds * 10).rounded(.up)) ?? 1,
+            1
+        )
         for _ in 0..<cadenceSampleCount {
             try await Task.sleep(for: .milliseconds(100))
             if let failure = probe.failure { throw failure }

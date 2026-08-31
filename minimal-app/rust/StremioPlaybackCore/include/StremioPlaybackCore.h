@@ -59,6 +59,12 @@ typedef struct StremioMediaSummary {
     uint32_t cue_count;
 } StremioMediaSummary;
 
+enum {
+    STREMIO_MEDIA_SUMMARY_ABI_VERSION = 1,
+    STREMIO_MEDIA_TRACK_INFO_ABI_VERSION = 2,
+    STREMIO_MEDIA_PACKET_ABI_VERSION = 4,
+};
+
 typedef struct StremioMediaTrackInfo {
     uint32_t abi_version;
     uint32_t index;
@@ -69,6 +75,10 @@ typedef struct StremioMediaTrackInfo {
     uint32_t flags;
     uint32_t width;
     uint32_t height;
+    uint32_t display_width;
+    uint32_t display_height;
+    uint32_t display_unit;
+    uint32_t audio_frames_per_packet;
     double sample_rate;
     uint32_t channels;
     uint32_t bit_depth;
@@ -114,6 +124,7 @@ typedef struct StremioMediaPacket {
     int64_t presentation_time_ns;
     int64_t decode_time_ns;
     uint64_t duration_ns;
+    int64_t discard_padding_ns;
     uint32_t flags;
     const uint8_t *data;
     size_t data_size;
@@ -191,12 +202,14 @@ enum {
     STREMIO_MEDIA_TRACK_DEFAULT = 1 << 0,
     STREMIO_MEDIA_TRACK_FORCED = 1 << 1,
     STREMIO_MEDIA_TRACK_APPLE_DECODABLE = 1 << 2,
+    STREMIO_MEDIA_TRACK_ENABLED = 1 << 3,
 };
 
 enum {
     STREMIO_MEDIA_PACKET_KEYFRAME = 1 << 0,
     STREMIO_MEDIA_PACKET_INVISIBLE = 1 << 1,
     STREMIO_MEDIA_PACKET_DISCARDABLE = 1 << 2,
+    STREMIO_MEDIA_PACKET_LACED = 1 << 3,
 };
 
 enum {

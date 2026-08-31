@@ -53,7 +53,13 @@ struct WatchPlaybackRequest: Identifiable, Sendable {
     let episodes: [Video]
 }
 
-struct WatchProgressRecord: Codable, Equatable, Identifiable, Sendable {
+struct WatchProgressRecord:
+    Codable,
+    Equatable,
+    Identifiable,
+    PlaybackTransitionRecord,
+    Sendable
+{
     let contentIdentifier: String
     let contentTitle: String
     let mediaID: String
@@ -94,85 +100,50 @@ struct WatchProgressRecord: Codable, Equatable, Identifiable, Sendable {
             )
         }
     }
-}
 
-private actor WatchProgressStore {
-    private let fileURL: URL
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
-
-    init(fileURL: URL) {
-        self.fileURL = fileURL
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        decoder.dateDecodingStrategy = .iso8601
-    }
-
-    func items() throws -> [WatchProgressRecord] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
-        let decoded = try decoder.decode(
-            [WatchProgressRecord].self,
-            from: Data(contentsOf: fileURL)
-        )
-        let sanitized = decoded.compactMap(Self.persistenceSafe)
-        if sanitized != decoded {
-            try persist(sanitized)
-        }
-        return sanitized.sorted { $0.updatedAt > $1.updatedAt }
-    }
-
-    func record(_ entry: WatchProgressRecord) throws -> [WatchProgressRecord] {
-        var current = try items()
-        current.removeAll { $0.contentIdentifier == entry.contentIdentifier }
-        if PlaybackProgress.shouldSave(position: entry.position, duration: entry.duration),
-           let safeEntry = Self.persistenceSafe(entry) {
-            current.append(safeEntry)
-        }
-        current.sort { $0.updatedAt > $1.updatedAt }
-        try persist(current)
-        return current
-    }
-
-    func remove(contentIdentifier: String) throws -> [WatchProgressRecord] {
-        var current = try items()
-        current.removeAll { $0.contentIdentifier == contentIdentifier }
-        try persist(current)
-        return current
-    }
-
-    private func persist(_ entries: [WatchProgressRecord]) throws {
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try encoder.encode(entries).write(to: fileURL, options: .atomic)
-    }
-
-    private static func persistenceSafe(
-        _ entry: WatchProgressRecord
-    ) -> WatchProgressRecord? {
-        guard let manifestURL = WatchPlaybackPersistencePolicy
-            .sanitizedReferenceURL(entry.manifestURL)
+    var playbackPersistenceSafe: WatchProgressRecord? {
+        guard PlaybackProgress.isRepresentableTimelineValue(position),
+              PlaybackProgress.isRepresentableTimelineValue(duration),
+              let manifestURL = WatchPlaybackPersistencePolicy
+                .sanitizedReferenceURL(manifestURL)
         else { return nil }
         return WatchProgressRecord(
-            contentIdentifier: entry.contentIdentifier,
-            contentTitle: entry.contentTitle,
-            mediaID: entry.mediaID,
-            mediaType: entry.mediaType,
-            mediaTitle: entry.mediaTitle,
+            contentIdentifier: contentIdentifier,
+            contentTitle: contentTitle,
+            mediaID: mediaID,
+            mediaType: mediaType,
+            mediaTitle: mediaTitle,
             posterURL: WatchPlaybackPersistencePolicy
-                .sanitizedReferenceURL(entry.posterURL),
-            episodeID: entry.episodeID,
-            episodeTitle: entry.episodeTitle,
-            season: entry.season,
-            episode: entry.episode,
+                .sanitizedReferenceURL(posterURL),
+            episodeID: episodeID,
+            episodeTitle: episodeTitle,
+            season: season,
+            episode: episode,
             manifestURL: manifestURL,
-            providerName: entry.providerName,
-            position: entry.position,
-            duration: entry.duration,
-            updatedAt: entry.updatedAt
+            providerName: providerName,
+            position: position,
+            duration: duration,
+            updatedAt: updatedAt
         )
     }
+}
+
+private typealias WatchPlaybackStateStore =
+    PlaybackTransitionStore<WatchProgressRecord>
+
+private struct PreparedWatchProfileActivation {
+    let token: LatestOperationToken
+    let snapshot: ViewingProfileSnapshot
+    let session: StremioSession?
+    let libraryStore: LibraryStore
+    let playbackStateStore: WatchPlaybackStateStore
+    let ratingStore: MediaRatingStore
+    let recommendationHistoryStore: RecommendationHistoryStore
+    let library: [MetaItem]
+    let playbackState: PlaybackTransitionSnapshot<WatchProgressRecord>
+    let ratings: [MediaRating]
+    let recommendationHistory: [RecommendationImpression]
+    let addonURLs: [URL]
 }
 
 @MainActor
@@ -219,6 +190,9 @@ final class WatchAppModel: ObservableObject {
     }
 
     private static let legacyAnonymousAddonDefaultsKey = "watch.addonManifestURLs.v1"
+    private static let addonScopeMigrationDefaultsKey = "watch.addonScopeMigration.v2"
+    private static let libraryScopeMigrationDefaultsKey =
+        "watch.libraryScopeMigration.v2"
     private static let streamingServerDefaultsKey = "watch.streamingServerURL.v1"
     private static let autoplayDefaultsKey = "watch.autoplayNextEpisode.v1"
     private static let playbackRateDefaultsKey = "watch.preferredPlaybackRate.v1"
@@ -230,19 +204,34 @@ final class WatchAppModel: ObservableObject {
     private let storageRoot: URL
     private let viewingProfileStore: ViewingProfileStore
     private var libraryStore: LibraryStore
-    private var progressStore: WatchProgressStore
-    private var completionStore: PlaybackCompletionStore
+    private var playbackStateStore: WatchPlaybackStateStore
     private var ratingStore: MediaRatingStore
     private var recommendationHistoryStore: RecommendationHistoryStore
+    private let libraryStoreRegistry = FileBackedStoreRegistry<LibraryStore>()
+    private let playbackStateStoreRegistry =
+        FileBackedStoreRegistry<WatchPlaybackStateStore>()
+    private let ratingStoreRegistry = FileBackedStoreRegistry<MediaRatingStore>()
+    private let recommendationHistoryStoreRegistry =
+        FileBackedStoreRegistry<RecommendationHistoryStore>()
     private let recentSearchStore: RecentSearchStore
     private let accountClient: StremioAccountClient
+    private let addonSyncCoordinator: StremioAddonSyncCoordinator
+    private let libraryMutationCoordinator = LibraryMutationCoordinator()
+    private let profileMutationGate = AsyncSerialGate()
+    private let accountSyncGate = AsyncSerialGate()
+    private let addonMutationGate = AsyncSerialGate()
     private let sessionStore: WatchSessionStore
     private let addonURLStore: WatchAddonURLStore
     private var session: StremioSession?
     private var syncedAddonDescriptors: [SyncedAddon] = []
+    private var addonMutationRevision = 0
     private var recommendationImpressions: [RecommendationImpression] = []
     private var rankedRecommendations: [LocalRecommendation] = []
     private var completedPlaybackIdentifiers = Set<String>()
+    private var profileActivationOwner = LatestOperationOwner()
+    private var searchOwner = LatestOperationOwner()
+    private var homeOwner = LatestOperationOwner()
+    private var addonLoadOwner = LatestOperationOwner()
     private var started = false
     private var isApplyingProfileSettings = false
 
@@ -255,7 +244,11 @@ final class WatchAppModel: ObservableObject {
         accountEmail = nil
         accountSyncStatus = "Loading profile…"
         streamingServerInput = ""
-        accountClient = try! StremioAccountClient()
+        let configuredAccountClient = try! StremioAccountClient()
+        accountClient = configuredAccountClient
+        addonSyncCoordinator = StremioAddonSyncCoordinator(
+            client: configuredAccountClient
+        )
         let support = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -268,11 +261,14 @@ final class WatchAppModel: ObservableObject {
         )
         let bootstrap = support.appendingPathComponent("watch-bootstrap", isDirectory: true)
         libraryStore = LibraryStore(fileURL: bootstrap.appendingPathComponent("library.json"))
-        progressStore = WatchProgressStore(
-            fileURL: bootstrap.appendingPathComponent("playback-progress.json")
-        )
-        completionStore = PlaybackCompletionStore(
-            fileURL: bootstrap.appendingPathComponent("playback-completions.json")
+        playbackStateStore = WatchPlaybackStateStore(
+            fileURL: bootstrap.appendingPathComponent("playback-state.json"),
+            legacyProgressFileURL: bootstrap.appendingPathComponent(
+                "playback-progress.json"
+            ),
+            legacyCompletionFileURL: bootstrap.appendingPathComponent(
+                "playback-completions.json"
+            )
         )
         ratingStore = MediaRatingStore(
             fileURL: bootstrap.appendingPathComponent("media-ratings.json")
@@ -296,8 +292,20 @@ final class WatchAppModel: ObservableObject {
         guard !started else { return }
         started = true
         do {
-            let snapshot = try await bootstrapViewingProfiles()
-            try await activateProfile(snapshot)
+            try await withSerializedProfileMutation {
+                let activationToken = profileActivationOwner.begin()
+                let snapshot = try await bootstrapViewingProfiles()
+                guard profileActivationOwner.owns(activationToken),
+                      let prepared = try await prepareProfileActivation(
+                        snapshot,
+                        session: sessionStore.load(
+                            profileID: snapshot.activeProfileID
+                        ),
+                        token: activationToken
+                      )
+                else { return }
+                publishProfileActivation(prepared)
+            }
         } catch {
             statusMessage = "Viewing profiles could not be loaded."
             return
@@ -314,7 +322,7 @@ final class WatchAppModel: ObservableObject {
     }
 
     private func bootstrapViewingProfiles() async throws -> ViewingProfileSnapshot {
-        let legacySession = sessionStore.loadLegacy()
+        let legacySession = try sessionStore.loadLegacy()
         let legacyScope = legacySession.map(WatchAccountScope.identifier(for:))
             ?? WatchAccountScope.anonymous
         let legacyLibraryName = legacyScope == WatchAccountScope.anonymous
@@ -323,6 +331,7 @@ final class WatchAppModel: ObservableObject {
         let legacyProgressName = legacyScope == WatchAccountScope.anonymous
             ? "watch-playback-progress.json"
             : "watch-playback-progress-account-\(legacyScope).json"
+        let legacyCompletionName = "watch-playback-completions.json"
         let legacyFiles = [
             ViewingProfileLegacyFile(
                 fileName: ViewingProfileDataFile.anonymousLibrary,
@@ -332,6 +341,10 @@ final class WatchAppModel: ObservableObject {
                 fileName: ViewingProfileDataFile.playbackProgress,
                 sourceURL: storageRoot.appendingPathComponent(legacyProgressName)
             ),
+            ViewingProfileLegacyFile(
+                fileName: ViewingProfileDataFile.playbackCompletions,
+                sourceURL: storageRoot.appendingPathComponent(legacyCompletionName)
+            ),
         ]
         let snapshot = try await viewingProfileStore.bootstrap(
             defaultName: "My Watch",
@@ -339,75 +352,221 @@ final class WatchAppModel: ObservableObject {
             migrating: legacyFiles
         )
 
-        if sessionStore.load(profileID: snapshot.primaryProfileID) == nil,
-           let legacySession {
-            try sessionStore.save(legacySession, profileID: snapshot.primaryProfileID)
-            sessionStore.clearLegacy()
-        }
-        let profileScope = Self.profileStorageScope(snapshot.primaryProfileID)
-        if addonURLStore.load(scope: profileScope) == nil,
-           let legacyAddons = addonURLStore.load(scope: legacyScope) {
-            try? addonURLStore.save(legacyAddons, scope: profileScope)
+        if let legacySession {
+            try SecureStoreMigrationPolicy.migrateTransactionIfPresent(
+                true,
+                persistAllDependencies: {
+                    if try sessionStore.load(
+                        profileID: snapshot.primaryProfileID
+                    ) == nil {
+                        try sessionStore.save(
+                            legacySession,
+                            profileID: snapshot.primaryProfileID
+                        )
+                    }
+                    let destinationScope = AccountStorageScope.storageScope(
+                        profileID: snapshot.primaryProfileID,
+                        session: legacySession
+                    )
+                    if try addonURLStore.load(scope: destinationScope) == nil,
+                       let legacyAddons = try addonURLStore.load(scope: legacyScope) {
+                        try addonURLStore.save(
+                            legacyAddons,
+                            scope: destinationScope
+                        )
+                    }
+                },
+                clearLegacyDiscovery: {
+                    try sessionStore.clearLegacy()
+                }
+            )
         }
         return snapshot
     }
 
-    private func activateProfile(_ snapshot: ViewingProfileSnapshot) async throws {
+    private func prepareProfileActivation(
+        _ snapshot: ViewingProfileSnapshot,
+        profileDirectory suppliedProfileDirectory: URL? = nil,
+        session profileSession: StremioSession?,
+        token: LatestOperationToken
+    ) async throws -> PreparedWatchProfileActivation? {
         let profileID = snapshot.activeProfileID
-        let directory = try await viewingProfileStore.dataDirectoryURL(for: profileID)
-        let nextLibraryStore = LibraryStore(
-            fileURL: directory.appendingPathComponent(
-                ViewingProfileDataFile.anonymousLibrary
+        let directory: URL
+        if let suppliedProfileDirectory {
+            directory = suppliedProfileDirectory
+        } else {
+            directory = try await viewingProfileStore.dataDirectoryURL(
+                for: profileID
             )
+        }
+        guard profileActivationOwner.owns(token) else { return nil }
+        try migrateLegacyProfileLibraryScopeIfNeeded(
+            snapshot: snapshot,
+            directory: directory,
+            session: profileSession
         )
-        let nextProgressStore = WatchProgressStore(
-            fileURL: directory.appendingPathComponent(
-                ViewingProfileDataFile.playbackProgress
+        let libraryFileName = snapshot.activeProfileAllowsAccountLibrarySync
+            ? AccountStorageScope.libraryFileName(for: profileSession)
+            : ViewingProfileDataFile.anonymousLibrary
+        let libraryFileURL = directory.appendingPathComponent(
+            libraryFileName
+        )
+        let playbackStateFileURL = directory.appendingPathComponent(
+            ViewingProfileDataFile.playbackState
+        )
+        let ratingFileURL = directory.appendingPathComponent(
+            ViewingProfileDataFile.mediaRatings
+        )
+        let recommendationHistoryFileURL = directory.appendingPathComponent(
+            ViewingProfileDataFile.recommendationHistory
+        )
+        let nextLibraryStore = libraryStoreRegistry.store(for: libraryFileURL) {
+            LibraryStore(fileURL: libraryFileURL)
+        }
+        let nextPlaybackStateStore = playbackStateStoreRegistry.store(
+            for: playbackStateFileURL
+        ) {
+            WatchPlaybackStateStore(
+                fileURL: playbackStateFileURL,
+                legacyProgressFileURL: directory.appendingPathComponent(
+                    ViewingProfileDataFile.playbackProgress
+                ),
+                legacyCompletionFileURL: directory.appendingPathComponent(
+                    ViewingProfileDataFile.playbackCompletions
+                )
             )
-        )
-        let nextCompletionStore = PlaybackCompletionStore(
-            fileURL: directory.appendingPathComponent(
-                ViewingProfileDataFile.playbackCompletions
-            )
-        )
-        let nextRatingStore = MediaRatingStore(
-            fileURL: directory.appendingPathComponent(
-                ViewingProfileDataFile.mediaRatings
-            )
-        )
-        let nextRecommendationStore = RecommendationHistoryStore(
-            fileURL: directory.appendingPathComponent(
-                ViewingProfileDataFile.recommendationHistory
-            )
-        )
+        }
+        let nextRatingStore = ratingStoreRegistry.store(for: ratingFileURL) {
+            MediaRatingStore(fileURL: ratingFileURL)
+        }
+        let nextRecommendationStore = recommendationHistoryStoreRegistry.store(
+            for: recommendationHistoryFileURL
+        ) {
+            RecommendationHistoryStore(fileURL: recommendationHistoryFileURL)
+        }
 
-        libraryStore = nextLibraryStore
-        progressStore = nextProgressStore
-        completionStore = nextCompletionStore
-        ratingStore = nextRatingStore
-        recommendationHistoryStore = nextRecommendationStore
+        let loadedLibrary = try await nextLibraryStore.items()
+        let loadedPlaybackState = try await nextPlaybackStateStore.snapshot()
+        let loadedRatings = try await nextRatingStore.items()
+        let loadedRecommendationHistory = try await nextRecommendationStore.items()
+        let loadedAddonURLs = try storedAddonURLs(
+            profileID: profileID,
+            session: profileSession
+        )
+        guard profileActivationOwner.owns(token) else { return nil }
+
+        return PreparedWatchProfileActivation(
+            token: token,
+            snapshot: snapshot,
+            session: profileSession,
+            libraryStore: nextLibraryStore,
+            playbackStateStore: nextPlaybackStateStore,
+            ratingStore: nextRatingStore,
+            recommendationHistoryStore: nextRecommendationStore,
+            library: loadedLibrary,
+            playbackState: loadedPlaybackState,
+            ratings: loadedRatings,
+            recommendationHistory: loadedRecommendationHistory,
+            addonURLs: loadedAddonURLs
+        )
+    }
+
+    private func publishProfileActivation(
+        _ prepared: PreparedWatchProfileActivation
+    ) {
+        guard profileActivationOwner.owns(prepared.token) else { return }
+        let snapshot = prepared.snapshot
+        let profileID = snapshot.activeProfileID
+
+        libraryStore = prepared.libraryStore
+        playbackStateStore = prepared.playbackStateStore
+        ratingStore = prepared.ratingStore
+        recommendationHistoryStore = prepared.recommendationHistoryStore
         viewingProfileSnapshot = snapshot
-        session = sessionStore.load(profileID: profileID)
-        accountEmail = session?.user.email
-        accountSyncStatus = session == nil ? "Not signed in" : "Ready to sync"
+        session = prepared.session
+        accountEmail = prepared.session?.user.email
+        accountSyncStatus = prepared.session == nil ? "Not signed in" : "Ready to sync"
+        library = prepared.library
+        progress = prepared.playbackState.progress
+        completedPlaybackIdentifiers = Set(
+            prepared.playbackState.completions.map(\.contentIdentifier)
+        )
+        mediaRatings = Dictionary(
+            uniqueKeysWithValues: prepared.ratings.map { ($0.id, $0.reaction) }
+        )
+        recommendationImpressions = prepared.recommendationHistory
+        addonURLs = prepared.addonURLs
+        addons = []
         syncedAddonDescriptors = []
+        searchOwner.begin()
+        homeOwner.begin()
+        addonLoadOwner.begin()
+        searchResults = []
+        isSearching = false
+        isLoadingHome = false
+        catalogSections = []
+        recommendations = []
+        recentSearches = recentSearchStore.queries(profileID: profileID.uuidString)
         loadProfileSettings(profileID: profileID)
-        await loadLocalState()
+    }
+
+    private func withSerializedProfileMutation<Value>(
+        _ operation: () async throws -> Value
+    ) async throws -> Value {
+        await profileMutationGate.enter()
+        do {
+            let value = try await operation()
+            await profileMutationGate.leave()
+            return value
+        } catch {
+            await profileMutationGate.leave()
+            throw error
+        }
+    }
+
+    private func commitPreparedProfileMutation(
+        _ plan: ViewingProfileMutationPlan
+    ) async throws -> Bool {
+        let token = profileActivationOwner.begin()
+        do {
+            guard let prepared = try await prepareProfileActivation(
+                plan.snapshot,
+                profileDirectory: plan.activeProfileDataDirectoryURL,
+                session: sessionStore.load(
+                    profileID: plan.snapshot.activeProfileID
+                ),
+                token: token
+            ), profileActivationOwner.owns(token) else {
+                await viewingProfileStore.cancel(plan)
+                return false
+            }
+            let committed = try await viewingProfileStore.commit(plan)
+            guard committed.snapshot == prepared.snapshot else {
+                throw ViewingProfileStoreError.staleMutationPlan
+            }
+            publishProfileActivation(prepared)
+            return true
+        } catch {
+            await viewingProfileStore.cancel(plan)
+            throw error
+        }
     }
 
     func createViewingProfile(
         name: String,
         avatar: ViewingProfileAvatar
     ) async throws {
-        let previousIDs = Set(viewingProfileSnapshot?.profiles.map(\.id) ?? [])
-        let created = try await viewingProfileStore.create(name: name, avatar: avatar)
-        guard let newID = created.profiles.first(where: {
-            !previousIDs.contains($0.id)
-        })?.id else {
-            viewingProfileSnapshot = created
-            return
+        let activated = try await withSerializedProfileMutation {
+            let plan = try await viewingProfileStore.prepareCreateAndActivate(
+                name: name,
+                avatar: avatar
+            )
+            return try await commitPreparedProfileMutation(plan)
         }
-        try await selectViewingProfile(id: newID)
+        guard activated else { return }
+        await reloadAddons()
+        await loadHome()
+        if session != nil { try? await syncAccount() }
     }
 
     func updateViewingProfile(
@@ -415,45 +574,68 @@ final class WatchAppModel: ObservableObject {
         name: String,
         avatar: ViewingProfileAvatar
     ) async throws {
-        viewingProfileSnapshot = try await viewingProfileStore.update(
-            id: id,
-            name: name,
-            avatar: avatar
-        )
+        try await withSerializedProfileMutation {
+            viewingProfileSnapshot = try await viewingProfileStore.update(
+                id: id,
+                name: name,
+                avatar: avatar
+            )
+        }
     }
 
     func selectViewingProfile(id: UUID) async throws {
-        guard id != viewingProfileSnapshot?.activeProfileID else { return }
-        let snapshot = try await viewingProfileStore.activate(id: id)
-        try await activateProfile(snapshot)
-        searchResults = []
+        let activated = try await withSerializedProfileMutation {
+            guard id != viewingProfileSnapshot?.activeProfileID else {
+                return false
+            }
+            let plan = try await viewingProfileStore.prepareActivation(id: id)
+            return try await commitPreparedProfileMutation(plan)
+        }
+        guard activated else { return }
         await reloadAddons()
         await loadHome()
         if session != nil { try? await syncAccount() }
     }
 
     func archiveViewingProfile(id: UUID) async throws {
-        let previousID = viewingProfileSnapshot?.activeProfileID
-        let snapshot = try await viewingProfileStore.archive(id: id)
-        if snapshot.activeProfileID != previousID {
-            try await activateProfile(snapshot)
+        let changedActiveProfile = try await withSerializedProfileMutation {
+            let previousID = viewingProfileSnapshot?.activeProfileID
+            let plan = try await viewingProfileStore.prepareArchive(id: id)
+            if plan.snapshot.activeProfileID != previousID {
+                return try await commitPreparedProfileMutation(plan)
+            }
+            let committed = try await viewingProfileStore.commit(plan)
+            viewingProfileSnapshot = committed.snapshot
+            return false
+        }
+        if changedActiveProfile {
             await reloadAddons()
             await loadHome()
             if session != nil { try? await syncAccount() }
-        } else {
-            viewingProfileSnapshot = snapshot
         }
     }
 
     func restoreViewingProfile(id: UUID) async throws {
-        viewingProfileSnapshot = try await viewingProfileStore.restore(id: id)
+        try await withSerializedProfileMutation {
+            viewingProfileSnapshot = try await viewingProfileStore.restore(id: id)
+        }
     }
 
     func loadHome() async {
-        guard !addons.isEmpty else { return }
+        let token = homeOwner.begin()
+        let expectedProfileID = viewingProfileSnapshot?.activeProfileID
+        guard !addons.isEmpty else {
+            catalogSections = []
+            recommendations = []
+            return
+        }
         isLoadingHome = true
         statusMessage = nil
-        defer { isLoadingHome = false }
+        defer {
+            if homeOwner.owns(token) {
+                isLoadingHome = false
+            }
+        }
 
         let requests = addons.flatMap { addon in
             addon.manifest.catalogs.compactMap { descriptor -> (
@@ -510,6 +692,9 @@ final class WatchAppModel: ObservableObject {
             }
             return results.sorted { $0.0 < $1.0 }.map(\.1)
         }
+        guard homeOwner.owns(token),
+              expectedProfileID == viewingProfileSnapshot?.activeProfileID
+        else { return }
         catalogSections = loaded
         await refreshRecommendations()
         if loaded.isEmpty {
@@ -534,9 +719,11 @@ final class WatchAppModel: ObservableObject {
     }
 
     func search(_ rawQuery: String, mediaType: String? = nil) async {
+        let token = searchOwner.begin()
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             searchResults = []
+            isSearching = false
             return
         }
         if let profileID = viewingProfileSnapshot?.activeProfileID {
@@ -545,7 +732,11 @@ final class WatchAppModel: ObservableObject {
         }
         isSearching = true
         statusMessage = nil
-        defer { isSearching = false }
+        defer {
+            if searchOwner.owns(token) {
+                isSearching = false
+            }
+        }
 
         let requests = addons.flatMap { addon in
             addon.manifest.catalogs.compactMap { descriptor -> (
@@ -604,6 +795,7 @@ final class WatchAppModel: ObservableObject {
             mediaType: mediaType,
             limit: 20
         ).compactMap { routeByIdentity[MediaIdentity($0)] }
+        guard searchOwner.owns(token) else { return }
         var seen = Set<String>()
         searchResults = (local + groups).filter {
             seen.insert("\($0.item.type)|\($0.item.id)").inserted
@@ -1294,28 +1486,36 @@ final class WatchAppModel: ObservableObject {
     func toggleLibrary(_ item: MetaItem) async {
         do {
             let activeStore = libraryStore
-            let updated = try await activeStore.toggle(item)
-            guard activeStore === libraryStore else { return }
-            library = updated
-
-            if let activeSession = session,
-               viewingProfileSnapshot?.activeProfileAllowsAccountLibrarySync == true {
-                let isRemoved = !updated.contains {
-                    $0.id == item.id && $0.type == item.type
-                }
-                do {
+            let activeProfileID = viewingProfileSnapshot?.activeProfileID
+            let activeSession = session
+            let activeAuthKey = activeSession?.authKey
+            let allowsLibrarySync = viewingProfileSnapshot?
+                .activeProfileAllowsAccountLibrarySync == true
+            let remoteMutation: LibraryMutationCoordinator.RemoteMutation?
+            if let activeSession, allowsLibrarySync {
+                remoteMutation = { [accountClient] removing in
                     try await accountClient.pushLibrary(
                         authKey: activeSession.authKey,
-                        changes: [RemoteLibraryItem(item: item, removed: isRemoved)]
+                        changes: [RemoteLibraryItem(item: item, removed: removing)]
                     )
-                    if session?.authKey == activeSession.authKey {
-                        accountSyncStatus = "Library synced"
-                    }
-                } catch {
-                    if session?.authKey == activeSession.authKey {
-                        accountSyncStatus = "Library saved locally · Sync failed"
-                    }
                 }
+            } else {
+                remoteMutation = nil
+            }
+            let updated = try await libraryMutationCoordinator.toggle(
+                item,
+                store: activeStore,
+                remoteMutation: remoteMutation
+            )
+            guard activeStore === libraryStore,
+                  activeProfileID == viewingProfileSnapshot?.activeProfileID,
+                  activeAuthKey == session?.authKey
+            else { return }
+            library = updated
+            if activeSession != nil, allowsLibrarySync {
+                accountSyncStatus = "Library synced"
+            } else if session != nil {
+                accountSyncStatus = "Local profile · Library stays private"
             }
         } catch {
             statusMessage = error.localizedDescription
@@ -1357,28 +1557,21 @@ final class WatchAppModel: ObservableObject {
             updatedAt: Date()
         )
         do {
-            let activeProgressStore = progressStore
-            let activeCompletionStore = completionStore
-            let updatedProgress = try await activeProgressStore.record(record)
-            if PlaybackProgress.isCompleted(position: position, duration: duration) {
-                let completions = try await activeCompletionStore.markCompleted(
-                    contentIdentifier: contentIdentifier
-                )
-                guard activeProgressStore === progressStore,
-                      activeCompletionStore === completionStore
-                else { return }
-                completedPlaybackIdentifiers = Set(completions.map(\.contentIdentifier))
-            } else if completedPlaybackIdentifiers.contains(contentIdentifier) {
-                let completions = try await activeCompletionStore.markIncomplete(
-                    contentIdentifier: contentIdentifier
-                )
-                guard activeProgressStore === progressStore,
-                      activeCompletionStore === completionStore
-                else { return }
-                completedPlaybackIdentifiers = Set(completions.map(\.contentIdentifier))
-            }
-            guard activeProgressStore === progressStore else { return }
-            progress = updatedProgress
+            let activeStateStore = playbackStateStore
+            let completionTransition = EpisodePlaybackCompletionPolicy.transition(
+                isCompleted: completedPlaybackIdentifiers.contains(contentIdentifier),
+                position: position,
+                duration: duration
+            )
+            let persisted = try await activeStateStore.record(
+                record,
+                completionTransition: completionTransition
+            )
+            guard activeStateStore === playbackStateStore else { return }
+            progress = persisted.progress
+            completedPlaybackIdentifiers = Set(
+                persisted.completions.map(\.contentIdentifier)
+            )
             await refreshRecommendations()
         } catch {
             statusMessage = error.localizedDescription
@@ -1396,8 +1589,14 @@ final class WatchAppModel: ObservableObject {
 
     func removeProgress(_ record: WatchProgressRecord) async {
         do {
-            progress = try await progressStore.remove(
+            let activeStateStore = playbackStateStore
+            let persisted = try await activeStateStore.removeProgress(
                 contentIdentifier: record.contentIdentifier
+            )
+            guard activeStateStore === playbackStateStore else { return }
+            progress = persisted.progress
+            completedPlaybackIdentifiers = Set(
+                persisted.completions.map(\.contentIdentifier)
             )
         } catch {
             statusMessage = error.localizedDescription
@@ -1405,32 +1604,36 @@ final class WatchAppModel: ObservableObject {
     }
 
     func signIn(email: String, password: String) async throws {
-        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanEmail.isEmpty, !password.isEmpty else {
-            throw WatchAccountError.missingCredentials
-        }
-
+        let credentials = try SignInFormCredentials(email: email, password: password)
         let responseSession = try await accountClient.login(
-            email: cleanEmail,
-            password: password
+            email: credentials.email,
+            password: credentials.password
         )
-        let signedIn = responseSession.user.email == nil
-            ? StremioSession(
-                authKey: responseSession.authKey,
-                user: StremioUser(
-                    id: responseSession.user.id,
-                    email: cleanEmail
-                )
-            )
-            : responseSession
-        guard let profileID = viewingProfileSnapshot?.activeProfileID else {
-            throw WatchAccountError.profileUnavailable
+        let signedIn = AccountStorageScope.sessionEnsuringStableIdentity(
+            responseSession,
+            submittedEmail: credentials.email
+        )
+        try await withSerializedProfileMutation {
+            guard let snapshot = viewingProfileSnapshot else {
+                throw WatchAccountError.profileUnavailable
+            }
+            let profileID = snapshot.activeProfileID
+            let token = profileActivationOwner.begin()
+            guard profileActivationOwner.owns(token),
+                  let prepared = try await prepareProfileActivation(
+                    snapshot,
+                    session: signedIn,
+                    token: token
+                  )
+            else { throw CancellationError() }
+
+            try sessionStore.save(signedIn, profileID: profileID)
+            publishProfileActivation(prepared)
+            accountEmail = signedIn.user.email ?? credentials.email
+            addonMutationRevision += 1
         }
-        try sessionStore.save(signedIn, profileID: profileID)
-        session = signedIn
-        accountEmail = signedIn.user.email ?? cleanEmail
-        accountSyncStatus = "Ready to sync"
-        syncedAddonDescriptors = []
+        await reloadAddons()
+        await loadHome()
 
         do {
             try await syncAccount()
@@ -1441,20 +1644,58 @@ final class WatchAppModel: ObservableObject {
     }
 
     func signOut() async {
-        if let profileID = viewingProfileSnapshot?.activeProfileID {
-            sessionStore.clear(profileID: profileID)
+        do {
+            try await withSerializedProfileMutation {
+                guard let snapshot = viewingProfileSnapshot else { return }
+                let profileID = snapshot.activeProfileID
+                let token = profileActivationOwner.begin()
+                guard let prepared = try await prepareProfileActivation(
+                    snapshot,
+                    session: nil,
+                    token: token
+                ) else { throw CancellationError() }
+                try sessionStore.clear(profileID: profileID)
+                publishProfileActivation(prepared)
+                addonMutationRevision += 1
+            }
+        } catch {
+            accountSyncStatus = "Sign out failed"
+            statusMessage = "Bunny could not remove the saved session. Nothing was changed."
+            return
         }
-        session = nil
-        accountEmail = nil
-        syncedAddonDescriptors = []
-        accountSyncStatus = "Not signed in"
+        await reloadAddons()
+        await loadHome()
     }
 
     func syncAccount() async throws {
+        try await withSerializedAccountSync {
+            try await performAccountSync()
+        }
+    }
+
+    private func withSerializedAccountSync<Value>(
+        _ operation: () async throws -> Value
+    ) async throws -> Value {
+        await accountSyncGate.enter()
+        do {
+            let value = try await operation()
+            await accountSyncGate.leave()
+            return value
+        } catch {
+            await accountSyncGate.leave()
+            throw error
+        }
+    }
+
+    private func performAccountSync() async throws {
         guard let activeSession = session else {
             throw WatchAccountError.notSignedIn
         }
         let activeStore = libraryStore
+        guard let activeProfileID = viewingProfileSnapshot?.activeProfileID else {
+            throw WatchAccountError.profileUnavailable
+        }
+        let addonRevision = addonMutationRevision
         isSyncingAccount = true
         accountSyncStatus = "Syncing…"
         defer { isSyncingAccount = false }
@@ -1464,28 +1705,47 @@ final class WatchAppModel: ObservableObject {
                 .activeProfileAllowsAccountLibrarySync == true
             let addonSnapshot: [SyncedAddon]
             if allowsLibrarySync {
-                async let remoteLibrary = accountClient.pullLibrary(
+                async let updatedLibrary = libraryMutationCoordinator.synchronize(
+                    store: activeStore,
+                    remoteSnapshot: { [accountClient] in
+                        try await accountClient.pullLibrary(
+                            authKey: activeSession.authKey
+                        )
+                    }
+                )
+                async let remoteAddons = addonSyncCoordinator.snapshot(
                     authKey: activeSession.authKey
                 )
-                async let remoteAddons = accountClient.pullAddons(
-                    authKey: activeSession.authKey
-                )
-                let snapshots = try await (remoteLibrary, remoteAddons)
+                let snapshots = try await (updatedLibrary, remoteAddons)
                 guard session?.authKey == activeSession.authKey,
-                      activeStore === libraryStore
+                      activeStore === libraryStore,
+                      activeProfileID == viewingProfileSnapshot?.activeProfileID
                 else { return }
-                library = try await activeStore.replaceWithRemoteSnapshot(snapshots.0)
+                library = snapshots.0
                 addonSnapshot = snapshots.1
             } else {
-                addonSnapshot = try await accountClient.pullAddons(
+                addonSnapshot = try await addonSyncCoordinator.snapshot(
                     authKey: activeSession.authKey
                 )
             }
             guard session?.authKey == activeSession.authKey,
-                  activeStore === libraryStore
+                  activeStore === libraryStore,
+                  activeProfileID == viewingProfileSnapshot?.activeProfileID
             else { return }
 
-            await applySyncedAddonSnapshot(addonSnapshot)
+            let appliedAddons = try await withSerializedAddonMutation {
+                guard session?.authKey == activeSession.authKey,
+                      activeStore === libraryStore,
+                      activeProfileID == viewingProfileSnapshot?.activeProfileID,
+                      addonMutationRevision == addonRevision
+                else { return false }
+                return try await applySyncedAddonSnapshot(
+                    addonSnapshot,
+                    expectedProfileID: activeProfileID,
+                    expectedAuthKey: activeSession.authKey
+                )
+            }
+            guard appliedAddons else { return }
             accountSyncStatus = allowsLibrarySync
                 ? "Library & add-ons synced"
                 : "Add-ons synced · Library stays local"
@@ -1540,105 +1800,101 @@ final class WatchAppModel: ObservableObject {
     func installAddon(_ input: String) async throws {
         let endpoint = try AddonEndpoint(manifestInput: input)
         let manifest = try await AddonClient(endpoint: endpoint).manifest()
-        var urls = storedAddonURLs()
-        if !urls.contains(endpoint.manifestURL) {
-            guard urls.count < 13 else {
+        try await withSerializedAddonMutation {
+            let currentURLs = try storedAddonURLs()
+            guard !currentURLs.contains(endpoint.manifestURL) else { return }
+            guard currentURLs.count < 13 else {
                 throw WatchAddonInstallError.limitReached
             }
-            urls.append(endpoint.manifestURL)
-            persistAddonURLs(urls)
-        }
-        if !addons.contains(where: { $0.manifestURL == endpoint.manifestURL }) {
-            addons.append(WatchAddon(manifestURL: endpoint.manifestURL, manifest: manifest))
-        }
-        addonURLs = urls
-        if let activeSession = session {
-            do {
-                var remote = try await accountClient.pullAddons(
-                    authKey: activeSession.authKey
-                )
-                remote.removeAll { $0.transportUrl == endpoint.manifestURL }
-                remote.append(
+            if let activeSession = session {
+                guard let activeProfileID = viewingProfileSnapshot?.activeProfileID else {
+                    throw WatchAccountError.profileUnavailable
+                }
+                addonMutationRevision += 1
+                let remote = try await addonSyncCoordinator.install(
                     SyncedAddon(
                         manifest: manifest,
                         transportUrl: endpoint.manifestURL
+                    ),
+                    authKey: activeSession.authKey
+                )
+                guard session?.authKey == activeSession.authKey,
+                      activeProfileID == viewingProfileSnapshot?.activeProfileID
+                else { return }
+                guard try await applySyncedAddonSnapshot(
+                    remote,
+                    expectedProfileID: activeProfileID,
+                    expectedAuthKey: activeSession.authKey
+                ) else { return }
+                accountSyncStatus = "Add-ons synced"
+            } else {
+                let updatedURLs = currentURLs + [endpoint.manifestURL]
+                try saveAddonURLs(updatedURLs)
+                addonURLs = updatedURLs
+                addons.append(
+                    WatchAddon(
+                        manifestURL: endpoint.manifestURL,
+                        manifest: manifest
                     )
                 )
-                try await accountClient.pushAddons(
-                    authKey: activeSession.authKey,
-                    addons: remote
-                )
-                if session?.authKey == activeSession.authKey {
-                    syncedAddonDescriptors = remote
-                    accountSyncStatus = "Add-ons synced"
-                }
-            } catch {
-                if session?.authKey == activeSession.authKey {
-                    accountSyncStatus = "Add-on installed locally · Sync failed"
-                }
-                await loadHome()
-                throw error
+                addonMutationRevision += 1
             }
         }
         await loadHome()
     }
 
     func removeAddon(_ url: URL) async {
-        guard url != Self.defaultManifestURL else { return }
-        let urls = storedAddonURLs().filter { $0 != url }
-        persistAddonURLs(urls)
-        addonURLs = urls
-        addons.removeAll { $0.manifestURL == url }
-        if let activeSession = session {
-            do {
-                var remote = try await accountClient.pullAddons(
-                    authKey: activeSession.authKey
-                )
-                remote.removeAll { $0.transportUrl == url }
-                try await accountClient.pushAddons(
-                    authKey: activeSession.authKey,
-                    addons: remote
-                )
-                if session?.authKey == activeSession.authKey {
-                    syncedAddonDescriptors = remote
+        do {
+            try await withSerializedAddonMutation {
+                let currentURLs = try storedAddonURLs()
+                guard url != Self.defaultManifestURL,
+                      currentURLs.contains(url)
+                else { return }
+                if let activeSession = session {
+                    guard let activeProfileID = viewingProfileSnapshot?.activeProfileID else {
+                        throw WatchAccountError.profileUnavailable
+                    }
+                    addonMutationRevision += 1
+                    let remote = try await addonSyncCoordinator.remove(
+                        transportURL: url,
+                        authKey: activeSession.authKey
+                    )
+                    guard session?.authKey == activeSession.authKey,
+                          activeProfileID == viewingProfileSnapshot?.activeProfileID
+                    else { return }
+                    guard try await applySyncedAddonSnapshot(
+                        remote,
+                        expectedProfileID: activeProfileID,
+                        expectedAuthKey: activeSession.authKey
+                    ) else { return }
                     accountSyncStatus = "Add-ons synced"
-                }
-            } catch {
-                if session?.authKey == activeSession.authKey {
-                    accountSyncStatus = "Add-on removed locally · Sync failed"
+                } else {
+                    let updatedURLs = currentURLs.filter { $0 != url }
+                    try saveAddonURLs(updatedURLs)
+                    addonURLs = updatedURLs
+                    addons.removeAll { $0.manifestURL == url }
+                    syncedAddonDescriptors.removeAll { $0.transportUrl == url }
+                    addonMutationRevision += 1
                 }
             }
+        } catch {
+            accountSyncStatus = "Add-on removal failed"
+            statusMessage = error.localizedDescription
         }
         await loadHome()
     }
 
-    private func loadLocalState() async {
-        library = []
-        progress = []
-        mediaRatings = [:]
-        recommendationImpressions = []
-        completedPlaybackIdentifiers = []
+    private func withSerializedAddonMutation<Value>(
+        _ operation: () async throws -> Value
+    ) async throws -> Value {
+        await addonMutationGate.enter()
         do {
-            library = try await libraryStore.items()
+            let value = try await operation()
+            await addonMutationGate.leave()
+            return value
         } catch {
-            statusMessage = "Library could not be loaded."
-        }
-        do {
-            progress = try await progressStore.items()
-        } catch {
-            statusMessage = "Playback progress could not be loaded."
-        }
-        if let completions = try? await completionStore.items() {
-            completedPlaybackIdentifiers = Set(completions.map(\.contentIdentifier))
-        }
-        if let ratings = try? await ratingStore.items() {
-            mediaRatings = Dictionary(uniqueKeysWithValues: ratings.map {
-                ($0.id, $0.reaction)
-            })
-        }
-        recommendationImpressions = (try? await recommendationHistoryStore.items()) ?? []
-        if let profileID = viewingProfileSnapshot?.activeProfileID {
-            recentSearches = recentSearchStore.queries(profileID: profileID.uuidString)
+            await addonMutationGate.leave()
+            throw error
         }
     }
 
@@ -1694,7 +1950,18 @@ final class WatchAppModel: ObservableObject {
     }
 
     private func reloadAddons() async {
-        let urls = storedAddonURLs()
+        let token = addonLoadOwner.begin()
+        guard let expectedProfileID = viewingProfileSnapshot?.activeProfileID else {
+            return
+        }
+        let expectedAuthKey = session?.authKey
+        let urls: [URL]
+        do {
+            urls = try storedAddonURLs()
+        } catch {
+            statusMessage = "Add-on settings could not be loaded securely."
+            return
+        }
         addonURLs = urls
         let loaded = await withTaskGroup(of: (Int, WatchAddon?).self) { group in
             for (index, url) in urls.enumerated() {
@@ -1714,6 +1981,10 @@ final class WatchAppModel: ObservableObject {
             }
             return results.sorted { $0.0 < $1.0 }.map(\.1)
         }
+        guard addonLoadOwner.owns(token),
+              expectedProfileID == viewingProfileSnapshot?.activeProfileID,
+              expectedAuthKey == session?.authKey
+        else { return }
         addons = loaded
         if loaded.isEmpty {
             statusMessage = "Add-ons are unavailable. Check your watch connection."
@@ -1721,8 +1992,10 @@ final class WatchAppModel: ObservableObject {
     }
 
     private func applySyncedAddonSnapshot(
-        _ snapshot: [SyncedAddon]
-    ) async {
+        _ snapshot: [SyncedAddon],
+        expectedProfileID: UUID,
+        expectedAuthKey: String
+    ) async throws -> Bool {
         var seen = Set<URL>()
         let valid = snapshot.filter { descriptor in
             guard (try? AddonEndpoint(
@@ -1730,8 +2003,6 @@ final class WatchAppModel: ObservableObject {
             )) != nil else { return false }
             return seen.insert(descriptor.transportUrl).inserted
         }
-        syncedAddonDescriptors = valid
-
         let defaultDescriptor = valid.first {
             $0.transportUrl == Self.defaultManifestURL
         }
@@ -1768,20 +2039,52 @@ final class WatchAppModel: ObservableObject {
             WatchAddon(manifestURL: $0.transportUrl, manifest: $0.manifest)
         })
 
+        // Durable storage is the commit point. Publishing first could suppress
+        // an identical retry when secure persistence fails.
+        guard viewingProfileSnapshot?.activeProfileID == expectedProfileID,
+              session?.authKey == expectedAuthKey
+        else { return false }
+        guard let activeSession = session else { return false }
+        try saveAddonURLs(
+            visibleURLs,
+            scope: AccountStorageScope.storageScope(
+                profileID: expectedProfileID,
+                session: activeSession
+            )
+        )
+        syncedAddonDescriptors = valid
         addonURLs = visibleURLs
         addons = nextAddons
-        persistAddonURLs(visibleURLs)
+        return true
     }
 
-    private func storedAddonURLs() -> [URL] {
-        var stored = addonURLStore.load(scope: activeStorageScope) ?? []
-        if session == nil,
+    private func storedAddonURLs() throws -> [URL] {
+        guard let profileID = viewingProfileSnapshot?.activeProfileID else {
+            return [Self.defaultManifestURL]
+        }
+        return try storedAddonURLs(profileID: profileID, session: session)
+    }
+
+    private func storedAddonURLs(
+        profileID: UUID,
+        session scopedSession: StremioSession?
+    ) throws -> [URL] {
+        let scope = AccountStorageScope.storageScope(
+            profileID: profileID,
+            session: scopedSession
+        )
+        try migrateLegacyProfileAddonScopeIfNeeded(
+            profileID: profileID,
+            destinationScope: scope
+        )
+        var stored = try addonURLStore.load(scope: scope) ?? []
+        if scopedSession == nil,
            stored.isEmpty,
            let legacy = defaults.stringArray(
             forKey: Self.legacyAnonymousAddonDefaultsKey
            ) {
             stored = legacy.compactMap(URL.init(string:))
-            try? addonURLStore.save(stored, scope: activeStorageScope)
+            try addonURLStore.save(stored, scope: scope)
             defaults.removeObject(forKey: Self.legacyAnonymousAddonDefaultsKey)
         }
         var seen = Set<URL>()
@@ -1790,26 +2093,77 @@ final class WatchAppModel: ObservableObject {
         return Array(urls.prefix(13))
     }
 
-    private func persistAddonURLs(_ urls: [URL]) {
-        do {
-            try addonURLStore.save(
-                urls.filter { $0 != Self.defaultManifestURL },
-                scope: activeStorageScope
-            )
-        } catch {
-            statusMessage = "Add-on settings could not be saved securely."
-        }
+    private func saveAddonURLs(_ urls: [URL]) throws {
+        try saveAddonURLs(urls, scope: activeStorageScope)
+    }
+
+    private func saveAddonURLs(_ urls: [URL], scope: String) throws {
+        try addonURLStore.save(
+            urls.filter { $0 != Self.defaultManifestURL },
+            scope: scope
+        )
     }
 
     private var activeStorageScope: String {
         guard let profileID = viewingProfileSnapshot?.activeProfileID else {
             return "profile-unavailable"
         }
-        return Self.profileStorageScope(profileID)
+        return AccountStorageScope.storageScope(
+            profileID: profileID,
+            session: session
+        )
     }
 
     private static func profileStorageScope(_ profileID: UUID) -> String {
         "profile-\(profileID.uuidString.lowercased())"
+    }
+
+    private func migrateLegacyProfileLibraryScopeIfNeeded(
+        snapshot: ViewingProfileSnapshot,
+        directory: URL,
+        session scopedSession: StremioSession?
+    ) throws {
+        let profileID = snapshot.activeProfileID
+        let marker = "\(Self.libraryScopeMigrationDefaultsKey).\(profileID.uuidString.lowercased())"
+        guard !defaults.bool(forKey: marker) else { return }
+        guard snapshot.activeProfileAllowsAccountLibrarySync,
+              let scopedSession
+        else {
+            defaults.set(true, forKey: marker)
+            return
+        }
+
+        let legacyURL = directory.appendingPathComponent(
+            ViewingProfileDataFile.anonymousLibrary
+        )
+        guard FileManager.default.fileExists(atPath: legacyURL.path) else {
+            defaults.set(true, forKey: marker)
+            return
+        }
+        let legacyData = try Data(contentsOf: legacyURL)
+        let accountURL = directory.appendingPathComponent(
+            AccountStorageScope.libraryFileName(for: scopedSession)
+        )
+        if !FileManager.default.fileExists(atPath: accountURL.path) {
+            try legacyData.write(to: accountURL, options: .atomic)
+        }
+        try JSONEncoder().encode([MetaItem]()).write(to: legacyURL, options: .atomic)
+        defaults.set(true, forKey: marker)
+    }
+
+    private func migrateLegacyProfileAddonScopeIfNeeded(
+        profileID: UUID,
+        destinationScope: String
+    ) throws {
+        let marker = "\(Self.addonScopeMigrationDefaultsKey).\(profileID.uuidString.lowercased())"
+        guard !defaults.bool(forKey: marker) else { return }
+        if try addonURLStore.load(scope: destinationScope) == nil,
+           let legacy = try addonURLStore.load(
+            scope: Self.profileStorageScope(profileID)
+           ) {
+            try addonURLStore.save(legacy, scope: destinationScope)
+        }
+        defaults.set(true, forKey: marker)
     }
 
     private func loadProfileSettings(profileID: UUID) {
@@ -1931,14 +2285,11 @@ enum WatchAddonInstallError: LocalizedError {
 }
 
 enum WatchAccountError: LocalizedError {
-    case missingCredentials
     case notSignedIn
     case profileUnavailable
 
     var errorDescription: String? {
         switch self {
-        case .missingCredentials:
-            "Enter both your Stremio email and password."
         case .notSignedIn:
             "Sign in to a Stremio account before syncing."
         case .profileUnavailable:

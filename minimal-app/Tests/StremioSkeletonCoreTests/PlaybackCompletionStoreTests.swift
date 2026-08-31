@@ -3,6 +3,42 @@ import XCTest
 @testable import StremioSkeletonCore
 
 final class PlaybackCompletionStoreTests: XCTestCase {
+    func testCorruptCompletionsArePreservedAndStoreRemainsWritable() async throws {
+        let url = temporaryStoreURL()
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let corrupt = Data("not playback completion json".utf8)
+        try corrupt.write(to: url)
+
+        let store = PlaybackCompletionStore(fileURL: url)
+        let recoveredEmptyItems = try await store.items()
+        XCTAssertEqual(recoveredEmptyItems, [])
+
+        let recoveryFiles = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("playback-completions.corrupt-") }
+        XCTAssertEqual(recoveryFiles.count, 1)
+        XCTAssertEqual(try Data(contentsOf: recoveryFiles[0]), corrupt)
+
+        let identifier = "series:recovered:episode:one"
+        let recoveredItems = try await store.markCompleted(
+            contentIdentifier: identifier
+        )
+        XCTAssertEqual(
+            recoveredItems.map(\.contentIdentifier),
+            [identifier]
+        )
+        let reloadedItems = try await PlaybackCompletionStore(fileURL: url).items()
+        XCTAssertEqual(
+            reloadedItems.map(\.contentIdentifier),
+            [identifier]
+        )
+    }
+
     func testEpisodeIdentitySeparatesEpisodesWithinTheSameSeries() {
         let first = EpisodePlaybackIdentity.contentIdentifier(
             seriesID: "tt-series",

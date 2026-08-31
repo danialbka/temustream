@@ -15,6 +15,22 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testGeometryErrorReporterRunsOffMainWithoutCrashing() throws {
+        let app = launchApp(
+            environment: [
+                "SKELETON_GEOMETRY_ERROR_REPORTER_FIXTURE": "1",
+            ]
+        )
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)[
+                "geometry-error-reporter-background-complete"
+            ].waitForExistence(timeout: 10),
+            "The exact UIKit error reporter must return on a non-main worker"
+        )
+        XCTAssertEqual(app.state, .runningForeground)
+    }
+
     func testPinchChangesViewportWithoutRevealingControls() throws {
         let app = launchApp(
             environment: [
@@ -188,6 +204,47 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
         attachScreenshot(named: "mobile-interrupted-range-seek-recovered")
     }
 
+    func testSeekThenCloseWhileLandscapeKeepsAppAlive() throws {
+        XCUIDevice.shared.orientation = .landscapeRight
+        let app = launchApp(
+            environment: [
+                "SKELETON_PLAYER_FIXTURE_URL":
+                    "\(fixtureBaseURL)/sample-content.mp4",
+                "SKELETON_PLAYER_FIXTURE_MANUAL_START": "1",
+                "SKELETON_PLAYER_FIXTURE_PREPARE_DELAY_SECONDS": "5",
+                "SKELETON_PLAYER_FIXTURE_LANDSCAPE": "1",
+                "SKELETON_PLAYER_CONTROLS_LOCKED": "1",
+                "SKELETON_PLAYER_DEBUG_OVERLAY": "1",
+            ]
+        )
+        startFixturePlayback(in: app)
+
+        XCTAssertTrue(waitForDebugState("Playing", in: app, timeout: 20))
+        XCTAssertTrue(
+            waitForLandscape(app: app, timeout: 8),
+            "The dismissal must exercise the landscape-to-portrait geometry request"
+        )
+        let forward = app.buttons["Forward 15 seconds"]
+        let close = app.buttons["player-close"]
+        XCTAssertTrue(forward.waitForExistence(timeout: 5))
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+
+        // The range fixture keeps the post-seek read in flight. Dismissing at
+        // this point exercises decoder cancellation and the asynchronous
+        // landscape-to-portrait geometry callback together.
+        forward.tap()
+        close.tap()
+
+        XCTAssertTrue(
+            app.buttons["start-player-fixture"].waitForExistence(timeout: 8),
+            "Closing during an active seek should return to the fixture launcher"
+        )
+        RunLoop.current.run(until: Date().addingTimeInterval(2))
+        XCTAssertEqual(app.state, .runningForeground)
+        XCTAssertFalse(app.otherElements["player-error"].exists)
+        attachScreenshot(named: "mobile-seek-then-close-app-alive")
+    }
+
     func testBackFifteenFromResumedPlaybackDoesNotJumpToStart() throws {
         let fixtureDuration: CGFloat = 1_201
         let expectedPosition: CGFloat = 585 / fixtureDuration
@@ -196,11 +253,13 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
                 "SKELETON_PLAYER_FIXTURE_URL":
                     "\(fixtureBaseURL)/sample-content.mp4",
                 "SKELETON_PLAYER_FIXTURE_INITIAL_POSITION": "600",
-                "SKELETON_PLAYER_FIXTURE_PREPARE_DELAY_SECONDS": "15",
+                "SKELETON_PLAYER_FIXTURE_MANUAL_START": "1",
+                "SKELETON_PLAYER_FIXTURE_WAIT_FOR_INITIAL_SEEK": "1",
                 "SKELETON_PLAYER_CONTROLS_LOCKED": "1",
                 "SKELETON_PLAYER_DEBUG_OVERLAY": "1",
             ]
         )
+        startFixturePlayback(in: app)
 
         XCTAssertTrue(
             app.descendants(matching: .any)["player-startup-status"]
@@ -211,10 +270,6 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: 5))
         back.tap()
 
-        XCTAssertTrue(
-            waitForDebugState("Playing", in: app, timeout: 25),
-            "Resumed playback should settle after the relative seek"
-        )
         let timeline = app.descendants(matching: .any)["player-timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: 5))
         XCTAssertTrue(
@@ -226,9 +281,51 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
             ),
             "Back 15 from 10:00 should settle near 9:45, not the beginning; value=\(String(describing: timeline.value))"
         )
+        XCTAssertEqual(app.state, .runningForeground)
         XCTAssertFalse(app.descendants(matching: .any)["bunny-player-toast"].exists)
         XCTAssertFalse(app.otherElements["player-error"].exists)
         attachScreenshot(named: "mobile-resume-back-fifteen-continues-at-nine-forty-five")
+    }
+
+    func testExpiredProviderURLIsResolvedAgainBeforeSourceFailover() throws {
+        _ = try Data(
+            contentsOf: XCTUnwrap(
+                URL(string: "\(fixtureBaseURL)/provider-refresh/reset")
+            )
+        )
+        let app = launchApp(
+            environment: [
+                "SKELETON_PROVIDER_REFRESH_FIXTURE_URL":
+                    "\(fixtureBaseURL)/provider-refresh/request",
+                "SKELETON_PLAYER_CONTROLS_LOCKED": "1",
+                "SKELETON_PLAYER_DEBUG_OVERLAY": "1",
+            ]
+        )
+
+        XCTAssertTrue(
+            waitForDebugState("Playing", in: app, timeout: 45),
+            "Playback must renew the durable provider request after the first CDN URL expires"
+        )
+        XCTAssertFalse(app.otherElements["player-resolution-error"].exists)
+        XCTAssertFalse(app.otherElements["player-error"].exists)
+
+        let statusData = try Data(
+            contentsOf: XCTUnwrap(
+                URL(string: "\(fixtureBaseURL)/provider-refresh/status")
+            )
+        )
+        let status = try JSONDecoder().decode(ProviderRefreshStatus.self, from: statusData)
+        XCTAssertGreaterThanOrEqual(
+            status.resolutions,
+            2,
+            "The durable request URL must be resolved again instead of replaying the stale CDN URL"
+        )
+        XCTAssertGreaterThanOrEqual(
+            status.expiredRequests,
+            2,
+            "The fixture must prove the first resolved URL worked for probing and then expired"
+        )
+        attachScreenshot(named: "mobile-provider-url-refreshed-after-expiry")
     }
 
     func testDebugOverlayReportsDecodedDynamicRange() throws {
@@ -596,4 +693,9 @@ final class StremioSkeletonPlayerUITests: XCTestCase {
         add(attachment)
     }
 
+}
+
+private struct ProviderRefreshStatus: Decodable {
+    let resolutions: Int
+    let expiredRequests: Int
 }

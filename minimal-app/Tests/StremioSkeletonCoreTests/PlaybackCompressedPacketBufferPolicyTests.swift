@@ -118,4 +118,97 @@ final class PlaybackCompressedPacketBufferPolicyTests: XCTestCase {
             limits: limits
         ))
     }
+
+    func testHealthyFutureSubtitleIsRetainedWhileReservoirHasHeadroom() {
+        let limits = PlaybackCompressedPacketBufferLimits(
+            maximumBytes: 1_024,
+            maximumDuration: 10,
+            maximumPacketCount: 10
+        )
+
+        XCTAssertEqual(
+            PlaybackCompressedPacketBufferPolicy
+                .blockingFutureSubtitleEvictionIndices(
+                    packets: [
+                        PlaybackCompressedPacketFootprint(
+                            byteCount: 20,
+                            timelineStart: 60,
+                            timelineEnd: 60,
+                            isSubtitle: true
+                        ),
+                    ],
+                    subtitleReadyThrough: 12,
+                    limits: limits
+                ),
+            []
+        )
+    }
+
+    func testFarthestFutureSubtitleIsEvictedOnlyWhenItsSpanBlocksRefill() {
+        let limits = PlaybackCompressedPacketBufferLimits(
+            maximumBytes: 1_024,
+            maximumDuration: 10,
+            maximumPacketCount: 10
+        )
+
+        XCTAssertEqual(
+            PlaybackCompressedPacketBufferPolicy
+                .blockingFutureSubtitleEvictionIndices(
+                    packets: [
+                        PlaybackCompressedPacketFootprint(
+                            byteCount: 20,
+                            timelineStart: 60,
+                            timelineEnd: 60,
+                            isSubtitle: true
+                        ),
+                        PlaybackCompressedPacketFootprint(
+                            byteCount: 20,
+                            timelineStart: 70,
+                            timelineEnd: 70,
+                            isSubtitle: true
+                        ),
+                    ],
+                    subtitleReadyThrough: 12,
+                    limits: limits
+                ),
+            [1]
+        )
+    }
+
+    func testFutureSubtitlesArePreservedWhenAudioVideoRemainIndependentlyFull() {
+        let limits = PlaybackCompressedPacketBufferLimits(
+            maximumBytes: 1_024,
+            maximumDuration: 10,
+            maximumPacketCount: 10
+        )
+
+        XCTAssertEqual(
+            PlaybackCompressedPacketBufferPolicy
+                .blockingFutureSubtitleEvictionIndices(
+                    packets: [
+                        PlaybackCompressedPacketFootprint(
+                            byteCount: 100,
+                            timelineStart: 0,
+                            timelineEnd: 0,
+                            isSubtitle: false
+                        ),
+                        PlaybackCompressedPacketFootprint(
+                            byteCount: 100,
+                            timelineStart: 10,
+                            timelineEnd: 10,
+                            isSubtitle: false
+                        ),
+                        PlaybackCompressedPacketFootprint(
+                            byteCount: 20,
+                            timelineStart: 70,
+                            timelineEnd: 70,
+                            isSubtitle: true
+                        ),
+                    ],
+                    subtitleReadyThrough: 12,
+                    limits: limits
+                ),
+            []
+        )
+    }
 }

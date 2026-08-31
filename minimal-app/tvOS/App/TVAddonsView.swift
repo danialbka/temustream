@@ -51,14 +51,15 @@ struct TVAddonsView: View {
               "\(model.installedAddons.count) manifest\(model.installedAddons.count == 1 ? "" : "s")"
           )
 
-          ForEach(Array(model.installedAddons.enumerated()), id: \.element) { index, url in
+          ForEach(Array(model.installedAddons.enumerated()), id: \.element) { _, url in
+            let isPrimary = isPrimaryAddon(url)
             HStack(spacing: 20) {
-              Image(systemName: index == 0 ? "sparkles.tv.fill" : "shippingbox.fill")
+              Image(systemName: isPrimary ? "sparkles.tv.fill" : "shippingbox.fill")
                 .font(.title)
                 .foregroundStyle(TVTheme.accent)
                 .frame(width: 54)
               VStack(alignment: .leading, spacing: 5) {
-                Text(index == 0 ? "Primary catalog" : (url.host ?? "Add-on"))
+                Text(isPrimary ? "Primary catalog" : (url.host ?? "Add-on"))
                   .font(.title3.weight(.semibold))
                 Text(url.absoluteString)
                   .font(.callout.monospaced())
@@ -66,7 +67,7 @@ struct TVAddonsView: View {
                   .lineLimit(1)
               }
               Spacer()
-              if index > 0 {
+              if !isPrimary {
                 Button(role: .destructive) {
                   model.removeAddon(url)
                 } label: {
@@ -111,5 +112,18 @@ struct TVAddonsView: View {
     } catch {
       errorMessage = error.localizedDescription
     }
+  }
+
+  private var primaryManifestIdentity: AddonManifestIdentity? {
+    guard let primaryURL = model.catalogSources.first(where: { $0.id == "cinemeta" })?.manifestURL
+    else { return nil }
+    return AddonManifestIdentity(manifestURL: primaryURL)
+  }
+
+  private func isPrimaryAddon(_ url: URL) -> Bool {
+    guard let primaryManifestIdentity,
+      let identity = AddonManifestIdentity(manifestURL: url)
+    else { return false }
+    return identity == primaryManifestIdentity
   }
 }
