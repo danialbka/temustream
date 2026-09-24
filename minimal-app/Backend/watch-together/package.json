@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "convex": "1.45.0",
-    "livekit-server-sdk": "2.18.0"
+    "livekit-server-sdk": "2.19.1"
   },
   "devDependencies": {
     "@types/node": "24.3.0",
