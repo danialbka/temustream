@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "convex": "1.45.0",
+    "convex": "1.47.0",
     "livekit-server-sdk": "2.18.0"
   },
   "devDependencies": {
